@@ -1,5 +1,5 @@
 /* =====================================================================
-   JLR TRACKER - office mailbox -> tracker (runs every minute in Google Apps Script)   v3 (Nov 2026)
+   JLR TRACKER - office mailbox -> tracker (runs every minute in Google Apps Script)   v4 (Nov 2026)
    A. Client mail: sends attachments from client emails to the tracker. The tracker decides who is
       a client; mail from anyone else is only labelled "JLR/Not a client" and nothing is stored.
       To retry such a mail (after saving that email on the client), remove the label in Gmail.
@@ -10,22 +10,26 @@
    C. Data reminders: sends the "please send your documents" emails that the tracker prepares
       (Settings -> Automatic data chasing) from this mailbox. Client replies with files come back
       here and are picked up by A.
+   D. Senior verification & filing mails (v4): sends the tracker's emails WITH attachments (GST workings to the
+      senior, acknowledgement + workings to the client, daily status reminders) and reads the senior's replies
+      to "[JLR-REVIEW:…]" emails ("Approved" on the first line approves; anything else goes back as remarks).
 
    Setup (once, signed in to the office Gmail):
    1. script.google.com -> open "JLR mail intake" (or New project) -> replace the code with this file -> Save
    2. Project Settings (gear) -> Script properties:
         INTAKE_KEY = <key from Tracker: Settings -> Client mail>
         NOTICE_KEY = <key from Tracker: Settings -> Notice watch -> Make key>
+        MAILJOB_KEY = <key from Tracker: Settings -> Senior verification & filing mails -> Make the key>
    3. Run "setup" once and allow the Gmail + send-email permissions it asks for.
    ===================================================================== */
 var SUPABASE = 'https://bakvbqtbhdumvlioenyw.supabase.co';
-var ANON = 'sb_publishable_yZoUFE9Yus1HFiFpQRpxng_ngnlu-It';   // public key (same as the website)
+var ANON = 'sb_publishable_X4i44aDTHxOrFIEzEZMpIg_kEfLfIOI';   // public key (same as the website)
 var FUNCTION_URL = SUPABASE + '/functions/v1/mail-intake';
 var LOOK_BACK = 'newer_than:2d';                  // first run also catches the last 2 days
 var MAX_BYTES = 20 * 1024 * 1024;                 // larger files are skipped (Gmail limit is 25 MB)
 var NOTICE_QUERY = '(from:gst.gov.in OR from:gstn.org.in OR from:incometax.gov.in OR from:insight.gov.in OR from:tdscpc.gov.in OR from:mca.gov.in' +
                    ' OR subject:notice OR "show cause" OR "notice u/s" OR "DRC-01" OR "ASMT-10") -in:sent -in:drafts -in:trash -in:spam newer_than:3d';
-var SITE = 'https://jlr-compliance.github.io/jlr-tracker/';
+var SITE = 'https://jlr-compliance.github.io/';
 
 function setup() {
   ScriptApp.getProjectTriggers().forEach(function (t) { ScriptApp.deleteTrigger(t); });
@@ -40,6 +44,8 @@ function everyMinute() {
     if (props.getProperty('INTAKE_KEY')) { try { checkMail_(); } catch (e) { console.error('Client mail: ' + e); } }
     if (props.getProperty('NOTICE_KEY')) { try { noticeWatch_(); } catch (e) { console.error('Notice watch: ' + e); } }
     if (props.getProperty('NOTICE_KEY')) { try { chaseMail_(); } catch (e) { console.error('Data reminders: ' + e); } }
+    if (props.getProperty('MAILJOB_KEY')) { try { mailJobs_(); } catch (e) { console.error('Tracker mails: ' + e); } }
+    if (props.getProperty('MAILJOB_KEY')) { try { reviewReplies_(); } catch (e) { console.error('Senior replies: ' + e); } }
   } finally { lock.releaseLock(); }
 }
 function checkMail() { everyMinute(); }                  // old trigger name still works
@@ -163,3 +169,49 @@ function chaseMail_() {
 }
 
 function label_(name) { return GmailApp.getUserLabelByName(name) || GmailApp.createLabel(name); }
+
+/* ---------------- D. senior verification & filing mails (v4) ---------------- */
+function mailJobs_() {
+  var key = PropertiesService.getScriptProperties().getProperty('MAILJOB_KEY');
+  var list = rpc_('mail_jobs_due', { p_key: key }) || [];
+  list.forEach(function (m) {
+    var ok = true, err = null;
+    try {
+      if (MailApp.getRemainingDailyQuota() < 1) throw new Error('Gmail daily sending limit reached — will send tomorrow');
+      var files = (m.files || []).map(function (f) { return Utilities.newBlob(Utilities.base64Decode(f.b64), f.mime || 'application/octet-stream', f.name || 'file'); });
+      var opt = { name: 'JLR Compliance', attachments: files };
+      if (m.html) opt.htmlBody = m.html;
+      if (m.cc) opt.cc = m.cc;
+      GmailApp.sendEmail(m.to, m.subject, m.body, opt);
+    } catch (e) { ok = false; err = String(e).slice(0, 300); if (/limit/i.test(err)) return; }
+    rpc_('mail_job_done', { p_key: key, p_id: m.id, p_ok: ok, p_error: err });
+  });
+}
+
+// replies to "[JLR-REVIEW:TAG]" emails: the tracker checks that they come from the senior
+function reviewReplies_() {
+  var props = PropertiesService.getScriptProperties(), key = props.getProperty('MAILJOB_KEY');
+  var done = JSON.parse(props.getProperty('REVIEW_SEEN') || '[]');
+  GmailApp.search('subject:"JLR-REVIEW" -in:sent -in:drafts -in:trash -in:spam newer_than:12d', 0, 30).forEach(function (th) {
+    th.getMessages().forEach(function (m) {
+      var id = m.getId(); if (done.indexOf(id) >= 0) return;
+      var tag = (m.getSubject().match(/\[JLR-REVIEW:([A-Z0-9x]+)\]/i) || [])[1];
+      var from = m.getFrom(), me = Session.getEffectiveUser().getEmail().toLowerCase();
+      if (!tag || from.toLowerCase().indexOf(me) >= 0) { done.push(id); return; }   // our own sent copy
+      var text = replyText_(m.getPlainBody());
+      try { var r = rpc_('review_reply', { p_key: key, p_tag: tag, p_from: from, p_text: text }); console.log('Review ' + tag + ': ' + r); done.push(id); }
+      catch (e) { console.error('Review reply ' + tag + ': ' + e); }
+    });
+  });
+  props.setProperty('REVIEW_SEEN', JSON.stringify(done.slice(-300)));
+}
+// only what the senior typed: stop at the quoted earlier mail
+function replyText_(t) {
+  var lines = String(t || '').replace(/\r/g, '').split('\n'), out = [];
+  for (var i = 0; i < lines.length; i++) {
+    var l = lines[i];
+    if (/^\s*>/.test(l) || /^On .+wrote:\s*$/i.test(l) || /^-{2,}\s*Original Message/i.test(l) || /^From:\s/i.test(l) || /^Sent from my /i.test(l)) break;
+    out.push(l);
+  }
+  return out.join('\n').trim().slice(0, 2000);
+}
