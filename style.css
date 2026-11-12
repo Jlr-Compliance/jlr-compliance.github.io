@@ -1326,7 +1326,7 @@ textarea.dr-body{font-family:inherit;line-height:1.5}
 /* ===== Settings v2: checklist + sections (Nov 2026) ===== */
 .set-head{display:flex;justify-content:space-between;align-items:flex-end;gap:12px;flex-wrap:wrap}
 .set-kicker{display:block;font-size:12px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:var(--brand)}
-.set-search{display:flex;align-items:center;gap:8px;background:var(--surface);border:1px solid var(--line);border-radius:999px;padding:8px 14px;color:var(--muted)}
+.set-search{display:flex;flex-direction:row;align-items:center;gap:8px;background:var(--surface);border:1px solid var(--line);border-radius:999px;padding:8px 14px;color:var(--muted)}
 .set-search input{border:0;outline:0;background:transparent;font:inherit;color:var(--ink);width:200px;padding:2px 0}
 .set-check{display:flex;flex-direction:column;gap:12px;margin-bottom:16px}
 .set-check-head{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap}

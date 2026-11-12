@@ -1808,6 +1808,7 @@ const SET_SECTIONS = [
   { id: 'gst', label: 'GST automation', words: 'gst sandbox auto status filed arn automatic work' },
   { id: 'clients', label: 'Clients & reminders', words: 'status board link notices module data chasing data request reminder' },
   { id: 'ai', label: 'AI help', words: 'ai claude key bills assistant' },
+  { id: 'backup', label: 'Backup', words: 'backup onedrive microsoft download excel restore copy' },
   { id: 'advanced', label: 'Advanced', words: 'sample demo data advanced' }
 ];
 const setLink = id => '#/settings?s=' + id;
@@ -1831,7 +1832,8 @@ async function setupStatus() {
     mailbox: running ? 'ok' : anyKey ? 'half' : 'todo',
     whatsapp: w.enabled ? 'ok' : w.phone_number_id ? 'half' : 'todo',
     gst: g.keys_saved && g.enabled ? 'ok' : g.keys_saved ? 'half' : 'todo',
-    ai: a.key_set ? 'ok' : 'todo'
+    ai: a.key_set ? 'ok' : 'todo',
+    backup: settings.backup_last_ok && settings.backup_last_at && (Date.now() - new Date(settings.backup_last_at)) < 2 * 864e5 ? 'ok' : settings.backup_key_hash ? 'half' : 'todo'
   };
   st.team = st.staff === 'ok' && st.senior === 'ok' ? 'ok' : st.staff === 'ok' || st.senior === 'ok' ? 'half' : 'todo';
   return { st, n, m };
@@ -1861,7 +1863,7 @@ VIEWS.settings = async v => {
 
   setupStatus().then(({ st }) => {
     const items = [['office', 'office', 'Office name & invoice details'], ['staff', 'team', 'Add staff logins'], ['senior', 'team', 'Pick the senior who verifies GST'],
-      ['mailbox', 'mailbox', 'Connect the office mailbox'], ['whatsapp', 'whatsapp', 'WhatsApp reminders'], ['gst', 'gst', 'GST auto-status (Sandbox key)'], ['ai', 'ai', 'AI key (optional)']];
+      ['mailbox', 'mailbox', 'Connect the office mailbox'], ['whatsapp', 'whatsapp', 'WhatsApp reminders'], ['gst', 'gst', 'GST auto-status (Sandbox key)'], ['backup', 'backup', 'Daily backup to OneDrive'], ['ai', 'ai', 'AI key (optional)']];
     const done = items.filter(i => st[i[0]] === 'ok').length;
     $('#setCount').innerHTML = `<b>${done} of ${items.length}</b> done · click an item to set it up`;
     $('#setBar').style.width = Math.round(done / items.length * 100) + '%';
@@ -1871,7 +1873,7 @@ VIEWS.settings = async v => {
 
   const main = $('#setMain');
   main.innerHTML = `<div class="set-title"><h2>${esc(sec.label)}</h2></div>`;
-  await ({ office: setOffice, team: setTeam, mailbox: setMailbox, whatsapp: b => renderWhatsApp(setBox(b)), gst: setGstSec, clients: setClients, ai: b => renderAiSettings(setBox(b)), advanced: b => renderDemoSettings(setBox(b)) }[cur])(main);
+  await ({ office: setOffice, team: setTeam, mailbox: setMailbox, whatsapp: b => renderWhatsApp(setBox(b)), gst: setGstSec, clients: setClients, ai: b => renderAiSettings(setBox(b)), backup: setBackup, advanced: b => renderDemoSettings(setBox(b)) }[cur])(main);
 };
 
 /* Office & billing */
@@ -1921,6 +1923,55 @@ async function setClients(main) {
   $('#noticesOn', c).onchange = async e => { try { await setSave({ notices_off: !e.target.checked }); $('#nav').innerHTML = navGroups(); } catch (err) { toast(friendly(err), true); e.target.checked = !e.target.checked; } };
   renderChaseSettings(setBox(main));
   await renderDataRequestSettings(setBox(main));
+}
+
+/* Backup — nightly copy inside the tracker + daily copy to OneDrive */
+async function setBackup(main) {
+  const r = await safe(sb.from('settings').select('backup_key_hash,backup_key_set_at,backup_last_at,backup_last_ok,backup_last_note').eq('id', 1).maybeSingle());
+  if (r.error) { setBox(main, '<div class="card"><h3>Daily backup to OneDrive</h3><p class="note small">Run <b>update-backup-onedrive.sql</b> in Supabase first.</p></div>'); renderBackups(setBox(main)); return; }
+  const b = r.data || {}; Object.assign(settings, b);
+  const fresh = b.backup_last_at && (Date.now() - new Date(b.backup_last_at)) < 2 * 864e5;
+  const cls = b.backup_last_at ? (b.backup_last_ok && fresh ? 'ok' : 'bad') : b.backup_key_hash ? 'half' : 'todo';
+  const line = b.backup_last_at ? `${b.backup_last_ok ? 'Last backup' : 'Last try failed'} ${setWhen(b.backup_last_at)}${b.backup_last_note ? ' · ' + esc(b.backup_last_note) : ''}` : b.backup_key_hash ? 'Key made · waiting for the first backup (about 1 AM)' : 'Not set up';
+  const box = setBox(main, `<p class="muted set-lead">Every night about 1 AM the office mailbox script copies <b>all tracker data</b> to OneDrive as one zip (an Excel-ready CSV for each table + a full JSON copy), and copies each <b>new client file and acknowledgement</b> once. Folder: <b>JLR Tracker Backups</b>.</p>
+    <div class="set-lights"><div class="set-light ${cls}"><b>OneDrive backup</b><span class="small">${line}</span></div></div>
+    <div class="card set-step"><div class="set-step-h"><span class="set-num">1</span><h3>Make the backup key</h3></div>
+      <div id="bkKey"></div><div class="toolbar"><button class="btn primary" id="bkMake">${b.backup_key_hash ? 'Make a new key' : 'Make the backup key'}</button></div></div>
+    <div class="card set-step"><div class="set-step-h"><span class="set-num">2</span><h3>Register a Microsoft app (once, 5 minutes)</h3></div>
+      <ol class="small steps">
+        <li>Open <a href="https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade" target="_blank" rel="noopener">Microsoft Entra → App registrations</a>, signed in with the Microsoft account that owns the OneDrive → <b>New registration</b>.</li>
+        <li>Name <b>JLR Tracker Backup</b> · Supported account types: <b>Accounts in any organizational directory and personal Microsoft accounts</b> · no redirect URI → <b>Register</b>. Copy the <b>Application (client) ID</b>.</li>
+        <li><b>Authentication</b> → Advanced settings → <b>Allow public client flows: Yes</b> → Save.</li>
+        <li><b>API permissions</b> → Add → Microsoft Graph → Delegated → <b>Files.ReadWrite</b> and <b>offline_access</b> → Add.</li></ol></div>
+    <div class="card set-step"><div class="set-step-h"><span class="set-num">3</span><h3>Connect the script to OneDrive</h3></div>
+      <ol class="small steps">
+        <li>In Apps Script (<b>JLR mail intake</b>) paste the latest script (button below) → Save. Script properties → add <b>BACKUP_KEY</b> = the key from step 1 and <b>MS_CLIENT_ID</b> = the Application (client) ID.</li>
+        <li>Run <b>connectOneDrive</b>. The log shows a link and a code — open the link, enter the code, sign in, Accept.</li>
+        <li>Run <b>finishOneDrive</b> (log says “OneDrive connected”), then run <b>setup</b> once (adds the 1 AM job), then <b>dailyBackup</b> once to test.</li></ol>
+      <div class="toolbar"><button class="btn sm" id="bkScript">Show the script</button><button class="btn sm" id="bkRe">Check again</button></div></div>
+    <p class="muted small">Restore: open the day's zip — each table is a CSV that opens in Excel; all-data.json is the full copy for a restore.</p>`);
+  $('#bkMake', box).onclick = async e => {
+    if (b.backup_key_hash && !confirm('Make a new key? The backup stops until you paste the new key into the script as BACKUP_KEY.')) return;
+    e.target.disabled = true;
+    try {
+      const key = 'jlrb_' + [...crypto.getRandomValues(new Uint8Array(24))].map(x => x.toString(16).padStart(2, '0')).join('');
+      const hash = [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(key)))].map(x => x.toString(16).padStart(2, '0')).join('');
+      await must(sb.rpc('set_backup_key', { p_hash: hash })); settings.backup_key_hash = hash;
+      $('#bkKey', box).innerHTML = `<p class="small"><b>Copy it now</b> — shown only this once.</p><div class="set-keys"><div class="set-key"><code class="set-kname">BACKUP_KEY</code><input readonly value="${esc(key)}" aria-label="BACKUP_KEY"><button class="btn sm" id="bkCp">Copy</button></div></div>`;
+      $('#bkCp', box).onclick = () => copySecret(key, 'BACKUP_KEY copied');
+      e.target.textContent = 'Make a new key';
+    } catch (err) { toast(friendly(err), true); }
+    e.target.disabled = false;
+  };
+  $('#bkRe', box).onclick = () => route();
+  $('#bkScript', box).onclick = async () => {
+    let code = '';
+    try { const rr = await fetch('mail-intake-apps-script.gs', { cache: 'no-store' }); code = rr.ok ? await rr.text() : ''; } catch (err) {}
+    const m = modal('Office mailbox script', code ? `<p class="small" style="margin-top:0">Replace all the code in <b>JLR mail intake</b> with this, then Save. Your script properties stay.</p><textarea readonly rows="16" class="code">${esc(code)}</textarea>` : '<p class="note warn small">Script file not found on the site.</p>',
+      { wide: true, extra: code ? '<button class="btn" id="bkCpS">Copy script</button>' : '' });
+    if (code) $('#bkCpS', m.el).onclick = () => copySecret(code, 'Script copied');
+  };
+  renderBackups(setBox(main));
 }
 
 /* Mailbox & emails — one 3-step setup */

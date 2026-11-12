@@ -1,5 +1,5 @@
 /* =====================================================================
-   JLR TRACKER - office mailbox -> tracker (runs every minute in Google Apps Script)   v4 (Nov 2026)
+   JLR TRACKER - office mailbox -> tracker (runs every minute in Google Apps Script)   v4.1 (Nov 2026)
    A. Client mail: sends attachments from client emails to the tracker. The tracker decides who is
       a client; mail from anyone else is only labelled "JLR/Not a client" and nothing is stored.
       To retry such a mail (after saving that email on the client), remove the label in Gmail.
@@ -13,6 +13,11 @@
    D. Senior verification & filing mails (v4): sends the tracker's emails WITH attachments (GST workings to the
       senior, acknowledgement + workings to the client, daily status reminders) and reads the senior's replies
       to "[JLR-REVIEW:…]" emails ("Approved" on the first line approves; anything else goes back as remarks).
+
+   E. Daily backup to OneDrive (v4.1): every night about 1 AM all tracker data goes to OneDrive as one zip
+      (Excel-ready CSV per table + all-data.json), and new client files / acknowledgements are copied once.
+      Extra properties: BACKUP_KEY (Tracker: Settings -> Backup), MS_CLIENT_ID (your Microsoft app).
+      Run connectOneDrive once, open the link it prints, enter the code, sign in; then run finishOneDrive.
 
    Setup (once, signed in to the office Gmail):
    1. script.google.com -> open "JLR mail intake" (or New project) -> replace the code with this file -> Save
@@ -34,6 +39,7 @@ var SITE = 'https://jlr-compliance.github.io/';
 function setup() {
   ScriptApp.getProjectTriggers().forEach(function (t) { ScriptApp.deleteTrigger(t); });
   ScriptApp.newTrigger('everyMinute').timeBased().everyMinutes(1).create();
+  ScriptApp.newTrigger('dailyBackup').timeBased().everyDays(1).atHour(1).inTimezone('Asia/Kolkata').create();
   everyMinute();
 }
 
@@ -215,3 +221,99 @@ function replyText_(t) {
   }
   return out.join('\n').trim().slice(0, 2000);
 }
+
+/* ---------------- E. daily backup to OneDrive (v4.1) ---------------- */
+var BACKUP_URL = SUPABASE + '/functions/v1/backup-export';
+var OD_FOLDER = 'JLR Tracker Backups';
+var MS_AUTH = 'https://login.microsoftonline.com/common/oauth2/v2.0/';
+var MS_SCOPE = 'Files.ReadWrite offline_access User.Read';
+
+function connectOneDrive() {                       // step 1: run, then follow the message in the log
+  var id = PropertiesService.getScriptProperties().getProperty('MS_CLIENT_ID');
+  if (!id) throw new Error('Add the script property MS_CLIENT_ID first (Application (client) ID of your Microsoft app).');
+  var r = JSON.parse(UrlFetchApp.fetch(MS_AUTH + 'devicecode', { method: 'post', payload: { client_id: id, scope: MS_SCOPE }, muteHttpExceptions: true }).getContentText());
+  if (!r.device_code) throw new Error('Microsoft said: ' + (r.error_description || JSON.stringify(r)));
+  PropertiesService.getScriptProperties().setProperty('MS_DEVICE', r.device_code);
+  console.log('Open ' + r.verification_uri + ' and enter the code  ' + r.user_code + '  — sign in with the Microsoft account that owns the OneDrive, then run finishOneDrive.');
+}
+function finishOneDrive() {                        // step 2: after signing in
+  var props = PropertiesService.getScriptProperties();
+  var r = JSON.parse(UrlFetchApp.fetch(MS_AUTH + 'token', { method: 'post', muteHttpExceptions: true, payload: {
+    grant_type: 'urn:ietf:params:oauth:grant-type:device_code', client_id: props.getProperty('MS_CLIENT_ID'), device_code: props.getProperty('MS_DEVICE') } }).getContentText());
+  if (!r.refresh_token) throw new Error('Not connected yet: ' + (r.error_description || r.error || JSON.stringify(r)));
+  props.setProperty('MS_REFRESH', r.refresh_token); props.deleteProperty('MS_DEVICE');
+  CacheService.getScriptCache().put('MS_ACCESS', r.access_token, 3000);
+  var me = JSON.parse(UrlFetchApp.fetch('https://graph.microsoft.com/v1.0/me', { headers: { Authorization: 'Bearer ' + r.access_token }, muteHttpExceptions: true }).getContentText());
+  console.log('OneDrive connected: ' + (me.userPrincipalName || me.displayName || 'ok') + '. Now run dailyBackup once to test.');
+}
+function msToken_() {
+  var c = CacheService.getScriptCache().get('MS_ACCESS'); if (c) return c;
+  var props = PropertiesService.getScriptProperties();
+  var r = JSON.parse(UrlFetchApp.fetch(MS_AUTH + 'token', { method: 'post', muteHttpExceptions: true, payload: {
+    grant_type: 'refresh_token', client_id: props.getProperty('MS_CLIENT_ID'), refresh_token: props.getProperty('MS_REFRESH'), scope: MS_SCOPE } }).getContentText());
+  if (!r.access_token) throw new Error('OneDrive sign-in expired — run connectOneDrive again (' + (r.error_description || r.error) + ')');
+  if (r.refresh_token) props.setProperty('MS_REFRESH', r.refresh_token);
+  CacheService.getScriptCache().put('MS_ACCESS', r.access_token, 3000);
+  return r.access_token;
+}
+function odPath_(p) { return p.split('/').map(function (x) { return encodeURIComponent(x.replace(/[:*?"<>|#%]/g, '_')); }).join('/'); }
+function odPut_(path, blob) {
+  var tok = msToken_(), bytes = blob.getBytes(), url = 'https://graph.microsoft.com/v1.0/me/drive/root:/' + odPath_(path);
+  if (bytes.length < 4 * 1024 * 1024) {
+    var r = UrlFetchApp.fetch(url + ':/content', { method: 'put', contentType: 'application/octet-stream', payload: bytes, headers: { Authorization: 'Bearer ' + tok }, muteHttpExceptions: true });
+    if (r.getResponseCode() >= 300) throw new Error('OneDrive ' + r.getResponseCode() + ' ' + r.getContentText().slice(0, 200));
+    return;
+  }
+  var s = JSON.parse(UrlFetchApp.fetch(url + ':/createUploadSession', { method: 'post', contentType: 'application/json', payload: JSON.stringify({ item: { '@microsoft.graph.conflictBehavior': 'replace' } }),
+    headers: { Authorization: 'Bearer ' + tok }, muteHttpExceptions: true }).getContentText());
+  if (!s.uploadUrl) throw new Error('OneDrive upload session failed');
+  var CH = 327680 * 12;
+  for (var i = 0; i < bytes.length; i += CH) {
+    var part = bytes.slice(i, Math.min(i + CH, bytes.length));
+    var r2 = UrlFetchApp.fetch(s.uploadUrl, { method: 'put', payload: part, muteHttpExceptions: true,
+      headers: { 'Content-Range': 'bytes ' + i + '-' + (i + part.length - 1) + '/' + bytes.length } });
+    if (r2.getResponseCode() >= 300) throw new Error('OneDrive chunk ' + r2.getResponseCode());
+  }
+}
+function backupCall_(body) {
+  var r = UrlFetchApp.fetch(BACKUP_URL, { method: 'post', contentType: 'application/json', payload: JSON.stringify(body), muteHttpExceptions: true,
+    headers: { apikey: ANON, Authorization: 'Bearer ' + ANON, 'x-backup-key': PropertiesService.getScriptProperties().getProperty('BACKUP_KEY') } });
+  if (r.getResponseCode() >= 300) throw new Error('backup ' + r.getResponseCode() + ' ' + r.getContentText().slice(0, 200));
+  return JSON.parse(r.getContentText());
+}
+function csv_(rows) {
+  if (!rows.length) return '';
+  var cols = []; rows.forEach(function (r) { Object.keys(r).forEach(function (k) { if (cols.indexOf(k) < 0) cols.push(k); }); });
+  var cell = function (v) { if (v === null || v === undefined) return ''; if (typeof v === 'object') v = JSON.stringify(v); v = String(v); return /[",\n\r]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; };
+  return '﻿' + [cols.join(',')].concat(rows.map(function (r) { return cols.map(function (c) { return cell(r[c]); }).join(','); })).join('\r\n');
+}
+function dailyBackup() {
+  var props = PropertiesService.getScriptProperties();
+  if (!props.getProperty('BACKUP_KEY') || !props.getProperty('MS_REFRESH')) return;
+  var day = Utilities.formatDate(new Date(), 'Asia/Kolkata', 'yyyy-MM-dd'), note = [], ok = true, upto = props.getProperty('BACKUP_FILES_UPTO') || null;
+  try {
+    var d = backupCall_({ action: 'data' }), blobs = [], total = 0;
+    Object.keys(d.tables).forEach(function (t) { var rows = d.tables[t] || []; total += rows.length; if (rows.length) blobs.push(Utilities.newBlob(csv_(rows), 'text/csv', t + '.csv')); });
+    blobs.push(Utilities.newBlob(JSON.stringify(d), 'application/json', 'all-data.json'));
+    odPut_(OD_FOLDER + '/JLR-backup-' + day + '.zip', Utilities.zip(blobs, 'JLR-backup-' + day + '.zip'));
+    note.push(total + ' records');
+  } catch (e) { ok = false; note.push('Data: ' + String(e).slice(0, 150)); }
+  try {
+    var n = 0, start = Date.now();
+    while (Date.now() - start < 240000) {
+      var f = backupCall_({ action: 'files', since: upto }).files || [];
+      if (!f.length) break;
+      f.forEach(function (x) {
+        if (Date.now() - start > 240000) return;
+        if (x.url) odPut_(OD_FOLDER + '/files/' + x.bucket + '/' + x.name, UrlFetchApp.fetch(x.url).getBlob());
+        upto = x.created_at; n++;
+      });
+      props.setProperty('BACKUP_FILES_UPTO', upto);
+    }
+    note.push(n + ' new files');
+  } catch (e) { ok = false; note.push('Files: ' + String(e).slice(0, 150)); }
+  try { backupCall_({ action: 'report', ok: ok, note: note.join(' · '), files_upto: upto }); } catch (e) { console.error(e); }
+  if (!ok) throw new Error(note.join(' · '));
+  console.log('Backup done: ' + note.join(' · '));
+}
+
