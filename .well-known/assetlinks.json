@@ -1,0 +1,12 @@
+/ [
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "in.jlrcas.tracker",
+      "sha256_cert_fingerprints": [
+        "F9:66:59:CF:22:CD:59:77:D3:B8:BB:FF:1C:3B:B6:15:60:35:21:CF:F4:43:52:E3:F5:5E:8D:40:5F:2E:8A:13"
+      ]
+    }
+  }
+]
