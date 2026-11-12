@@ -1986,6 +1986,7 @@ const SET_SECTIONS = [
   { id: 'team', label: 'Staff & senior', words: 'team staff users login role senior verify whatsapp number' },
   { id: 'mailbox', label: 'Mailbox & emails', words: 'mail gmail mailbox script key intake notice watch senior approval signature greeting acknowledgement' },
   { id: 'whatsapp', label: 'WhatsApp', words: 'whatsapp meta template reminder token phone' },
+  { id: 'arattai', label: 'Arattai reminders', words: 'arattai ifttt chat team group reminder daily work' },
   { id: 'gst', label: 'GST automation', words: 'gst sandbox auto status filed arn automatic work' },
   { id: 'clients', label: 'Clients & reminders', words: 'status board link notices module data chasing data request reminder' },
   { id: 'ai', label: 'AI help', words: 'ai claude key bills assistant' },
@@ -2054,7 +2055,7 @@ VIEWS.settings = async v => {
 
   const main = $('#setMain');
   main.innerHTML = `<div class="set-title"><h2>${esc(sec.label)}</h2></div>`;
-  await ({ office: setOffice, team: setTeam, mailbox: setMailbox, whatsapp: b => renderWhatsApp(setBox(b)), gst: setGstSec, clients: setClients, ai: b => renderAiSettings(setBox(b)), backup: setBackup, advanced: b => renderDemoSettings(setBox(b)) }[cur])(main);
+  await ({ office: setOffice, team: setTeam, mailbox: setMailbox, whatsapp: b => renderWhatsApp(setBox(b)), arattai: setArattai, gst: setGstSec, clients: setClients, ai: b => renderAiSettings(setBox(b)), backup: setBackup, advanced: b => renderDemoSettings(setBox(b)) }[cur])(main);
 };
 
 /* Office & billing */
@@ -2154,6 +2155,51 @@ async function setBackup(main) {
     if (code) $('#bkCpS', m.el).onclick = () => copySecret(code, 'Script copied');
   };
   renderBackups(setBox(main));
+}
+
+/* Arattai daily work reminders (through IFTTT webhooks) */
+async function setArattai(main) {
+  const r = await safe(sb.rpc('arattai_admin_status'));
+  if (r.error) { setBox(main, '<div class="card"><h3>Arattai reminders</h3><p class="note small">Run <b>update-arattai.sql</b> in Supabase first.</p></div>'); return; }
+  const s = r.data || {}, people = s.people || [];
+  const cls = !s.key_saved ? 'todo' : s.enabled ? 'ok' : 'half';
+  const box = setBox(main, `<p class="muted set-lead">Every morning at <b>9:30 AM</b> (Mon–Sat) the tracker posts the day's work to Arattai through <b>IFTTT</b>: <b>A</b> one list for the whole team in a group, and/or <b>B</b> each person's own list in their private group. Arattai cannot receive personal messages from other apps yet, so each person's list goes to a small group with just them (and you).</p>
+    <div class="set-lights"><div class="set-light ${cls}"><b>Arattai reminders</b><span class="small">${!s.key_saved ? 'IFTTT key not saved' : s.enabled ? 'On' : 'Switched off'}${s.last_run_at ? ' · last sent ' + setWhen(s.last_run_at) + (s.last_note ? ' · ' + esc(s.last_note) : '') : ''}</span></div></div>
+    <div class="card set-step"><div class="set-step-h"><span class="set-num">1</span><h3>IFTTT key</h3></div>
+      <ol class="small steps"><li>Sign in at <a href="https://ifttt.com" target="_blank" rel="noopener">ifttt.com</a> with the office account and connect <b>Arattai</b> and <b>Webhooks</b>.</li>
+        <li>Open <a href="https://ifttt.com/maker_webhooks/settings" target="_blank" rel="noopener">Webhooks → Settings</a>; the key is the last part of the URL shown there.</li></ol>
+      <div class="toolbar"><input type="password" id="arKey" placeholder="${s.key_saved ? 'Key saved (hidden) — paste a new one to replace' : 'Paste the IFTTT webhooks key'}" autocomplete="off" style="flex:1;max-width:420px" aria-label="IFTTT key"><button class="btn primary" id="arKeySave">Save key</button></div></div>
+    <div class="card set-step"><div class="set-step-h"><span class="set-num">2</span><h3>Make the IFTTT applets</h3></div>
+      <p class="small">For each applet: <b>Create</b> → If This: <b>Webhooks → Receive a web request</b> (event name below) → Then That: <b>Arattai → Post a message</b> → choose the group → Message: <code>{{Value1}}</code> → Finish.</p>
+      <div class="form-grid g2">
+        <label class="check"><input type="checkbox" id="arTeamOn" ${s.team_on ? 'checked' : ''}> <b>A — Team group</b> (everyone's work, by name)</label>
+        <label>Team event name<input id="arTeamEv" value="${esc(s.team_event || 'jlr_team')}"></label>
+        <label class="check full"><input type="checkbox" id="arPerOn" ${s.personal_on ? 'checked' : ''}> <b>B — Private group per person</b> (fill an event name for each person, e.g. <code>jlr_ravi</code>; one applet each)</label></div>
+      <div class="table-wrap"><table><thead><tr><th>Person</th><th>Role</th><th>IFTTT event name (B)</th><th></th></tr></thead><tbody>
+        ${people.map(p => `<tr><td>${esc(p.name)}</td><td>${esc(ROLE_LABEL[p.role] || p.role)}</td><td><input data-ev="${p.id}" value="${esc(p.event || '')}" placeholder="jlr_${esc((p.name || '').toLowerCase().split(/[ @]/)[0].replace(/[^a-z0-9]/g, ''))}" aria-label="Event name for ${esc(p.name)}"></td>
+          <td><button class="btn sm" data-test="${p.id}">Test</button></td></tr>`).join('')}
+      </tbody></table></div>
+      <p class="muted small">A free IFTTT plan allows only a few applets; option B for many people may need IFTTT Pro.</p></div>
+    <div class="card set-step"><div class="set-step-h"><span class="set-num">3</span><h3>Switch on</h3></div>
+      <label class="check"><input type="checkbox" id="arOn" ${s.enabled ? 'checked' : ''}> Send the daily work list at 9:30 AM, Monday–Saturday</label>
+      <div class="toolbar" style="margin-top:10px"><button class="btn primary" id="arSave">Save</button><button class="btn" data-test="team">Test team group</button><button class="btn" id="arNow">Send today's lists now</button></div></div>`);
+  const collect = () => ({ enabled: $('#arOn', box).checked, team_on: $('#arTeamOn', box).checked, personal_on: $('#arPerOn', box).checked, team_event: $('#arTeamEv', box).value,
+    people: $$('[data-ev]', box).map(i => ({ id: i.dataset.ev, event: i.value })) });
+  $('#arKeySave', box).onclick = async () => {
+    const k = $('#arKey', box).value.trim(); if (!k) return toast('Paste the IFTTT key first', true);
+    try { await must(sb.rpc('arattai_admin_set_key', { p_key: k })); $('#arKey', box).value = ''; toast('IFTTT key saved (hidden)'); route(); } catch (e) { toast(friendly(e), true); }
+  };
+  $('#arSave', box).onclick = async () => { try { await must(sb.rpc('arattai_admin_save', { p: collect() })); toast('Saved'); route(); } catch (e) { toast(friendly(e), true); } };
+  $('#arNow', box).onclick = async e => {
+    if (!confirm("Send today's work lists to Arattai now?")) return;
+    e.target.disabled = true;
+    try { await must(sb.rpc('arattai_admin_save', { p: collect() })); const { data } = await must(sb.rpc('arattai_send_now')); toast(`${data || 0} message(s) sent`); route(); } catch (err) { toast(friendly(err), true); e.target.disabled = false; }
+  };
+  $$('[data-test]', box).forEach(b => b.onclick = async () => {
+    b.disabled = true;
+    try { await must(sb.rpc('arattai_admin_save', { p: collect() })); const { data } = await must(sb.rpc('arattai_admin_test', { p_target: b.dataset.test })); toast(data || 'Sent'); } catch (e) { toast(friendly(e), true); }
+    b.disabled = false;
+  });
 }
 
 /* Mailbox & emails — one 3-step setup */
