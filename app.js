@@ -1799,87 +1799,214 @@ VIEWS.team = async v => {
   };
 };
 
-/* ---------- SETTINGS (admin) ---------- */
+/* ---------- SETTINGS (admin) — sections + setup checklist (v2, Nov 2026) ---------- */
+const SET_SECTIONS = [
+  { id: 'office', label: 'Office & billing', words: 'office name invoice gstin pan address bank upi sac prefix zoho billing' },
+  { id: 'team', label: 'Staff & senior', words: 'team staff users login role senior verify whatsapp number' },
+  { id: 'mailbox', label: 'Mailbox & emails', words: 'mail gmail mailbox script key intake notice watch senior approval signature greeting acknowledgement' },
+  { id: 'whatsapp', label: 'WhatsApp', words: 'whatsapp meta template reminder token phone' },
+  { id: 'gst', label: 'GST automation', words: 'gst sandbox auto status filed arn automatic work' },
+  { id: 'clients', label: 'Clients & reminders', words: 'status board link notices module data chasing data request reminder' },
+  { id: 'ai', label: 'AI help', words: 'ai claude key bills assistant' },
+  { id: 'advanced', label: 'Advanced', words: 'sample demo data advanced' }
+];
+const setLink = id => '#/settings?s=' + id;
+const setWhen = t => t ? new Date(t).toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' }) : '—';
+const setSave = async patch => { await must(sb.from('settings').update(patch).eq('id', 1)); Object.assign(settings, patch); toast('Saved'); };
+const setBox = (parent, html) => { const d = document.createElement('div'); if (html) d.innerHTML = html; parent.appendChild(d); return d; };
+
+/* status of every setup step, shared by the checklist and the section dots */
+async function setupStatus() {
+  const [wa, nw, ml, gs, ai] = await Promise.all([
+    safe(sb.from('wa_settings').select('enabled,phone_number_id').eq('id', 1).maybeSingle()), safe(sb.rpc('notice_status')),
+    safe(sb.rpc('mail_admin_status')), safe(sb.rpc('gst_admin_status')), safe(sb.rpc('ai_admin_status'))]);
+  const n = nw.data || {}, m = ml.data || {}, g = gs.data || {}, a = ai.data || {}, w = wa.data || {};
+  const staff = profiles.filter(p => p.active !== false && p.id !== me.id).length;
+  const anyKey = !!(m.key_set || n.connected || settings.mailjob_key_hash);
+  const running = !!(n.last_check_at || settings.mailjob_seen_at);
+  const st = {
+    office: settings.firm_address && settings.firm_gstin ? 'ok' : 'todo',
+    staff: staff ? 'ok' : 'todo',
+    senior: settings.senior_id ? 'ok' : 'todo',
+    mailbox: running ? 'ok' : anyKey ? 'half' : 'todo',
+    whatsapp: w.enabled ? 'ok' : w.phone_number_id ? 'half' : 'todo',
+    gst: g.keys_saved && g.enabled ? 'ok' : g.keys_saved ? 'half' : 'todo',
+    ai: a.key_set ? 'ok' : 'todo'
+  };
+  st.team = st.staff === 'ok' && st.senior === 'ok' ? 'ok' : st.staff === 'ok' || st.senior === 'ok' ? 'half' : 'todo';
+  return { st, n, m };
+}
+
 VIEWS.settings = async v => {
   await loadRefs();
-  v.innerHTML = `<div class="page-head"><h2>Settings</h2></div>
-    <div class="card"><h3>Office name</h3><div class="toolbar"><input id="firm" value="${esc(settings.firm_name || '')}" style="flex:1;max-width:420px"><button class="btn primary" id="saveFirm">Save</button></div>
-      <p class="muted small">Shown in the app header and on the status pages.</p></div>
-    <div class="card"><h3>Common status board</h3>
+  const q = new URLSearchParams((location.hash.split('?')[1] || ''));
+  const cur = SET_SECTIONS.some(s => s.id === q.get('s')) ? q.get('s') : 'office';
+  const sec = SET_SECTIONS.find(s => s.id === cur);
+  v.innerHTML = `<div class="page-head set-head"><div><span class="set-kicker">Admin</span><h2>Settings</h2></div>
+      <label class="set-search"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="M21 21l-4.3-4.3"></path></svg>
+        <input type="search" id="setFind" placeholder="Find a setting…" aria-label="Find a setting" autocomplete="off"></label></div>
+    <div class="card set-check" id="setCheck"><div class="set-check-head"><h3>Setup checklist</h3><span class="muted small" id="setCount">Checking…</span></div>
+      <div class="set-bar"><div id="setBar" style="width:0%"></div></div><div class="set-items" id="setItems"></div></div>
+    <div class="set-layout">
+      <nav class="set-nav" aria-label="Settings sections">${SET_SECTIONS.map(s => `<a href="${setLink(s.id)}" data-sec="${s.id}" class="${s.id === cur ? 'on' : ''}" ${s.id === cur ? 'aria-current="page"' : ''}>${esc(s.label)}<span class="set-dot" data-dot="${s.id}"></span></a>`).join('')}</nav>
+      <label class="set-pick">Section<select id="setPick">${SET_SECTIONS.map(s => `<option value="${s.id}" ${s.id === cur ? 'selected' : ''}>${esc(s.label)}</option>`).join('')}</select></label>
+      <section class="set-main" id="setMain" aria-label="${esc(sec.label)}"></section>
+    </div>`;
+  $('#setPick').onchange = e => { location.hash = setLink(e.target.value); };
+  $('#setFind').oninput = e => {
+    const t = e.target.value.trim().toLowerCase();
+    $$('.set-nav a').forEach(a => { const s = SET_SECTIONS.find(x => x.id === a.dataset.sec); a.classList.toggle('dim', !!t && !(s.label.toLowerCase().includes(t) || s.words.includes(t))); });
+  };
+  $('#setFind').onkeydown = e => { if (e.key !== 'Enter') return; const a = $$('.set-nav a').find(x => !x.classList.contains('dim')); if (a) location.hash = a.getAttribute('href'); };
+
+  setupStatus().then(({ st }) => {
+    const items = [['office', 'office', 'Office name & invoice details'], ['staff', 'team', 'Add staff logins'], ['senior', 'team', 'Pick the senior who verifies GST'],
+      ['mailbox', 'mailbox', 'Connect the office mailbox'], ['whatsapp', 'whatsapp', 'WhatsApp reminders'], ['gst', 'gst', 'GST auto-status (Sandbox key)'], ['ai', 'ai', 'AI key (optional)']];
+    const done = items.filter(i => st[i[0]] === 'ok').length;
+    $('#setCount').innerHTML = `<b>${done} of ${items.length}</b> done · click an item to set it up`;
+    $('#setBar').style.width = Math.round(done / items.length * 100) + '%';
+    $('#setItems').innerHTML = items.map(([k, s, label]) => `<a class="set-item ${st[k]}" href="${setLink(s)}"><span class="set-ic" aria-hidden="true">${st[k] === 'ok' ? '✓' : st[k] === 'half' ? '◐' : '○'}</span>${esc(label)}</a>`).join('');
+    SET_SECTIONS.forEach(s => { const d = $(`[data-dot="${s.id}"]`); if (d && st[s.id]) d.className = 'set-dot ' + st[s.id]; });
+  }).catch(() => { $('#setCount').textContent = ''; });
+
+  const main = $('#setMain');
+  main.innerHTML = `<div class="set-title"><h2>${esc(sec.label)}</h2></div>`;
+  await ({ office: setOffice, team: setTeam, mailbox: setMailbox, whatsapp: b => renderWhatsApp(setBox(b)), gst: setGstSec, clients: setClients, ai: b => renderAiSettings(setBox(b)), advanced: b => renderDemoSettings(setBox(b)) }[cur])(main);
+};
+
+/* Office & billing */
+async function setOffice(main) {
+  setBox(main, `<div class="card"><h3>Office name</h3><div class="toolbar"><input id="firm" value="${esc(settings.firm_name || '')}" style="flex:1;max-width:420px" aria-label="Office name"><button class="btn primary" id="saveFirm">Save</button></div>
+    <p class="muted small">Shown in the app header and on the status pages.</p></div>`);
+  $('#saveFirm').onclick = async () => { try { await setSave({ firm_name: $('#firm').value.trim() || 'Our Office' }); $('.brand').textContent = settings.firm_name; } catch (e) { toast(friendly(e), true); } };
+  main.insertAdjacentHTML('beforeend', invoiceSettingsCard());
+  bindInvoiceSettings(main);
+  if (P4()) renderZohoSettings(setBox(main));
+}
+
+/* Staff & senior */
+async function setTeam(main) {
+  const sen = setBox(main, `<div class="card"><h3>Senior who verifies GST workings</h3>
+    <div class="form-grid g2"><label>Senior<select id="revSenior"><option value="">— choose —</option>${profiles.filter(p => p.active !== false && ['manager', 'partner', 'admin'].includes(p.role)).map(p => `<option value="${p.id}" ${settings.senior_id === p.id ? 'selected' : ''}>${esc(p.full_name || p.email)} · ${esc(p.email || '')}</option>`).join('')}</select></label></div>
+    <p class="muted small">Gets the “for verification” emails with the GST workings and approves them. Only Managers, Partners and the Admin can be chosen.</p></div>`);
+  $('#revSenior', sen).onchange = async e => { try { await setSave({ senior_id: e.target.value || null }); } catch (err) { toast(friendly(err), true); } };
+  const tb = setBox(main);
+  await VIEWS.team(tb);
+  const h = $('.page-head h2', tb); if (h) h.textContent = 'Staff logins';
+}
+
+/* GST automation */
+async function setGstSec(main) {
+  renderGst(setBox(main));
+  await renderAutoWorkSettings(setBox(main));
+}
+
+/* Clients & reminders */
+async function setClients(main) {
+  const c = setBox(main, `<div class="card"><h3>Common status board</h3>
       <p class="muted">One link anyone can open to see the status of all clients' work due in the last 45 / next 45 days (client name, return, period, due date, status — no ARN, remarks or contact details).</p>
       <label class="check"><input type="checkbox" id="boardOn" ${settings.board_enabled ? 'checked' : ''}> Board link is switched on</label><br>
-      <div class="linkbox"><input readonly value="${esc(boardUrl(settings.board_token))}"><button class="btn sm" id="cpBoard">Copy</button>
+      <div class="linkbox"><input readonly value="${esc(boardUrl(settings.board_token))}" aria-label="Board link"><button class="btn sm" id="cpBoard">Copy</button>
         <a class="btn sm ghost" href="${esc(boardUrl(settings.board_token))}" target="_blank" rel="noopener">Open</a><button class="btn sm" id="regenBoard">New link</button></div>
       <p class="note warn small" style="margin-top:12px">Anyone with this link can see all your client names. For clients, prefer each client's own private link (Clients page → Copy link).</p></div>
-    <div class="card" id="revCard"><h3>Senior verification &amp; filing mails</h3>
-      <div class="form-grid g2"><label>Senior who verifies GST workings<select id="revSenior"><option value="">— choose —</option>${profiles.filter(p => p.active !== false && ['manager', 'partner', 'admin'].includes(p.role)).map(p => `<option value="${p.id}" ${settings.senior_id === p.id ? 'selected' : ''}>${esc(p.full_name || p.email)} · ${esc(p.email || '')}</option>`).join('')}</select></label></div>
-      <label class="check" style="margin-top:8px"><input type="checkbox" id="revAuto" ${settings.auto_send_filed ? 'checked' : ''}> After filing, send the acknowledgement and workings to the client automatically</label>
-      <p class="muted small">GSTR-1 and GSTR-3B are verified separately. When a return's acknowledgement is uploaded, that return's acknowledgement + workings go to the client — only if the senior approved it. A “Send to client” button is always there too.</p>
+    <div class="card"><h3>Notices module</h3>
+      <label class="check"><input type="checkbox" id="noticesOn" ${settings.notices_off ? '' : 'checked'}> Show Notices in the tracker</label>
+      <p class="muted small">Switch off to hide All notices, GST / TDS / MCA notices and the notice alerts on the dashboard for everyone. Nothing is deleted — switch it back on any time.</p></div>`);
+  $('#boardOn', c).onchange = async e => { try { await setSave({ board_enabled: e.target.checked }); } catch (err) { toast(friendly(err), true); } };
+  $('#cpBoard', c).onclick = () => copy(boardUrl(settings.board_token));
+  $('#regenBoard', c).onclick = async () => {
+    if (!confirm('Create a new board link? The old link will stop working.')) return;
+    try { await setSave({ board_token: newId() }); route(); } catch (e) { toast(friendly(e), true); }
+  };
+  $('#noticesOn', c).onchange = async e => { try { await setSave({ notices_off: !e.target.checked }); $('#nav').innerHTML = navGroups(); } catch (err) { toast(friendly(err), true); e.target.checked = !e.target.checked; } };
+  renderChaseSettings(setBox(main));
+  await renderDataRequestSettings(setBox(main));
+}
+
+/* Mailbox & emails — one 3-step setup */
+async function setMailbox(main) {
+  const hex = n => [...crypto.getRandomValues(new Uint8Array(n))].map(x => x.toString(16).padStart(2, '0')).join('');
+  const sha = async t => [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(t)))].map(x => x.toString(16).padStart(2, '0')).join('');
+  const box = setBox(main, `<p class="muted set-lead">One Gmail script in the office mailbox does all mail jobs: client data mails, notice watch, data reminders and the senior-approval &amp; filing mails. Three steps, once.</p>
+    <div class="card set-step"><div class="set-step-h"><span class="set-num">1</span><h3>Make the keys</h3></div>
+      <p class="muted small" id="mbKeyNote">One click makes all three keys. They are shown only once — keep this page open until step 2 is done.</p>
+      <div id="mbKeys"></div>
+      <div class="toolbar"><button class="btn primary" id="mbMake">Make all 3 keys</button></div></div>
+    <div class="card set-step"><div class="set-step-h"><span class="set-num">2</span><h3>Paste them into the script</h3></div>
+      <ol class="small steps">
+        <li>Open <a href="https://script.google.com/home" target="_blank" rel="noopener">script.google.com</a> signed in as the office mailbox → project <b>JLR mail intake</b>. (First time: New project, paste the script, Save.)</li>
+        <li>Gear icon (Project Settings) → <b>Script properties</b> → <b>Add script property</b> for each row in step 1 → <b>Save script properties</b>.</li></ol>
+      <div class="toolbar"><button class="btn sm" id="mbScript">Show the script</button></div></div>
+    <div class="card set-step"><div class="set-step-h"><span class="set-num">3</span><h3>Start it and check</h3></div>
+      <p class="muted small">In Apps Script choose <b>setup</b> at the top → <b>Run</b> → allow access. Within a minute or two the lights turn green.</p>
+      <div class="set-lights" id="mbLights"><div class="loading">Checking…</div></div>
+      <div class="toolbar"><button class="btn sm" id="mbRe">Check again</button></div></div>
+    <details class="card set-more"><summary><b>Options</b> — senior mails, signature, filters, alerts, each key separately</summary>
+      <div id="mbOpts"></div></details>`);
+
+  const lights = async () => {
+    const [ml, nw, sj] = await Promise.all([safe(sb.rpc('mail_admin_status')), safe(sb.rpc('notice_status')), safe(sb.from('settings').select('mailjob_key_hash,mailjob_seen_at').eq('id', 1).maybeSingle())]);
+    const m = ml.data || {}, n = nw.data || {}, j = sj.data || {};
+    if (sj.data) Object.assign(settings, j);
+    const live = !!n.last_check_at || !!j.mailjob_seen_at;
+    const L = (name, cls, line) => `<div class="set-light ${cls}"><b>${name}</b><span class="small">${line}</span></div>`;
+    $('#mbLights', box).innerHTML = [
+      L('Client data mails', !m.key_set ? 'todo' : !m.enabled ? 'half' : live ? 'ok' : 'half',
+        !m.key_set ? 'No key yet' : !m.enabled ? 'Key set · switched off (Options)' : m.last_mail_at ? 'Last client mail ' + setWhen(m.last_mail_at) : live ? 'Ready · no client mail yet' : 'Waiting for the script to run'),
+      L('Notice watch', !n.connected ? 'todo' : !n.enabled ? 'half' : n.last_check_at ? (n.last_error ? 'bad' : 'ok') : 'half',
+        !n.connected ? 'No key yet' : !n.enabled ? 'Key set · switched off (Options)' : n.last_error ? 'Problem: ' + esc(n.last_error) : n.last_check_at ? 'Checked ' + setWhen(n.last_check_at) : 'Waiting for the script to run'),
+      L('Senior-approval &amp; filing mails', !j.mailjob_key_hash ? 'todo' : j.mailjob_seen_at ? 'ok' : 'half',
+        !j.mailjob_key_hash ? 'No key yet' : j.mailjob_seen_at ? 'Checked ' + setWhen(j.mailjob_seen_at) : 'Waiting for the script to run')
+    ].join('');
+    $('#mbMake', box).textContent = m.key_set || n.connected || j.mailjob_key_hash ? 'Make 3 new keys' : 'Make all 3 keys';
+    return { m, n };
+  };
+  let cur = await lights();
+
+  $('#mbRe', box).onclick = async () => { cur = await lights(); toast('Status updated'); };
+  $('#mbMake', box).onclick = async e => {
+    const { m, n } = cur;
+    if ((m.key_set || n.connected || settings.mailjob_key_hash) && !confirm('Make 3 new keys? The old keys stop working at once — the script stops until you paste the new ones.')) return;
+    e.target.disabled = true;
+    try {
+      const k = { INTAKE_KEY: 'jlr_' + hex(24), NOTICE_KEY: 'jlrn_' + hex(24), MAILJOB_KEY: 'mj_' + hex(16) };
+      await must(sb.rpc('mail_admin_set_key', { p_hash: await sha(k.INTAKE_KEY) }));
+      await must(sb.rpc('notice_admin_set_key', { p_hash: await sha(k.NOTICE_KEY) }));
+      const mh = await sha(k.MAILJOB_KEY);
+      await must(sb.rpc('set_mailjob_key', { p_hash: mh })); settings.mailjob_key_hash = mh;
+      await must(sb.rpc('mail_admin_save', { p_enabled: true, p_filter: m.subject_filter || '', p_mailbox: m.mailbox || me.email || '' }));
+      await must(sb.rpc('notice_admin_save', { p: { enabled: true, alert_email: n.alert_email !== false, alert_wa: !!n.alert_wa, wa_template: n.wa_template || 'notice_alert', every_minutes: n.every_minutes || 15 } }));
+      $('#mbKeyNote', box).innerHTML = '<b>Copy each key now</b> — they are shown only this once. Client mails and notice watch are switched on.';
+      $('#mbKeys', box).innerHTML = `<div class="set-keys">${Object.entries(k).map(([name, val]) => `<div class="set-key"><code class="set-kname">${name}</code><input readonly value="${esc(val)}" aria-label="${name}"><button class="btn sm" data-ck="${name}">Copy</button></div>`).join('')}</div>`;
+      $$('[data-ck]', box).forEach(b => b.onclick = () => copySecret(k[b.dataset.ck], b.dataset.ck + ' copied'));
+      e.target.textContent = 'Make 3 new keys';
+      cur = await lights();
+    } catch (err) { toast(friendly(err), true); }
+    e.target.disabled = false;
+  };
+  $('#mbScript', box).onclick = async () => {
+    let code = '';
+    try { const rr = await fetch('mail-intake-apps-script.gs', { cache: 'no-store' }); code = rr.ok ? await rr.text() : ''; } catch (err) {}
+    const m = modal('Office mailbox script', code ? `<p class="small" style="margin-top:0">Replace all the code in <b>JLR mail intake</b> with this, then Save.</p><textarea readonly rows="16" class="code">${esc(code)}</textarea>` : '<p class="note warn small">Script file not found on the site — upload mail-intake-apps-script.gs with the other files.</p>',
+      { wide: true, extra: code ? '<button class="btn" id="mbCpS">Copy script</button>' : '' });
+    if (code) $('#mbCpS', m.el).onclick = () => copySecret(code, 'Script copied');
+  };
+
+  /* Options: senior mails look, then the original cards */
+  const o = $('#mbOpts', box);
+  const look = setBox(o, `<div class="card"><h3>Senior-approval &amp; filing mails</h3>
+      <label class="check"><input type="checkbox" id="revAuto" ${settings.auto_send_filed ? 'checked' : ''}> After filing, send the acknowledgement and workings to the client automatically</label>
+      <p class="muted small">GSTR-1 and GSTR-3B are verified separately. When a return's acknowledgement is uploaded, that return's acknowledgement + workings go to the client — only if the senior approved it. The senior is chosen under <a href="${setLink('team')}">Staff &amp; senior</a>.</p>
       <h4 style="margin:14px 0 6px">How the mails look</h4>
       <div class="form-grid g2"><label>Greeting<input id="revGreet" value="${esc(settings.mail_greeting || 'Respected Sir,')}"></label>
         <label class="full">Signature (below “Thanks &amp; Regards, &lt;your name&gt;”)<textarea id="revSign" rows="4" placeholder="JLR &amp; Co&#10;Chartered Accountants&#10;Address · Phone">${esc(settings.mail_signature || '')}</textarea></label></div>
-      <div class="toolbar"><button class="btn sm" id="revSaveLook">Save</button><span class="muted small">If the Gmail script can read the mailbox's own Gmail signature (with the logo), it uses that instead.</span></div>
-      <h4 style="margin:14px 0 6px">Mailbox key for these emails</h4>
-      <p class="muted small">The office Gmail script sends these emails with their attachments and reads the senior's replies. ${settings.mailjob_key_hash ? `Key is set. ${settings.mailjob_seen_at ? 'Script last checked ' + new Date(settings.mailjob_seen_at).toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' }) + '.' : '<span class="late">The script has not checked in yet — add MAILJOB_KEY to it (steps below).</span>'}` : '<span class="late">No key yet.</span>'}</p>
-      <div class="toolbar"><button class="btn sm" id="revKey">${settings.mailjob_key_hash ? 'Make a new key' : 'Make the key'}</button><span class="muted small" id="revOut"></span></div>
-      <p class="muted small">Script steps: script.google.com → “JLR mail intake” → paste the new <b>mail-intake-apps-script.gs</b> → Save → Project Settings → Script properties → add <b>MAILJOB_KEY</b> = the key → Run <b>setup</b> once and allow access.</p></div>
-    <div class="card"><h3>Notices module</h3>
-      <label class="check"><input type="checkbox" id="noticesOn" ${settings.notices_off ? '' : 'checked'}> Show Notices in the tracker</label>
-      <p class="muted small">Switch off to hide All notices, GST / TDS / MCA notices and the notice alerts on the dashboard for everyone (for example when notices move to their own site). Nothing is deleted — switch it back on any time.</p></div>`;
-  const save = async patch => { await must(sb.from('settings').update(patch).eq('id', 1)); Object.assign(settings, patch); toast('Saved'); };
-  $('#saveFirm').onclick = async () => { try { await save({ firm_name: $('#firm').value.trim() || 'Our Office' }); $('.brand').textContent = settings.firm_name; } catch (e) { toast(friendly(e), true); } };
-  $('#boardOn').onchange = async e => { try { await save({ board_enabled: e.target.checked }); } catch (err) { toast(friendly(err), true); } };
-  $('#revSenior').onchange = async e => { try { await save({ senior_id: e.target.value || null }); } catch (err) { toast(/senior_id/.test(err.message || '') ? 'Run update-session18.sql in Supabase first' : friendly(err), true); } };
-  $('#revAuto').onchange = async e => { try { await save({ auto_send_filed: e.target.checked }); } catch (err) { toast(/auto_send/.test(err.message || '') ? 'Run update-session18.sql in Supabase first' : friendly(err), true); e.target.checked = !e.target.checked; } };
-  $('#revSaveLook').onclick = async () => { try { await save({ mail_greeting: $('#revGreet').value.trim() || 'Respected Sir,', mail_signature: $('#revSign').value.trim() || null }); } catch (err) { toast(/mail_greeting|mail_signature/.test(err.message || '') ? 'Run update-session19.sql in Supabase first' : friendly(err), true); } };
-  $('#revKey').onclick = async () => {
-    if (settings.mailjob_key_hash && !confirm('Make a new key? The script stops sending until you paste the new key into it.')) return;
-    const key = 'mj_' + REV.rand(32), hash = await REV.sha(key);
-    const { error } = await safe(sb.rpc('set_mailjob_key', { p_hash: hash }));
-    if (error) return toast(/set_mailjob_key/.test(error.message || '') ? 'Run update-session18.sql in Supabase first' : friendly(error), true);
-    settings.mailjob_key_hash = hash;
-    const m = modal('Mailbox key — copy it now', `<p>Paste this into the Gmail script as the script property <b>MAILJOB_KEY</b>. It is shown only once.</p><div class="linkbox"><input readonly value="${key}" id="mjk"><button class="btn sm" id="mjc">Copy</button></div>`);
-    $('#mjc', m.el).onclick = () => copySecret(key, 'Key copied');
-    safe(sb.from('mail_jobs').select('id', { count: 'exact', head: true }).eq('status', 'new')).then(r => { if (!r.error) $('#revOut').textContent = `${r.count || 0} email(s) waiting to be sent`; });
-  };
-  safe(sb.from('mail_jobs').select('id,status').eq('status', 'new').limit(200)).then(r => { if (!r.error && $('#revOut')) $('#revOut').textContent = r.data.length ? `${r.data.length} email(s) waiting to be sent` : ''; });
-  $('#noticesOn').onchange = async e => { try { await save({ notices_off: !e.target.checked }); $("#nav").innerHTML = navGroups(); } catch (err) { toast(/notices_off/.test(err.message || '') ? 'Run update-session16.sql in Supabase first' : friendly(err), true); e.target.checked = !e.target.checked; } };
-  $('#cpBoard').onclick = () => copy(boardUrl(settings.board_token));
-  $('#regenBoard').onclick = async () => {
-    if (!confirm('Create a new board link? The old link will stop working.')) return;
-    try { await save({ board_token: newId() }); route(); } catch (e) { toast(friendly(e), true); }
-  };
-  v.insertAdjacentHTML('beforeend', invoiceSettingsCard());
-  bindInvoiceSettings(v);
-  if (P4()) { const zb = document.createElement('div'); v.appendChild(zb); renderZohoSettings(zb); }
-  const wa = document.createElement('div');
-  v.appendChild(wa);
-  renderWhatsApp(wa);
-  const gst = document.createElement('div');
-  v.appendChild(gst);
-  renderGst(gst);
-  const ml = document.createElement('div');
-  v.appendChild(ml);
-  renderMailSettings(ml);
-  const nw = document.createElement('div');
-  v.appendChild(nw);
-  renderNoticeWatchSettings(nw);
-  const aw = document.createElement('div');
-  v.appendChild(aw);
-  renderAutoWorkSettings(aw);
-  const ch = document.createElement('div');
-  v.appendChild(ch);
-  renderChaseSettings(ch);
-  const dr = document.createElement('div');
-  v.appendChild(dr);
-  renderDataRequestSettings(dr);
-  const dm = document.createElement('div');
-  v.appendChild(dm);
-  renderDemoSettings(dm);
-  const ai = document.createElement('div');
-  v.appendChild(ai);
-  renderAiSettings(ai);
-};
+      <div class="toolbar"><button class="btn sm" id="revSaveLook">Save</button><span class="muted small" id="revOut"></span></div></div>`);
+  $('#revAuto', look).onchange = async e => { try { await setSave({ auto_send_filed: e.target.checked }); } catch (err) { toast(friendly(err), true); e.target.checked = !e.target.checked; } };
+  $('#revSaveLook', look).onclick = async () => { try { await setSave({ mail_greeting: $('#revGreet', look).value.trim() || 'Respected Sir,', mail_signature: $('#revSign', look).value.trim() || null }); } catch (err) { toast(friendly(err), true); } };
+  safe(sb.from('mail_jobs').select('id').eq('status', 'new').limit(200)).then(r => { if (!r.error && $('#revOut', look)) $('#revOut', look).textContent = r.data.length ? `${r.data.length} email(s) waiting to be sent` : ''; });
+  renderMailSettings(setBox(o));
+  renderNoticeWatchSettings(setBox(o));
+}
 
 /* ---------- Settings: automatic GST work ---------- */
 async function renderAutoWorkSettings(box) {
@@ -2574,7 +2701,7 @@ async function noticeWatchBar(box, btn) {
   const s = r.data, ago = t => { if (!t) return 'never'; const m = Math.round((Date.now() - new Date(t)) / 60000); return m < 1 ? 'just now' : m < 60 ? m + ' min ago' : m < 1440 ? Math.round(m / 60) + ' h ago' : new Date(t).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' }); };
   box.innerHTML = s.connected && s.enabled
     ? `<p class="muted small nwatch">● Notice emails checked automatically every ${s.every_minutes} min, with a summary at 8 AM and 8 PM · last check <b>${ago(s.last_check_at)}</b>${s.last_error ? ` · <span class="late">problem: ${esc(s.last_error)}</span>` : ''}</p>`
-    : `<p class="note small">Automatic notice check is not connected yet${isAdmin() ? ' — <a href="#/settings">Settings → Notice watch</a>' : ' — ask the Admin to set it up'}. You can still add notices by hand.</p>`;
+    : `<p class="note small">Automatic notice check is not connected yet${isAdmin() ? ' — <a href="#/settings?s=mailbox">Settings → Mailbox</a>' : ' — ask the Admin to set it up'}. You can still add notices by hand.</p>`;
   btn.onclick = async () => {
     if (!(s.connected && s.enabled)) return toast('Notice watch is not connected yet' + (isAdmin() ? ' — see Settings → Notice watch' : ''), true);
     btn.disabled = true; const lbl = $('span', btn); lbl.textContent = 'Checking…';
@@ -9771,13 +9898,13 @@ async function dashSystemTab(body) {
     const n = nw.data || {}, a = aw.data || {}, c = ch.data || {}, mm = ml.data || {}, b = (bk.data || [])[0], ia = ai.data || {}, w = ws.data || {};
     const bkAge = b ? (Date.now() - new Date(b.taken_at)) / 36e5 : null;
     $('#sysGrid', body).innerHTML = [
-      tile('WhatsApp reminders', wa.error || ws.error || !w.enabled ? null : true, wa.error || ws.error ? 'not set up' : w.enabled ? 'on — staff 9:30 AM daily' : 'switched off', '#/settings'),
+      tile('WhatsApp reminders', wa.error || ws.error || !w.enabled ? null : true, wa.error || ws.error ? 'not set up' : w.enabled ? 'on — staff 9:30 AM daily' : 'switched off', '#/settings?s=whatsapp'),
       tile('Notice watch', nw.error ? null : n.connected && n.enabled ? !n.last_error && !!n.last_check_at && (Date.now() - new Date(n.last_check_at)) < 3 * 36e5 : null, nw.error ? 'not installed' : !n.connected ? 'not set up' : n.last_error ? 'problem: ' + esc(n.last_error) : 'last check ' + when(n.last_check_at), '#/notices'),
-      tile('Automatic GST work', aw.error ? null : a.gst_enabled ? true : null, aw.error ? 'not installed' : a.gst_enabled ? 'last run ' + when(a.last_run_at) + (a.last_made != null ? ` · ${a.last_made} made` : '') : 'switched off', '#/settings'),
-      tile('Data chasing', ch.error ? null : c.enabled ? !c.failed_7 : null, ch.error ? 'not installed' : c.enabled ? `on · ${c.sent_7 || 0} clients reminded in 7 days${c.failed_7 ? ` · ${c.failed_7} failed` : ''}${c.queued ? ` · ${c.queued} emails waiting` : ''}` : 'switched off', '#/settings'),
+      tile('Automatic GST work', aw.error ? null : a.gst_enabled ? true : null, aw.error ? 'not installed' : a.gst_enabled ? 'last run ' + when(a.last_run_at) + (a.last_made != null ? ` · ${a.last_made} made` : '') : 'switched off', '#/settings?s=gst'),
+      tile('Data chasing', ch.error ? null : c.enabled ? !c.failed_7 : null, ch.error ? 'not installed' : c.enabled ? `on · ${c.sent_7 || 0} clients reminded in 7 days${c.failed_7 ? ` · ${c.failed_7} failed` : ''}${c.queued ? ` · ${c.queued} emails waiting` : ''}` : 'switched off', '#/settings?s=clients'),
       tile('Client mail', ml.error ? null : mm.enabled && mm.key_set ? !mm.last_error : null, ml.error ? 'not installed' : mm.enabled && mm.key_set ? 'last mail ' + when(mm.last_mail_at) + (mm.new ? ` · ${mm.new} waiting` : '') : 'not set up', '#/inbox'),
       tile('Backup', bk.error ? null : b ? bkAge < 30 : false, bk.error ? 'not available' : b ? 'last ' + when(b.taken_at) + ` · ${b.rows} rows` : 'no backup yet', '#/settings'),
-      tile('AI (bills, help, replies)', ai.error ? null : ia.enabled && ia.key_set ? true : null, ai.error ? 'not installed' : ia.key_set ? `this month ₹${(+ia.month_cost || 0).toFixed(2)}` : 'no key — free reading only', '#/settings')
+      tile('AI (bills, help, replies)', ai.error ? null : ia.enabled && ia.key_set ? true : null, ai.error ? 'not installed' : ia.key_set ? `this month ₹${(+ia.month_cost || 0).toFixed(2)}` : 'no key — free reading only', '#/settings?s=ai')
     ].join('');
   });
   await dashFull($('#sysOld', body));
