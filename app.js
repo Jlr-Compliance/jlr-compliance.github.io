@@ -237,7 +237,7 @@ async function start() {
   sb = window.supabase.createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON_KEY);
   sb.auth.onAuthStateChange(event => {
     if (event === 'PASSWORD_RECOVERY') showSetPassword();
-    if (event === 'SIGNED_OUT' && me) { IDLE.stop(); me = null; showLogin('You were signed out.'); }   // signed out in another tab
+    if (event === 'SIGNED_OUT' && me) { IDLE.stop(); me = null; SESS.clear(); showLogin('You were signed out.'); }   // signed out in another tab
   });
   const { data: { session } } = await sb.auth.getSession();
   if (recovering && session) return showSetPassword();
@@ -306,13 +306,13 @@ const IDLE = {
   tick() {
     if (!me) return this.stop();
     const left = this.LIMIT - (Date.now() - this.lastSeen());
-    if (left <= 0) return this.signOut();
+    if (left <= 0) return showLock();
     if (left <= this.WARN) this.showBar(Math.ceil(left / 1000)); else this.hideBar();
   },
   showBar(sec) {
     if (!this.bar) {
       this.bar = document.createElement('div'); this.bar.className = 'idle-bar'; this.bar.setAttribute('role', 'alertdialog');
-      this.bar.innerHTML = '<span>No activity for a while — you will be signed out in <b></b> seconds.</span><button class="btn primary sm" type="button">Stay signed in</button>';
+      this.bar.innerHTML = '<span>No activity for a while — the screen locks in <b></b> seconds.</span><button class="btn primary sm" type="button">I\'m here</button>';
       this.bar.querySelector('button').onclick = () => { this.stamp(true); this.hideBar(); };
       document.body.appendChild(this.bar);
     }
@@ -328,6 +328,185 @@ const IDLE = {
   }
 };
 
+/* ---------- v40: session length, lock screen, 2-step login (authenticator code) ---------- */
+const SESS = {
+  K_AT: 'jlr-auth-at', K_SHARED: 'jlr-shared', K_LOCK: 'jlr-locked', K_FAILS: 'jlr-lock-fails', K_ALIVE: 'jlr-alive',
+  phone() { try { return matchMedia('(pointer: coarse)').matches && Math.min(screen.width, screen.height) < 820; } catch (e) { return false; } },
+  maxAge() { return (this.phone() ? 1 : 3) * 864e5; },
+  get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
+  set(k, v) { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, String(v)); } catch (e) {} },
+  mark(shared) { this.set(this.K_AT, Date.now()); this.set(this.K_SHARED, shared ? '1' : null); this.set(this.K_LOCK, null); this.set(this.K_FAILS, null);
+    try { sessionStorage.setItem(this.K_ALIVE, '1'); } catch (e) {} },
+  clear() { [this.K_AT, this.K_SHARED, this.K_LOCK, this.K_FAILS].forEach(k => this.set(k, null)); try { sessionStorage.removeItem(this.K_ALIVE); } catch (e) {} },
+  // why this session must end now ('' = fine)
+  endReason() {
+    const at = +this.get(this.K_AT) || 0;
+    if (!at) { this.set(this.K_AT, Date.now()); try { sessionStorage.setItem(this.K_ALIVE, '1'); } catch (e) {} return ''; }   // signed in before v40
+    if (Date.now() - at > this.maxAge()) return `For safety you are signed out every ${this.phone() ? 'day' : '3 days'}. Please sign in again.`;
+    let alive = null; try { alive = sessionStorage.getItem(this.K_ALIVE); } catch (e) {}
+    if (this.get(this.K_SHARED) === '1' && !alive) return 'This is marked as a shared computer, so you were signed out when the browser closed.';
+    try { sessionStorage.setItem(this.K_ALIVE, '1'); } catch (e) {}
+    return '';
+  },
+  locked() { return this.get(this.K_LOCK) === '1'; },
+  async end(msg) { IDLE.stop(); me = null; this.clear(); try { await sb.auth.signOut({ scope: 'local' }); } catch (e) {} history.replaceState(null, '', location.pathname); showLogin(msg); }
+};
+addEventListener('storage', e => { if (e.key === SESS.K_LOCK && e.newValue === '1' && me) showLock(); });
+
+function showLock(msg) {
+  IDLE.stop(); SESS.set(SESS.K_LOCK, '1');
+  const email = (me && me.email) || SESS.get('jlr-lock-email') || '';
+  if (email) SESS.set('jlr-lock-email', email);
+  me = null;
+  ['#helpFab', '#helpPane', '.modal-back', '.modal-wrap', '.idle-bar'].forEach(q => $$(q).forEach(x => x.remove()));
+  root.innerHTML = authShell(`<form class="card auth" id="lockForm">
+    <div class="auth-k">Screen locked</div><h2>Welcome back</h2>
+    <p class="muted small">Locked after 5 minutes without activity. Enter your password to continue${email ? ` as <b>${esc(email)}</b>` : ''}.</p>
+    ${msg ? `<p class="note warn">${esc(msg)}</p>` : ''}
+    ${pwField('Password', 'password', 'required autocomplete="current-password" autofocus')}
+    <button class="btn primary full" type="submit">Unlock</button>
+    <button class="link small" type="button" id="lockOut">Sign out</button></form>`);
+  wireAuthShell();
+  const f = $('#lockForm');
+  $('#lockOut').onclick = () => SESS.end();
+  f.onsubmit = async e => {
+    e.preventDefault();
+    const b = $('button[type=submit]', f); b.disabled = true; b.textContent = 'Checking…';
+    let ok = false;
+    try {   // check the password on a throw-away client: the signed-in session (with its 2-step level) is kept
+      const tmp = window.supabase.createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON_KEY, { auth: { persistSession: false, autoRefreshToken: false, storageKey: 'jlr-lock-check' } });
+      const { error } = await tmp.auth.signInWithPassword({ email, password: f.password.value });
+      ok = !error;
+      if (ok) tmp.auth.signOut({ scope: 'local' }).catch(() => {});
+    } catch (err) { ok = false; }
+    if (ok) { SESS.set(SESS.K_LOCK, null); SESS.set(SESS.K_FAILS, null); IDLE.stamp(true); return boot(); }
+    const fails = (+SESS.get(SESS.K_FAILS) || 0) + 1; SESS.set(SESS.K_FAILS, fails);
+    if (fails >= 3) return SESS.end('3 wrong passwords at the lock screen — please sign in again with your password and code.');
+    b.disabled = false; b.textContent = 'Unlock'; f.password.value = '';
+    toast(`Wrong password — ${3 - fails} ${3 - fails === 1 ? 'try' : 'tries'} left`, true);
+    f.classList.remove('shake'); void f.offsetWidth; f.classList.add('shake');
+  };
+}
+
+/* 2-step: returns true when the session may go on */
+async function mfaGate(prof) {
+  const pol = await safe(sb.rpc('mfa_policy'));
+  if (pol.error) return true;                                   // update-2step-login.sql not installed yet
+  const p = pol.data || {};
+  const lv = await sb.auth.mfa.getAuthenticatorAssuranceLevel();
+  const cur = lv.data && lv.data.currentLevel, next = lv.data && lv.data.nextLevel;
+  if (cur === 'aal2') return true;
+  if (p.has_factor || next === 'aal2') { await mfaCodeScreen(); return false; }
+  if (p.required) { await mfaEnrollScreen(true, prof); return false; }
+  return true;
+}
+async function mfaFactor() {
+  const { data } = await sb.auth.mfa.listFactors();
+  return ((data && data.totp) || []).find(f => f.status === 'verified');
+}
+async function mfaCodeScreen(msg) {
+  root.innerHTML = authShell(`<form class="card auth" id="mfaForm">
+    <div class="auth-k">2-step login</div><h2>Enter your code</h2>
+    <p class="muted small">Open <b>Google Authenticator</b> or <b>Microsoft Authenticator</b> on your phone and type the 6-digit code for <b>${esc(cfg.FIRM_NAME || 'the tracker')}</b>.</p>
+    ${msg ? `<p class="note warn">${esc(msg)}</p>` : ''}
+    <label>6-digit code<input name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required autofocus class="otp"></label>
+    <button class="btn primary full" type="submit">Continue</button>
+    <p class="muted small">Lost your phone? Ask the Admin to reset your 2-step login.</p>
+    <button class="link small" type="button" id="mfaOut">Sign out</button></form>`);
+  wireAuthShell();
+  $('#mfaOut').onclick = () => SESS.end();
+  const f = $('#mfaForm');
+  f.onsubmit = async e => {
+    e.preventDefault();
+    const b = $('button[type=submit]', f); b.disabled = true; b.textContent = 'Checking…';
+    const fac = await mfaFactor();
+    if (!fac) return mfaEnrollScreen(false);
+    const { error } = await sb.auth.mfa.challengeAndVerify({ factorId: fac.id, code: f.code.value.trim() });
+    if (error) { b.disabled = false; b.textContent = 'Continue'; f.code.value = ''; toast('That code did not work — check the time on your phone and try the newest code', true); f.classList.remove('shake'); void f.offsetWidth; f.classList.add('shake'); return; }
+    Promise.resolve().then(() => AUDIT.event('sign_in_2step')).catch(() => {});
+    boot();
+  };
+}
+async function mfaEnrollScreen(required, prof, inModal) {
+  // remove half-finished set-ups first
+  const { data } = await sb.auth.mfa.listFactors();
+  for (const f of ((data && data.all) || []).filter(x => x.status !== 'verified')) { try { await sb.auth.mfa.unenroll({ factorId: f.id }); } catch (e) {} }
+  const en = await sb.auth.mfa.enroll({ factorType: 'totp', friendlyName: 'Tracker ' + new Date().toISOString().slice(0, 16) });
+  if (en.error) { toast(en.error.message, true); return; }
+  const qr = en.data.totp.qr_code, secret = en.data.totp.secret, fid = en.data.id;
+  const html = `<div class="auth-k">2-step login</div><h2>Set up your authenticator</h2>
+    ${required ? '<p class="note">Your role needs a 6-digit code at sign-in. One-time set-up, about a minute.</p>' : ''}
+    <ol class="small steps"><li>Install <b>Google Authenticator</b> or <b>Microsoft Authenticator</b> on your phone.</li>
+      <li>In the app tap <b>+</b> → <b>Scan a QR code</b> and scan this:</li></ol>
+    <div class="mfa-qr"><img src="${esc(qr)}" alt="QR code for the authenticator app" width="180" height="180"></div>
+    <details class="small"><summary>Can't scan? Type this key instead</summary><code class="mfa-secret">${esc(secret)}</code></details>
+    <label>Then type the 6-digit code it shows<input name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required class="otp"></label>`;
+  if (inModal) {
+    const m = modal('2-step login', `<form id="enF">${html}<button class="btn primary" type="submit">Turn on 2-step login</button></form>`);
+    $('#enF', m.el).onsubmit = async e => {
+      e.preventDefault();
+      const { error } = await sb.auth.mfa.challengeAndVerify({ factorId: fid, code: e.target.code.value.trim() });
+      if (error) return toast('That code did not work — try the newest code', true);
+      m.close ? m.close() : $$('[data-x]', m.el)[0]?.click();
+      toast('2-step login is on. You will be asked for a code at each new sign-in.');
+    };
+    return;
+  }
+  root.innerHTML = authShell(`<form class="card auth" id="enForm">${html}
+    <button class="btn primary full" type="submit">Turn on and continue</button>
+    <button class="link small" type="button" id="enOut">Sign out</button></form>`);
+  wireAuthShell();
+  $('#enOut').onclick = () => SESS.end();
+  $('#enForm').onsubmit = async e => {
+    e.preventDefault();
+    const { error } = await sb.auth.mfa.challengeAndVerify({ factorId: fid, code: e.target.code.value.trim() });
+    if (error) { toast('That code did not work — try the newest code', true); return; }
+    toast('2-step login is on');
+    boot();
+  };
+}
+async function myTwoStep() {
+  const fac = await mfaFactor();
+  if (!fac) return mfaEnrollScreen(false, me, true);
+  modal('2-step login', `<p><span class="pill g">● On</span> Your sign-in asks for a 6-digit code from your authenticator app.</p>
+    <p class="muted small">New phone or lost phone? Ask the Admin to <b>Reset 2-step</b> for you (Settings → Staff &amp; senior), then set it up again at your next sign-in.</p>`);
+}
+
+/* Settings → Staff & senior: security card (Admin) */
+async function renderSecurityCard(box) {
+  const r = await safe(sb.rpc('admin_security_list'));
+  if (r.error) { box.innerHTML = '<div class="card"><h3>Sign-in security</h3><p class="note small">Run <b>update-2step-login.sql</b> in Supabase to switch this on.</p></div>'; return; }
+  const list = r.data || [], when = t => t ? new Date(t).toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' }) : '—';
+  const staff = list.filter(x => ['admin', 'partner', 'manager', 'staff'].includes(x.role));
+  const need = staff.filter(x => ['admin', 'partner', 'manager'].includes(x.role) && x.active !== false && !x.mfa);
+  const meHas = (staff.find(x => x.id === me.id) || {}).mfa;
+  box.innerHTML = `<div class="card"><h3>Sign-in security</h3>
+    <p class="muted small">2-step login asks for a 6-digit code from an authenticator app at each new sign-in. Sessions last 3 days (1 day on phones); after 5 minutes idle the screen locks and opens with the password. Shared computers sign out when the browser closes.</p>
+    <label class="check"><input type="checkbox" id="mfaReq" ${settings.mfa_enforced ? 'checked' : ''}> <b>Require 2-step login for Admin, Partner and Manager</b></label>
+    ${!meHas ? '<p class="note warn small">First set up your own code: name menu (top right) → <b>2-step login</b>. Then tick the box above.</p>' : need.length ? `<p class="note small">Not set up yet: ${need.map(x => esc(x.name)).join(', ')}. ${settings.mfa_enforced ? 'They will be asked to set it up at their next sign-in.' : 'They will be asked once you switch this on.'}</p>` : ''}
+    <div class="table-wrap" style="margin-top:10px"><table><thead><tr><th>Name</th><th>Role</th><th>2-step</th><th>Last sign-in</th><th class="r">Devices</th><th></th></tr></thead><tbody>
+      ${staff.map(x => `<tr><td>${esc(x.name)}${x.id === me.id ? ' <span class="muted small">(you)</span>' : ''}</td><td>${esc(ROLE_LABEL[x.role] || x.role)}</td>
+        <td>${x.mfa ? '<span class="pill g">● On</span>' : '<span class="pill a">Off</span>'}</td><td class="small">${when(x.last_sign_in)}</td><td class="r">${x.sessions || 0}</td>
+        <td class="row-btns">${x.id === me.id ? '' : `${x.mfa ? `<button class="btn sm" data-rs="${x.id}">Reset 2-step</button>` : ''}<button class="btn sm" data-so="${x.id}">Sign out devices</button>`}</td></tr>`).join('')}
+    </tbody></table></div>
+    <div class="toolbar" style="margin-top:12px"><button class="btn" id="soAll">Sign out everyone except me</button></div></div>`;
+  $('#mfaReq', box).onchange = async e => {
+    try { await must(sb.rpc('set_mfa_enforced', { p_on: e.target.checked })); settings.mfa_enforced = e.target.checked; toast(e.target.checked ? '2-step login is now required for Admin, Partner and Manager' : 'No longer required'); renderSecurityCard(box); }
+    catch (err) { e.target.checked = !e.target.checked; toast(friendly(err), true); }
+  };
+  box.onclick = async e => {
+    const b = e.target.closest('button'); if (!b) return;
+    const who = id => (staff.find(x => x.id === id) || {}).name || 'this person';
+    try {
+      if (b.dataset.rs) { if (!confirm(`Reset 2-step login for ${who(b.dataset.rs)}? They are signed out and set it up again on their new phone at the next sign-in.`)) return; await must(sb.rpc('admin_reset_mfa', { p_user: b.dataset.rs })); toast('2-step reset — they set it up again at next sign-in'); }
+      else if (b.dataset.so) { if (!confirm(`Sign ${who(b.dataset.so)} out on all devices?`)) return; const { data } = await must(sb.rpc('admin_sign_out', { p_user: b.dataset.so })); toast(`Signed out (${data || 0} device${data === 1 ? '' : 's'}) — takes effect within the hour at most`); }
+      else if (b.id === 'soAll') { if (!confirm('Sign out everyone except you, on all devices?')) return; const { data } = await must(sb.rpc('admin_sign_out', { p_user: null })); toast(`${data || 0} device session(s) signed out`); }
+      else return;
+      renderSecurityCard(box);
+    } catch (err) { toast(friendly(err), true); }
+  };
+}
+
 function showLogin(msg) {
   IDLE.stop(); ['#helpFab', '#helpPane', '.modal-back', '.modal-wrap'].forEach(q => $$(q).forEach(x => x.remove()));
   root.innerHTML = authShell(`<form class="card auth" id="loginForm">
@@ -335,6 +514,7 @@ function showLogin(msg) {
     <h2>Sign in</h2>${msg ? `<p class="note warn">${esc(msg)}</p>` : ''}
     <label>Email<input name="email" type="email" required autocomplete="username" placeholder="you@firm.in"></label>
     ${pwField('Password', 'password', 'required autocomplete="current-password"')}
+    <label class="check small"><input type="checkbox" name="shared"> Shared computer — sign me out when I close the browser</label>
     <button class="btn primary full" type="submit">Sign in</button>
     <button class="link small" type="button" id="forgot">Forgot password?</button></form>`);
   wireAuthShell();
@@ -344,7 +524,7 @@ function showLogin(msg) {
     const b = $('button[type=submit]', f); b.disabled = true; b.textContent = 'Signing in…';
     const { error } = await sb.auth.signInWithPassword({ email: f.email.value.trim(), password: f.password.value });
     if (error) { toast(error.message, true); b.disabled = false; b.textContent = 'Sign in'; f.classList.remove('shake'); void f.offsetWidth; f.classList.add('shake'); }
-    else { f.classList.add('done'); IDLE.stamp(true); boot(); }
+    else { f.classList.add('done'); SESS.mark(f.shared.checked); IDLE.stamp(true); boot(); }
   };
   $('#forgot').onclick = async () => {
     const email = f.email.value.trim();
@@ -377,13 +557,13 @@ async function boot() {
   try {
     const { data: { user } } = await sb.auth.getUser();
     if (!user) return showLogin();
-    if (IDLE.expired()) { try { await sb.auth.signOut({ scope: 'local' }); } catch (e) {} return showLogin('You were signed out after 5 minutes without activity. Please sign in again.'); }
-    const [{ data: prof }, refs] = await Promise.all([            // profile and lists in one round trip
-      sb.from('profiles').select('*').eq('id', user.id).maybeSingle(),
-      loadRefs().then(() => null, e => e)
-    ]);
-    if (!prof) { await sb.auth.signOut(); return showLogin('Your login has no profile. Ask the admin to check the setup (schema.sql).'); }
-    if (!prof.active) { await sb.auth.signOut(); return showLogin('Your account has been deactivated. Please contact the admin.'); }
+    const why = SESS.endReason(); if (why) return SESS.end(why);
+    if (SESS.locked() || IDLE.expired()) { me = { email: user.email }; return showLock(); }
+    const { data: prof } = await sb.from('profiles').select('*').eq('id', user.id).maybeSingle();
+    if (!prof) { await SESS.end('Your login has no profile. Ask the admin to check the setup (schema.sql).'); return; }
+    if (!prof.active) { await SESS.end('Your account has been deactivated. Please contact the admin.'); return; }
+    if (!(await mfaGate(prof))) return;                           // code screen / set-up screen shown instead
+    const refs = await loadRefs().then(() => null, e => e);
     if (refs) throw refs;
     me = prof;
     IDLE.start();
@@ -489,7 +669,7 @@ function renderShell() {
         <div class="user"><button class="btn ghost sm user-btn" id="userBtn"><span class="u-av" aria-hidden="true">${esc(((me.full_name || me.email || '?').trim()[0] || '?').toUpperCase())}</span><span class="u-nm">${esc(me.full_name || me.email)}<small>${esc(ROLE_LABEL[me.role] || me.role)}</small></span> ▾</button>
           <div class="menu" id="userMenu" hidden>
             <div class="menu-info">${esc(me.email)}<br><span class="badge">${esc(ROLE_LABEL[me.role] || me.role)}</span></div>
-            <button data-act="theme">Theme &amp; layout</button><button data-act="install">Install app on this device</button><button data-act="pw">Change password</button><button data-act="out">Sign out</button></div></div>
+            <button data-act="theme">Theme &amp; layout</button><button data-act="install">Install app on this device</button><button data-act="pw">Change password</button><button data-act="2step">2-step login</button><button data-act="out">Sign out</button></div></div>
       </header>
       <main id="view"></main>
     </div></div>`;
@@ -499,7 +679,8 @@ function renderShell() {
   document.addEventListener('click', () => { menu.hidden = true; const r = $('#gRes'); if (r) r.hidden = true; });
   menu.onclick = async e => {
     const act = e.target.dataset.act;
-    if (act === 'out') { IDLE.stop(); me = null; await AUDIT.event('sign_out'); await sb.auth.signOut(); location.hash = ''; showLogin(); }
+    if (act === 'out') { IDLE.stop(); try { await AUDIT.event('sign_out'); } catch (err) {} location.hash = ''; SESS.end(); }
+    if (act === '2step') myTwoStep();
     if (act === 'pw') changePassword();
     if (act === 'theme') pickTheme();
     if (act === 'install') installApp();
@@ -1892,6 +2073,7 @@ async function setTeam(main) {
     <div class="form-grid g2"><label>Senior<select id="revSenior"><option value="">— choose —</option>${profiles.filter(p => p.active !== false && ['manager', 'partner', 'admin'].includes(p.role)).map(p => `<option value="${p.id}" ${settings.senior_id === p.id ? 'selected' : ''}>${esc(p.full_name || p.email)} · ${esc(p.email || '')}</option>`).join('')}</select></label></div>
     <p class="muted small">Gets the “for verification” emails with the GST workings and approves them. Only Managers, Partners and the Admin can be chosen.</p></div>`);
   $('#revSenior', sen).onchange = async e => { try { await setSave({ senior_id: e.target.value || null }); } catch (err) { toast(friendly(err), true); } };
+  renderSecurityCard(setBox(main));
   const tb = setBox(main);
   await VIEWS.team(tb);
   const h = $('.page-head h2', tb); if (h) h.textContent = 'Staff logins';
