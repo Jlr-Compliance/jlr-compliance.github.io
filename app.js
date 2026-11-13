@@ -4571,28 +4571,40 @@ async function openMailFile(path, asFile) {
   return new File([await r.blob()], path.split('/').pop().replace(/^[^-]+-\d+-/, ''));
 }
 
+// v47 client groups: each file of a mail has its own company (files[i].client_id); old mails use the mail's client
+const mailFileClient = (m, f) => f.client_id !== undefined ? f.client_id : m.client_id;
+const mailUnsorted = m => (m.files || []).filter(f => !mailFileClient(m, f)).length;
+// companies a file of this mail can be put under: the group's companies, else clients that have the sender's address
+const mailChoices = m => {
+  const act = clients.filter(c => c.active);
+  let list = m.group_id ? act.filter(c => c.group_id === m.group_id) : act.filter(c => String(c.email || '').toLowerCase().split(/[,;\s]+/).includes(String(m.from_email || '').toLowerCase()));
+  (m.files || []).forEach(f => { const id = mailFileClient(m, f); if (id && !list.some(c => c.id === id)) { const c = clientById(id); if (c) list.push(c); } });
+  return list.sort((a, b) => a.name.localeCompare(b.name));
+};
 VIEWS.inbox = async v => {
   const r = await safe(sb.from('mail_inbox').select('*').order('received_at', { ascending: false }).limit(300));
   if (r.error) { v.innerHTML = '<div class="card"><p class="note">Client mail is not set up yet — run <b>update-mail-intake.sql</b> in Supabase.</p></div>'; return; }
   const all = r.data || [], tasksById = {};
   const ids = [...new Set(all.flatMap(m => m.task_ids || []))];
   if (ids.length) { const t = await safe(sb.from('tasks').select('id,return_name,period,status').in('id', ids)); (t.data || []).forEach(x => tasksById[x.id] = x); }
-  const n = k => all.filter(m => k === 'All' || m.status === k).length;
+  const n = k => all.filter(m => k === 'All' || (k === 'Sort' ? m.status === 'New' && mailUnsorted(m) : m.status === k)).length;
   const draw = () => {
-    const list = all.filter(m => inboxFilter === 'All' || m.status === inboxFilter);
+    const list = all.filter(m => inboxFilter === 'All' || (inboxFilter === 'Sort' ? m.status === 'New' && mailUnsorted(m) : m.status === inboxFilter));
     v.innerHTML = `<div class="page-head"><h2>Client mail</h2><span class="spacer"></span>
-        <div class="seg">${['New', 'Done', 'Ignored', 'All'].map(k => `<button data-mf="${k}" class="${inboxFilter === k ? 'on' : ''}">${k} · ${n(k)}</button>`).join('')}</div></div>
+        <div class="seg">${['New', 'Sort', 'Done', 'Ignored', 'All'].filter(k => k !== 'Sort' || n('Sort') || inboxFilter === 'Sort').map(k => `<button data-mf="${k}" class="${inboxFilter === k ? 'on' : ''} ${k === 'Sort' ? 'warn-t' : ''}">${k === 'Sort' ? 'Needs sorting' : k} · ${n(k)}</button>`).join('')}</div></div>
       <p class="muted small" style="margin:-6px 0 14px">Attachments that clients email to the office mailbox appear here within about a minute. The month's “Pending data” work is marked as received automatically.</p>
       ${list.length ? list.map(m => { const c = clientById(m.client_id) || { name: 'Client' }, ts = (m.task_ids || []).map(id => tasksById[id]).filter(Boolean);
+        const grp = m.group_id ? groupName(m.group_id) : '', multi = !!m.group_id || (m.files || []).some(f => f.client_id !== undefined && f.client_id !== m.client_id) || !m.client_id, uns = mailUnsorted(m), ch = multi ? mailChoices(m) : [];
         return `<div class="card mail" data-mail="${m.id}">
-          <div class="mail-h"><div><b>${esc(c.name)}</b> <span class="muted small">· ${esc(m.from_name ? `${m.from_name} <${m.from_email}>` : m.from_email)}</span>
+          <div class="mail-h"><div><b>${esc(m.client_id ? c.name : grp ? grp : 'Several companies')}</b>${grp ? ` <span class="pill b small" title="Mail from a client group's address">Group${m.client_id ? ' · ' + esc(grp) : ''}</span>` : ''}${uns ? ` <span class="pill a small">${uns} to sort</span>` : ''} <span class="muted small">· ${esc(m.from_name ? `${m.from_name} <${m.from_email}>` : m.from_email)}</span>
             <div class="mail-sub">${esc(m.subject || '(no subject)')}</div></div><span class="spacer"></span>
-            <div class="mail-meta"><span class="muted small">${new Date(m.received_at).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' })}</span>
+            <div class="mail-meta"><span class="muted small">${new Date(m.received_at).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' })}</span>${m.to_addr ? `<span class="muted small" title="The office mailbox this mail reached">Received at ${esc(m.to_addr)}</span>` : ''}
               <span class="pill ${m.period_guess ? 'a' : 'b'} small" title="${m.period_guess ? 'Month not in the subject — taken as the month before the mail' : 'Month read from the subject / file name'}">${monthLbl(m.period)}${m.period_guess ? ' (assumed)' : ''}</span></div></div>
           ${m.snippet ? `<div class="mail-snip muted small">${esc(m.snippet.slice(0, 220))}${m.snippet.length > 220 ? '…' : ''}</div>` : ''}
-          <div class="mail-files">${(m.files || []).map((f, i) => `<div class="mail-file"><span class="pill ${MAIL_KIND[f.kind] ? MAIL_KIND[f.kind][1] : 'a'} small">${(MAIL_KIND[f.kind] || ['File'])[0]}</span>
+          <div class="mail-files">${(m.files || []).map((f, i) => { const fid = mailFileClient(m, f), fc = clientById(fid) || {}; return `<div class="mail-file ${multi && !fid ? 'unsorted' : ''}"><span class="pill ${MAIL_KIND[f.kind] ? MAIL_KIND[f.kind][1] : 'a'} small">${(MAIL_KIND[f.kind] || ['File'])[0]}</span>
             <span class="mail-fn">${esc(f.name)}</span><span class="muted small">${Math.max(1, Math.round((f.size || 0) / 1024))} KB</span>
-            <button class="btn sm" data-dl="${i}">Download</button>${['pdf', 'image'].includes(f.kind) && c.gstin ? `<button class="btn sm primary" data-rb="${i}" title="Read this bill into the purchase register">Read bill</button>` : ''}${['sales', 'purchases', 'gstr2b', 'excel', 'json'].includes(f.kind) && c.gstin ? `<button class="btn sm primary" data-imp="${i}">Import to GST review</button>` : ''}</div>`).join('')}</div>
+            <button class="btn sm" data-dl="${i}">Download</button>${['pdf', 'image'].includes(f.kind) && fc.gstin ? `<button class="btn sm primary" data-rb="${i}" title="Read this bill into the purchase register">Read bill</button>` : ''}${['sales', 'purchases', 'gstr2b', 'excel', 'json'].includes(f.kind) && fc.gstin ? `<button class="btn sm primary" data-imp="${i}">Import to GST review</button>` : ''}${multi ? `<span class="mail-co">${fid ? `<span class="small">→ <b>${esc(fc.name || 'Company')}</b>${f.how && f.how !== 'sender' ? ` <span class="muted">(${esc(f.how)})</span>` : ''}</span>` : `<span class="pill a small" title="${esc(f.how || '')}">Needs sorting</span>`}
+              <select class="mail-pick" data-pick="${i}" aria-label="Company for ${esc(f.name)}"><option value="">${fid ? 'Change company…' : 'Choose company…'}</option>${ch.filter(x => x.id !== fid).map(x => `<option value="${x.id}">${esc(x.name)}${x.gstin ? ' · ' + esc(x.gstin) : ''}</option>`).join('')}</select></span>` : ''}</div>`; }).join('')}</div>
           <div class="mail-foot">${ts.length ? `<span class="small">✓ Marked data received: ${ts.map(t => `<a href="#/work" class="tag-link">${esc(t.return_name)} · ${esc(t.period)}</a>`).join(', ')}</span>`
             : `<span class="small muted">No “Pending data” work found for ${monthLbl(m.period)} — mark it on the work item if needed.</span>`}
             <span class="spacer"></span>${m.status !== 'Done' ? '<button class="btn sm" data-st="Done">✓ Done</button>' : ''}${m.status === 'New' ? '<button class="btn sm ghost" data-st="Ignored">Ignore</button>' : ''}${m.status !== 'New' ? '<button class="btn sm ghost" data-st="New">Back to new</button>' : ''}</div>
@@ -4600,6 +4612,20 @@ VIEWS.inbox = async v => {
         : `<div class="card"><div class="empty">${inboxFilter === 'New' ? 'No new client mail 🎉' : 'Nothing here.'}</div></div>`}`;
   };
   draw();
+  v.onchange = async e => {
+    const sel = e.target.closest('select[data-pick]'); if (!sel || !sel.value) return;
+    const box = sel.closest('[data-mail]'), m = all.find(x => x.id === box.dataset.mail), i = +sel.dataset.pick, to = clientById(sel.value);
+    sel.disabled = true;
+    try {
+      const { data, error } = await sb.functions.invoke('mail-intake', { body: { action: 'assign', inbox: m.id, idx: i, client: sel.value } });
+      if (error || (data && data.error)) throw new Error((data && data.error) || (error && error.message) || 'Could not move the file');
+      const fr = await must(sb.from('mail_inbox').select('*').eq('id', m.id).single()); Object.assign(m, fr.data);
+      const nid = (m.task_ids || []).filter(id => !tasksById[id]);
+      if (nid.length) { const t = await safe(sb.from('tasks').select('id,return_name,period,status').in('id', nid)); (t.data || []).forEach(x => tasksById[x.id] = x); }
+      toast(`${m.files[i].name} → ${to ? to.name : 'company'}${data && data.tasks ? ` · ${data.tasks} work item${data.tasks > 1 ? 's' : ''} marked data received` : ''}`);
+      draw(); refreshMailBadge();
+    } catch (err) { toast(friendly(err), true); sel.disabled = false; sel.value = ''; }
+  };
   v.onclick = async e => {
     const b = e.target.closest('button'); if (!b) return;
     if (b.dataset.mf) { inboxFilter = b.dataset.mf; draw(); return; }
@@ -4608,16 +4634,17 @@ VIEWS.inbox = async v => {
     try {
       if (b.dataset.dl) await openMailFile(m.files[+b.dataset.dl].path, false);
       if (b.dataset.st) {
+        if (b.dataset.st === 'Done' && mailUnsorted(m) && !confirm(`${mailUnsorted(m)} file(s) in this mail are not under any company yet.\n\nMark the mail Done anyway?`)) return;
         const patch = { status: b.dataset.st, handled_by: b.dataset.st === 'New' ? null : me.id, handled_at: b.dataset.st === 'New' ? null : new Date().toISOString() };
         await must(sb.from('mail_inbox').update(patch).eq('id', m.id)); Object.assign(m, patch); draw(); refreshMailBadge();
       }
       if (b.dataset.rb) {
-        const bf = (m.files || []).filter(x => ['pdf', 'image'].includes(x.kind));
+        const fcid = mailFileClient(m, m.files[+b.dataset.rb]), bf = (m.files || []).filter(x => ['pdf', 'image'].includes(x.kind) && mailFileClient(m, x) === fcid);
         const all = bf.length > 1 && confirm(`This mail has ${bf.length} PDF / photo files.\n\nOK = read all ${bf.length} as bills\nCancel = only ${m.files[+b.dataset.rb].name}`);
         b.disabled = true; b.textContent = 'Opening…';
         const files = await Promise.all((all ? bf : [m.files[+b.dataset.rb]]).map(x => openMailFile(x.path, true)));
-        pendingGstImport = { client: m.client_id, month: m.period.slice(0, 7), kind: 'bills', files, mailId: m.id };
-        grClient = m.client_id; grMonth = m.period.slice(0, 7); grTab = 'recon'; grOv = false;
+        pendingGstImport = { client: fcid, month: m.period.slice(0, 7), kind: 'bills', files, mailId: m.id };
+        grClient = fcid; grMonth = m.period.slice(0, 7); grTab = 'recon'; grOv = false;
         location.hash = '#/gst';
       }
       if (b.dataset.imp) {
@@ -4628,8 +4655,9 @@ VIEWS.inbox = async v => {
         if (!kind) return;
         b.disabled = true; b.textContent = 'Opening…';
         const file = await openMailFile(f.path, true);
-        pendingGstImport = { client: m.client_id, month: m.period.slice(0, 7), kind, file, mailId: m.id };
-        grClient = m.client_id; grMonth = m.period.slice(0, 7); grTab = kind === 'sales' ? 'g1' : 'recon'; grOv = false;
+        const icid = mailFileClient(m, f);
+        pendingGstImport = { client: icid, month: m.period.slice(0, 7), kind, file, mailId: m.id };
+        grClient = icid; grMonth = m.period.slice(0, 7); grTab = kind === 'sales' ? 'g1' : 'recon'; grOv = false;
         location.hash = '#/gst';
       }
     } catch (err) { toast(friendly(err), true); b.disabled = false; }

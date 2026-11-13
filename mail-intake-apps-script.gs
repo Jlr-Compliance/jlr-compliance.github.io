@@ -1,5 +1,5 @@
 /* =====================================================================
-   JLR TRACKER - office mailbox -> tracker (runs every minute in Google Apps Script)   v4.1 (Nov 2026)
+   JLR TRACKER - office mailbox -> tracker (runs every minute in Google Apps Script)   v4.2 (Nov 2026)
    A. Client mail: sends attachments from client emails to the tracker. The tracker decides who is
       a client; mail from anyone else is only labelled "JLR/Not a client" and nothing is stored.
       To retry such a mail (after saving that email on the client), remove the label in Gmail.
@@ -70,7 +70,7 @@ function checkMail_() {
       var result = 'none', ok = true;
       atts.forEach(function (a) {
         if (!ok || a.getSize() > MAX_BYTES) return;
-        var payload = { id: id, from: m.getFrom(), subject: m.getSubject(), date: m.getDate().toISOString(),
+        var payload = { id: id, from: m.getFrom(), to: [m.getTo(), m.getCc()].join(','), subject: m.getSubject(), date: m.getDate().toISOString(),
           snippet: m.getPlainBody().slice(0, 400), file: { name: a.getName(), mime: a.getContentType(), data: Utilities.base64Encode(a.getBytes()) } };
         var r = UrlFetchApp.fetch(FUNCTION_URL, { method: 'post', contentType: 'application/json', payload: JSON.stringify(payload),
           headers: { 'x-intake-key': key }, muteHttpExceptions: true });
