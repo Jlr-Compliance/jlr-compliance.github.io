@@ -26,7 +26,7 @@ const PERIOD_RULES = {
   prev_fy: 'Previous financial year', current_fy: 'Current financial year', none: 'Type manually'
 };
 
-let sb, me = null, profiles = [], clients = [], settings = {}, templates = [], rules = [];
+let sb, me = null, profiles = [], clients = [], settings = {}, templates = [], rules = [], groups = [], groupsOn = false;
 const isAdmin = () => !!me && me.role === 'admin';                                   // settings, team, keys
 const isPartner = () => !!me && ['admin', 'partner'].includes(me.role);               // + reports, delete, checklists
 const isManager = () => !!me && ['admin', 'partner', 'manager'].includes(me.role);    // + all work, clients, billing
@@ -580,15 +580,17 @@ async function boot() {
 }
 
 async function loadRefs() {
-  const [p, c, s, t, r] = await Promise.all([          // all in one round trip
+  const [p, c, s, t, r, gr] = await Promise.all([          // all in one round trip
     must(sb.from('profiles').select('*').order('full_name')),
     must(sb.from('clients').select('*').order('name')),
     must(sb.from('settings').select('*').eq('id', 1).maybeSingle()),
     sb.from('checklist_templates').select('*').order('id'),     // empty if update-checklists.sql has not been run yet
-    sb.from('linked_rules').select('*').order('id')
+    sb.from('linked_rules').select('*').order('id'),
+    sb.from('client_groups').select('*').order('name')          // v43: empty if update-client-groups.sql has not been run yet
   ]);
   profiles = p.data || []; clients = c.data || []; settings = s.data || {};
   templates = t.error ? [] : t.data || []; rules = r.error ? [] : r.data || [];
+  groupsOn = !gr.error; groups = gr.error ? [] : gr.data || [];
 }
 
 const canLayoutB = () => !!me && (me.role === 'admin' || me.role === 'staff');      // Performance layout: Admin and Team members only
@@ -1753,14 +1755,16 @@ VIEWS.clients = async v => {
   const obMap = Object.fromEntries((obR.error ? [] : obR.data || []).map(o => [o.client_id, o]));
   v.innerHTML = `<div class="page-head"><h2>Clients</h2><span class="muted">${clients.filter(c => c.active).length} active</span><span class="spacer"></span>
       ${isAdmin() ? '<button class="btn ghost" id="lgLog">Login access log</button>' : ''}<button class="btn" id="tplBtn">CSV template</button><button class="btn" id="impBtn">Import CSV</button>
-      <button class="btn primary" id="addC">+ Add client</button><input type="file" id="impFile" accept=".csv,text/csv" hidden></div>
+      ${groupsOn && isManager() ? '<button class="btn" id="grpBtn">Groups</button>' : ''}<button class="btn primary" id="addC">+ Add client</button><input type="file" id="impFile" accept=".csv,text/csv" hidden></div>
     <div id="cMiss"></div>
     <div class="toolbar"><input type="search" id="cq" placeholder="Search code / name / GSTIN / PAN" value="${esc(clientQ)}">
+      ${groupsOn && groups.length ? `<select id="cGrp"><option value="">All groups</option>${groups.map(g => `<option value="${g.id}" ${clientGrp === g.id ? 'selected' : ''}>${esc(g.name)}</option>`).join('')}<option value="none" ${clientGrp === 'none' ? 'selected' : ''}>Not in a group</option></select>` : ''}
       <label class="check"><input type="checkbox" id="inact" ${showInactive ? 'checked' : ''}> Show inactive</label></div>
     <div id="cList"></div>`;
   const render = () => {
     const s = clientQ.toLowerCase();
-    const list = clients.filter(c => (showInactive || c.active) && (!s || [c.client_code, c.name, c.gstin, c.pan, c.tan, c.cin].join(' ').toLowerCase().includes(s)))
+    const list = clients.filter(c => (showInactive || c.active) && (!s || [c.client_code, c.name, c.gstin, c.pan, c.tan, c.cin, groupName(c.group_id)].join(' ').toLowerCase().includes(s))
+      && (!clientGrp || (clientGrp === 'none' ? !c.group_id : c.group_id === clientGrp)))
       .sort((a, b) => (a.client_code ? 0 : 1) - (b.client_code ? 0 : 1) || String(a.client_code || a.name).localeCompare(String(b.client_code || b.name), 'en', { numeric: true }));
     const miss = clients.filter(c => c.active && clientProblems({ ...c, client_code: (c.client_code || '').toUpperCase() }, c.id).length);
     $('#cMiss').innerHTML = miss.length ? `<p class="note warn small">${miss.length} active client${miss.length > 1 ? 's are' : ' is'} missing required details (client code, PAN, GSTIN, phone or email): ${miss.slice(0, 8).map(c => `<button class="link" data-ed="${c.id}">${esc(c.name)}</button>`).join(', ')}${miss.length > 8 ? ' …' : ''}. Open each one and fill them in.</p>` : '';
@@ -1768,7 +1772,7 @@ VIEWS.clients = async v => {
     $('#cList').innerHTML = list.length ? `<div class="table-wrap"><table><thead><tr><th>Code</th><th>Client</th><th>GSTIN</th><th>PAN / TAN</th><th>GST scheme</th><th>Services</th><th>Default staff</th><th>Status link</th><th></th></tr></thead><tbody>
       ${list.map(c => `<tr>
         <td>${c.client_code ? `<span class="ccode">${esc(c.client_code)}</span>` : '<span class="late small">—</span>'}</td>
-        <td class="wrap"><b>${esc(c.name)}</b>${c.active ? '' : ' <span class="badge">inactive</span>'}<div class="muted small">${esc([c.contact_person, c.phone].filter(Boolean).join(' · '))}</div></td>
+        <td class="wrap"><b>${esc(c.name)}</b>${c.active ? '' : ' <span class="badge">inactive</span>'}${c.group_id && groupName(c.group_id) ? ` <span class="pill b small" title="Group">${esc(groupName(c.group_id))}</span>` : ''}<div class="muted small">${esc([c.contact_person, c.phone].filter(Boolean).join(' · '))}</div></td>
         <td class="small">${esc(c.gstin || '—')}</td><td class="small">${esc(c.pan || '—')}<div class="muted">${esc(c.tan || '')}</div></td>
         <td>${esc(c.gst_scheme)}</td><td class="wrap">${(c.services || []).map(wtBadge).join(' ')}</td>
         <td>${esc(profName(c.default_staff) || '—')}</td>
@@ -1779,6 +1783,8 @@ VIEWS.clients = async v => {
   render();
   $('#cq').oninput = e => { clientQ = e.target.value; render(); };
   $('#inact').onchange = e => { showInactive = e.target.checked; render(); };
+  if ($('#cGrp')) $('#cGrp').onchange = e => { clientGrp = e.target.value; render(); };
+  if ($('#grpBtn')) $('#grpBtn').onclick = () => manageGroups();
   $('#addC').onclick = () => editClient(null);
   $('#cList').onclick = e => {
     if (e.target.dataset.copy) copy(statusUrl(clientById(e.target.dataset.copy).status_token));
@@ -1788,8 +1794,8 @@ VIEWS.clients = async v => {
   };
   if ($('#lgLog')) $('#lgLog').onclick = () => loginLog(null);
   $('#tplBtn').onclick = () => download('clients-template.csv', toCSV([
-    ['client_code', 'name', 'gstin', 'pan', 'tan', 'cin', 'contact_person', 'phone', 'email', 'gst_scheme', 'services', 'default_staff_email'],
-    ['JLR001', 'ABC Traders', '33AAAAA0000A1Z5', 'AAAAA0000A', 'CHEA00000A', '', 'Mr. Kumar', '9876543210', 'abc@example.com', 'Monthly', 'GST;TDS;Income Tax', me.email]]));
+    ['client_code', 'name', 'gstin', 'pan', 'tan', 'cin', 'contact_person', 'phone', 'email', 'gst_scheme', 'services', 'default_staff_email', ...(groupsOn ? ['group'] : [])],
+    ['JLR001', 'ABC Traders', '33AAAAA0000A1Z5', 'AAAAA0000A', 'CHEA00000A', '', 'Mr. Kumar', '9876543210', 'abc@example.com', 'Monthly', 'GST;TDS;Income Tax', me.email, ...(groupsOn ? ['Vijay Group'] : [])]]));
   $('#impBtn').onclick = () => $('#impFile').click();
   $('#impFile').onchange = async e => {
     const file = e.target.files[0]; e.target.value = '';
@@ -1807,7 +1813,7 @@ VIEWS.clients = async v => {
         const staff = profiles.find(p => (p.email || '').toLowerCase() === get(r, 'default_staff_email').toLowerCase());
         return { client_code: get(r, 'client_code').toUpperCase() || null, name: get(r, 'name'), gstin: get(r, 'gstin').toUpperCase() || null, pan: get(r, 'pan').toUpperCase() || null, tan: get(r, 'tan').toUpperCase() || null,
           cin: get(r, 'cin').toUpperCase() || null, contact_person: get(r, 'contact_person') || null, phone: cleanPhone(get(r, 'phone')), email: cleanEmail(get(r, 'email')),
-          gst_scheme: scheme, services, default_staff: staff ? staff.id : null };
+          gst_scheme: scheme, services, default_staff: staff ? staff.id : null, ...(groupsOn && col('group') >= 0 ? { _group: get(r, 'group') } : {}) };
       });
       const seenCodes = new Set(), bad = [];
       recs.forEach((r, i) => {
@@ -1821,7 +1827,10 @@ VIEWS.clients = async v => {
           <ul class="small">${bad.slice(0, 40).map(b => `<li>${esc(b)}</li>`).join('')}</ul>${bad.length > 40 ? `<p class="small">…and ${bad.length - 40} more</p>` : ''}`);
         return;
       }
-      if (!confirm(`Import ${recs.length} client(s)?`)) return;
+      const newG = groupsOn ? [...new Set(recs.map(r => r._group).filter(g => g && !groups.some(x => x.name.toLowerCase() === g.toLowerCase())))] : [];
+      if (!confirm(`Import ${recs.length} client(s)?${newG.length ? `\nNew group${newG.length > 1 ? 's' : ''} will be created: ${newG.join(', ')}` : ''}`)) return;
+      if (newG.length) { const { data } = await must(sb.from('client_groups').insert(newG.map(name => ({ name }))).select()); groups.push(...(data || [])); }
+      recs.forEach(r => { if ('_group' in r) { const g = r._group && groups.find(x => x.name.toLowerCase() === r._group.toLowerCase()); delete r._group; r.group_id = g ? g.id : null; } });
       await must(sb.from('clients').insert(recs));
       toast(`${recs.length} clients imported`); route();
     } catch (err) { toast(friendly(err), true); }
@@ -1853,6 +1862,56 @@ const cLabel = c => (c.client_code ? c.client_code + ' · ' : '') + c.name;
 const cleanPhone = v => { let d = String(v || '').replace(/\D/g, ''); if (d.length === 12 && d.startsWith('91')) d = d.slice(2); if (d.length === 11 && d.startsWith('0')) d = d.slice(1); return d || null; };
 const cleanEmail = v => String(v || '').split(/[,;\s]+/).map(x => x.trim().toLowerCase()).filter(Boolean).join(', ') || null;
 
+/* v43: client groups — several companies of one owner (e.g. "Vijay Group"), one shared email / mobile */
+let clientGrp = '';
+const groupName = id => { const g = id && groups.find(x => x.id === id); return g ? g.name : ''; };
+const groupOpts = sel => `<option value="">— Not in a group —</option>${groups.map(g => `<option value="${g.id}" ${g.id === sel ? 'selected' : ''}>${esc(g.name)}</option>`).join('')}${isManager() ? '<option value="__new">+ New group…</option>' : ''}`;
+async function newGroup() {
+  const name = (prompt('Name of the new group (e.g. Vijay Group)') || '').trim(); if (!name) return null;
+  if (groups.some(g => g.name.toLowerCase() === name.toLowerCase())) { toast('A group with that name already exists', true); return groups.find(g => g.name.toLowerCase() === name.toLowerCase()); }
+  try { const { data } = await must(sb.from('client_groups').insert({ name }).select().single()); groups.push(data); groups.sort((a, b) => a.name.localeCompare(b.name)); toast('Group added'); return data; }
+  catch (e) { toast(friendly(e), true); return null; }
+}
+function manageGroups() {
+  const draw = () => groups.length ? `<div class="table-wrap"><table><thead><tr><th>Group</th><th>Companies</th><th>Group email / mobile</th><th></th></tr></thead><tbody>
+    ${groups.map(g => { const mem = clients.filter(c => c.group_id === g.id);
+      return `<tr><td class="wrap"><b>${esc(g.name)}</b>${g.contact_person ? `<div class="muted small">${esc(g.contact_person)}</div>` : ''}</td>
+        <td class="wrap small">${mem.length ? mem.map(c => esc(cLabel(c))).join('<br>') : '<span class="muted">none yet</span>'}</td>
+        <td class="wrap small">${esc(g.emails || '—')}<div class="muted">${esc(g.phone || '')}</div></td>
+        <td class="row-btns"><button class="btn sm" data-ge="${g.id}">Edit</button></td></tr>`; }).join('')}</tbody></table></div>`
+    : '<div class="empty small">No groups yet. Add one, then choose it in each company\'s “Group” field.</div>';
+  const m = modal('Client groups', `<p class="muted small" style="margin-top:0">A group is several companies of one owner. Mail from the group's email is split by company (GSTIN / name in the file), and the owner gets one combined status.</p>
+    <div data-gl>${draw()}</div><div class="toolbar"><button class="btn primary" type="button" data-gadd>+ New group</button></div>`, { wide: true });
+  const el = m.el, redraw = () => { $('[data-gl]', el).innerHTML = draw(); };
+  $('[data-gadd]', el).onclick = async () => { if (await newGroup()) redraw(); };
+  $('[data-gl]', el).onclick = e => { const id = e.target.dataset.ge; if (id) editGroup(groups.find(g => g.id === id), redraw); };
+}
+function editGroup(g, done) {
+  const mem = clients.filter(c => c.group_id === g.id);
+  const m = modal('Edit group', `<div class="form-grid">
+    <label class="full">Group name<input name="name" value="${esc(g.name)}" required></label>
+    <label class="full">Group email(s) — the owner / accountant who sends data for all companies<input name="emails" value="${esc(g.emails || '')}" placeholder="vijay@example.com, accounts@vijaygroup.in" inputmode="email"></label>
+    <label>Mobile / WhatsApp<input name="phone" value="${esc(g.phone || '')}" inputmode="tel" placeholder="10-digit mobile"></label>
+    <label>Contact person<input name="contact_person" value="${esc(g.contact_person || '')}"></label>
+    <label class="full">Notes<textarea name="notes" rows="2">${esc(g.notes || '')}</textarea></label>
+    <div class="full small muted">Companies in this group (${mem.length}): ${mem.length ? mem.map(c => esc(cLabel(c))).join(', ') : 'none — choose this group in each company\'s Edit client window'}</div></div>`, {
+    extra: isManager() ? '<button class="btn danger" type="button" data-gdel>Delete group</button>' : '',
+    onSave: async el => {
+      const rec = { name: fv(el, 'name').trim(), emails: cleanEmail(fv(el, 'emails')), phone: cleanPhone(fv(el, 'phone')), contact_person: fv(el, 'contact_person') || null, notes: fv(el, 'notes') || null };
+      if (!rec.name) { toast('Group name is required', true); return false; }
+      if (rec.phone && !/^[6-9][0-9]{9}$/.test(rec.phone)) { toast('Mobile should be a 10-digit number', true); return false; }
+      if (rec.emails) { const bad = rec.emails.split(',').map(x => x.trim()).filter(x => !/^[^\s@,]+@[^\s@,]+\.[a-z]{2,}$/i.test(x)); if (bad.length) { toast('Email looks wrong: ' + bad.join(', '), true); return false; } }
+      await must(sb.from('client_groups').update(rec).eq('id', g.id)); Object.assign(g, rec); toast('Saved'); done && done();
+    }
+  });
+  const d = $('[data-gdel]', m.el);
+  if (d) d.onclick = async () => {
+    if (!confirm(`Delete the group “${g.name}”?\nThe ${mem.length} compan${mem.length === 1 ? 'y stays' : 'ies stay'} as normal clients — only the grouping is removed.`)) return;
+    try { await must(sb.from('client_groups').delete().eq('id', g.id)); groups = groups.filter(x => x.id !== g.id); clients.forEach(c => { if (c.group_id === g.id) c.group_id = null; }); m.close(); toast('Group deleted'); done && done(); }
+    catch (e) { toast(friendly(e), true); }
+  };
+}
+
 function editClient(c) {
   const isNew = !c;
   c = c || { gst_scheme: 'Monthly', services: ['GST'], active: true };
@@ -1869,6 +1928,7 @@ function editClient(c) {
     <label>CIN / LLPIN<input name="cin" value="${esc(c.cin || '')}" style="text-transform:uppercase"></label>
     <label>Default staff<select name="default_staff">${staffOpts(c.default_staff || '', { blank: 'None' })}</select></label>
     <label>Contact person<input name="contact_person" value="${esc(c.contact_person || '')}"></label>
+    ${groupsOn ? `<label>Group (companies of one owner)<select name="group_id">${groupOpts(c.group_id)}</select></label>` : ''}
     ${P4() ? `<label class="full">Address (for invoices)<textarea name="address" rows="2">${esc(c.address || '')}</textarea></label>` : ''}
     <p class="full muted small" style="margin:0">Several emails? Separate them with commas — reminders go to the first one.</p>
     <div class="full"><div class="small muted" style="margin-bottom:6px;font-weight:500">Services you handle for this client</div>
@@ -1898,7 +1958,8 @@ function editClient(c) {
         ...(P4() ? { address: fv(el, 'address') || null } : {}),
         notes: fv(el, 'notes') || null, active: $('[name=active]', el).checked, ...($('[name=chase_off]', el) ? { chase_off: $('[name=chase_off]', el).checked } : {}),
         services: $$('[data-svc] input:checked', el).map(i => i.value),
-        ...($('[name=tds_pay_work]', el) ? { tds_pay_work: $('[name=tds_pay_work]', el).checked, tds_return: $('[name=tds_return]', el).checked } : {})
+        ...($('[name=tds_pay_work]', el) ? { tds_pay_work: $('[name=tds_pay_work]', el).checked, tds_return: $('[name=tds_return]', el).checked } : {}),
+        ...($('[name=group_id]', el) ? { group_id: fv(el, 'group_id') || null } : {})
       };
       const probs = clientProblems(rec, isNew ? null : c.id);
       $$('.bad', el).forEach(x => x.classList.remove('bad'));
@@ -1922,6 +1983,10 @@ function editClient(c) {
     }
   });
   const el = m.el;
+  if ($('[name=group_id]', el)) $('[name=group_id]', el).onchange = async e => {
+    if (e.target.value !== '__new') return;
+    const g = await newGroup(); e.target.innerHTML = groupOpts(g ? g.id : c.group_id);
+  };
   if ($('[data-hist]', el)) $('[data-hist]', el).onclick = () => showHistory('client', c.id, (c.client_code ? c.client_code + ' · ' : '') + c.name);
   $('[name=gstin]', el).addEventListener('input', e => { const g = e.target.value.toUpperCase(), pan = $('[name=pan]', el); if (g.length >= 12 && !pan.value.trim()) pan.value = g.slice(2, 12); });
   if ($('[data-cp]', el)) $('[data-cp]', el).onclick = () => copy(statusUrl(c.status_token));
@@ -9542,7 +9607,7 @@ const HELP = {
       '**MCA → Companies & LLPs** holds each company / LLP with its AGM date, ROC due dates (AOC-4, MGT-7, Form 11, Form 8) and directors with DIR-3 KYC. The filing work itself is in **MCA → MCA / ROC work**.',
       [['Companies & LLPs', 'mca'], ['MCA work', 'work']]],
     [['notice', 'scn', 'show cause', 'asmt', 'drc', 'demand', 'hearing', 'intimation', '143', '148', 'reply'],
-      'Notices are under **Overview → All notices** (or GST / TDS / MCA notices in each group). Notice emails from the portals are added automatically; press **Check now** to look right away. Open a notice and use **Draft reply with AI** for a first draft, then edit, save and set the status to Reply drafted / Replied.',
+      'Notices have their own **Notices** section in the menu (All, GST, TDS and MCA notices). Everyone in the office can see them. Notice emails from the portals are added automatically; press **Check now** to look right away. Open a notice and use **Draft reply with AI** for a first draft, then edit, save and set the status to Reply drafted / Replied.',
       [['All notices', 'notices']]],
     [['bank', 'statement', 'tally', 'excel', 'convert', 'passbook'],
       '**Tools → Bank statements**: drop a bank statement (PDF, password PDF, Excel / CSV or a scan). Every row is checked against the running balance. Fill ledgers, then download **Excel** or **Tally XML** (ledgers first, then vouchers).',
@@ -9857,7 +9922,7 @@ async function renderChaseSettings(box) {
    Rows are written by the database itself (triggers), so nothing can skip them.
    ===================================================================== */
 const AUDIT = {
-  AREA: { clients: 'Client', tasks: 'Work', notices: 'Notice', invoices: 'Invoice', payments: 'Payment', profiles: 'Team member', task_docs: 'Work file', renewals: 'Renewal',
+  AREA: { clients: 'Client', client_groups: 'Client group', tasks: 'Work', notices: 'Notice', invoices: 'Invoice', payments: 'Payment', profiles: 'Team member', task_docs: 'Work file', renewals: 'Renewal',
     mca_companies: 'Company / LLP', mca_directors: 'Director', tds_challans: 'TDS challan', tds_returns: 'TDS return', fee_rates: 'Fee rate', due_dates: 'Due date',
     onboarding: 'Onboarding', tax_intimations: 'Tax intimation', checklist_templates: 'Checklist', settings: 'Settings', login: 'Sign-in' },
   ACT: { insert: 'Added', update: 'Changed', delete: 'Deleted', sign_in: 'Signed in', sign_out: 'Signed out', idle_sign_out: 'Signed out (5 min idle)', export: 'Exported' },
