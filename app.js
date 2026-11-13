@@ -26,7 +26,7 @@ const PERIOD_RULES = {
   prev_fy: 'Previous financial year', current_fy: 'Current financial year', none: 'Type manually'
 };
 
-let sb, me = null, profiles = [], clients = [], settings = {}, templates = [], rules = [], groups = [], groupsOn = false;
+let sb, me = null, profiles = [], clients = [], settings = {}, templates = [], rules = [];
 const isAdmin = () => !!me && me.role === 'admin';                                   // settings, team, keys
 const isPartner = () => !!me && ['admin', 'partner'].includes(me.role);               // + reports, delete, checklists
 const isManager = () => !!me && ['admin', 'partner', 'manager'].includes(me.role);    // + all work, clients, billing
@@ -237,7 +237,7 @@ async function start() {
   sb = window.supabase.createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON_KEY);
   sb.auth.onAuthStateChange(event => {
     if (event === 'PASSWORD_RECOVERY') showSetPassword();
-    if (event === 'SIGNED_OUT' && me) { IDLE.stop(); me = null; SESS.clear(); showLogin('You were signed out.'); }   // signed out in another tab
+    if (event === 'SIGNED_OUT' && me) { IDLE.stop(); me = null; showLogin('You were signed out.'); }   // signed out in another tab
   });
   const { data: { session } } = await sb.auth.getSession();
   if (recovering && session) return showSetPassword();
@@ -306,13 +306,13 @@ const IDLE = {
   tick() {
     if (!me) return this.stop();
     const left = this.LIMIT - (Date.now() - this.lastSeen());
-    if (left <= 0) return showLock();
+    if (left <= 0) return this.signOut();
     if (left <= this.WARN) this.showBar(Math.ceil(left / 1000)); else this.hideBar();
   },
   showBar(sec) {
     if (!this.bar) {
       this.bar = document.createElement('div'); this.bar.className = 'idle-bar'; this.bar.setAttribute('role', 'alertdialog');
-      this.bar.innerHTML = '<span>No activity for a while — the screen locks in <b></b> seconds.</span><button class="btn primary sm" type="button">I\'m here</button>';
+      this.bar.innerHTML = '<span>No activity for a while — you will be signed out in <b></b> seconds.</span><button class="btn primary sm" type="button">Stay signed in</button>';
       this.bar.querySelector('button').onclick = () => { this.stamp(true); this.hideBar(); };
       document.body.appendChild(this.bar);
     }
@@ -328,185 +328,6 @@ const IDLE = {
   }
 };
 
-/* ---------- v40: session length, lock screen, 2-step login (authenticator code) ---------- */
-const SESS = {
-  K_AT: 'jlr-auth-at', K_SHARED: 'jlr-shared', K_LOCK: 'jlr-locked', K_FAILS: 'jlr-lock-fails', K_ALIVE: 'jlr-alive',
-  phone() { try { return matchMedia('(pointer: coarse)').matches && Math.min(screen.width, screen.height) < 820; } catch (e) { return false; } },
-  maxAge() { return (this.phone() ? 1 : 3) * 864e5; },
-  get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
-  set(k, v) { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, String(v)); } catch (e) {} },
-  mark(shared) { this.set(this.K_AT, Date.now()); this.set(this.K_SHARED, shared ? '1' : null); this.set(this.K_LOCK, null); this.set(this.K_FAILS, null);
-    try { sessionStorage.setItem(this.K_ALIVE, '1'); } catch (e) {} },
-  clear() { [this.K_AT, this.K_SHARED, this.K_LOCK, this.K_FAILS].forEach(k => this.set(k, null)); try { sessionStorage.removeItem(this.K_ALIVE); } catch (e) {} },
-  // why this session must end now ('' = fine)
-  endReason() {
-    const at = +this.get(this.K_AT) || 0;
-    if (!at) { this.set(this.K_AT, Date.now()); try { sessionStorage.setItem(this.K_ALIVE, '1'); } catch (e) {} return ''; }   // signed in before v40
-    if (Date.now() - at > this.maxAge()) return `For safety you are signed out every ${this.phone() ? 'day' : '3 days'}. Please sign in again.`;
-    let alive = null; try { alive = sessionStorage.getItem(this.K_ALIVE); } catch (e) {}
-    if (this.get(this.K_SHARED) === '1' && !alive) return 'This is marked as a shared computer, so you were signed out when the browser closed.';
-    try { sessionStorage.setItem(this.K_ALIVE, '1'); } catch (e) {}
-    return '';
-  },
-  locked() { return this.get(this.K_LOCK) === '1'; },
-  async end(msg) { IDLE.stop(); me = null; this.clear(); try { await sb.auth.signOut({ scope: 'local' }); } catch (e) {} history.replaceState(null, '', location.pathname); showLogin(msg); }
-};
-addEventListener('storage', e => { if (e.key === SESS.K_LOCK && e.newValue === '1' && me) showLock(); });
-
-function showLock(msg) {
-  IDLE.stop(); SESS.set(SESS.K_LOCK, '1');
-  const email = (me && me.email) || SESS.get('jlr-lock-email') || '';
-  if (email) SESS.set('jlr-lock-email', email);
-  me = null;
-  ['#helpFab', '#helpPane', '.modal-back', '.modal-wrap', '.idle-bar'].forEach(q => $$(q).forEach(x => x.remove()));
-  root.innerHTML = authShell(`<form class="card auth" id="lockForm">
-    <div class="auth-k">Screen locked</div><h2>Welcome back</h2>
-    <p class="muted small">Locked after 5 minutes without activity. Enter your password to continue${email ? ` as <b>${esc(email)}</b>` : ''}.</p>
-    ${msg ? `<p class="note warn">${esc(msg)}</p>` : ''}
-    ${pwField('Password', 'password', 'required autocomplete="current-password" autofocus')}
-    <button class="btn primary full" type="submit">Unlock</button>
-    <button class="link small" type="button" id="lockOut">Sign out</button></form>`);
-  wireAuthShell();
-  const f = $('#lockForm');
-  $('#lockOut').onclick = () => SESS.end();
-  f.onsubmit = async e => {
-    e.preventDefault();
-    const b = $('button[type=submit]', f); b.disabled = true; b.textContent = 'Checking…';
-    let ok = false;
-    try {   // check the password on a throw-away client: the signed-in session (with its 2-step level) is kept
-      const tmp = window.supabase.createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON_KEY, { auth: { persistSession: false, autoRefreshToken: false, storageKey: 'jlr-lock-check' } });
-      const { error } = await tmp.auth.signInWithPassword({ email, password: f.password.value });
-      ok = !error;
-      if (ok) tmp.auth.signOut({ scope: 'local' }).catch(() => {});
-    } catch (err) { ok = false; }
-    if (ok) { SESS.set(SESS.K_LOCK, null); SESS.set(SESS.K_FAILS, null); IDLE.stamp(true); return boot(); }
-    const fails = (+SESS.get(SESS.K_FAILS) || 0) + 1; SESS.set(SESS.K_FAILS, fails);
-    if (fails >= 3) return SESS.end('3 wrong passwords at the lock screen — please sign in again with your password and code.');
-    b.disabled = false; b.textContent = 'Unlock'; f.password.value = '';
-    toast(`Wrong password — ${3 - fails} ${3 - fails === 1 ? 'try' : 'tries'} left`, true);
-    f.classList.remove('shake'); void f.offsetWidth; f.classList.add('shake');
-  };
-}
-
-/* 2-step: returns true when the session may go on */
-async function mfaGate(prof) {
-  const pol = await safe(sb.rpc('mfa_policy'));
-  if (pol.error) return true;                                   // update-2step-login.sql not installed yet
-  const p = pol.data || {};
-  const lv = await sb.auth.mfa.getAuthenticatorAssuranceLevel();
-  const cur = lv.data && lv.data.currentLevel, next = lv.data && lv.data.nextLevel;
-  if (cur === 'aal2') return true;
-  if (p.has_factor || next === 'aal2') { await mfaCodeScreen(); return false; }
-  if (p.required) { await mfaEnrollScreen(true, prof); return false; }
-  return true;
-}
-async function mfaFactor() {
-  const { data } = await sb.auth.mfa.listFactors();
-  return ((data && data.totp) || []).find(f => f.status === 'verified');
-}
-async function mfaCodeScreen(msg) {
-  root.innerHTML = authShell(`<form class="card auth" id="mfaForm">
-    <div class="auth-k">2-step login</div><h2>Enter your code</h2>
-    <p class="muted small">Open <b>Google Authenticator</b> or <b>Microsoft Authenticator</b> on your phone and type the 6-digit code for <b>${esc(cfg.FIRM_NAME || 'the tracker')}</b>.</p>
-    ${msg ? `<p class="note warn">${esc(msg)}</p>` : ''}
-    <label>6-digit code<input name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required autofocus class="otp"></label>
-    <button class="btn primary full" type="submit">Continue</button>
-    <p class="muted small">Lost your phone? Ask the Admin to reset your 2-step login.</p>
-    <button class="link small" type="button" id="mfaOut">Sign out</button></form>`);
-  wireAuthShell();
-  $('#mfaOut').onclick = () => SESS.end();
-  const f = $('#mfaForm');
-  f.onsubmit = async e => {
-    e.preventDefault();
-    const b = $('button[type=submit]', f); b.disabled = true; b.textContent = 'Checking…';
-    const fac = await mfaFactor();
-    if (!fac) return mfaEnrollScreen(false);
-    const { error } = await sb.auth.mfa.challengeAndVerify({ factorId: fac.id, code: f.code.value.trim() });
-    if (error) { b.disabled = false; b.textContent = 'Continue'; f.code.value = ''; toast('That code did not work — check the time on your phone and try the newest code', true); f.classList.remove('shake'); void f.offsetWidth; f.classList.add('shake'); return; }
-    Promise.resolve().then(() => AUDIT.event('sign_in_2step')).catch(() => {});
-    boot();
-  };
-}
-async function mfaEnrollScreen(required, prof, inModal) {
-  // remove half-finished set-ups first
-  const { data } = await sb.auth.mfa.listFactors();
-  for (const f of ((data && data.all) || []).filter(x => x.status !== 'verified')) { try { await sb.auth.mfa.unenroll({ factorId: f.id }); } catch (e) {} }
-  const en = await sb.auth.mfa.enroll({ factorType: 'totp', friendlyName: 'Tracker ' + new Date().toISOString().slice(0, 16) });
-  if (en.error) { toast(en.error.message, true); return; }
-  const qr = en.data.totp.qr_code, secret = en.data.totp.secret, fid = en.data.id;
-  const html = `<div class="auth-k">2-step login</div><h2>Set up your authenticator</h2>
-    ${required ? '<p class="note">Your role needs a 6-digit code at sign-in. One-time set-up, about a minute.</p>' : ''}
-    <ol class="small steps"><li>Install <b>Google Authenticator</b> or <b>Microsoft Authenticator</b> on your phone.</li>
-      <li>In the app tap <b>+</b> → <b>Scan a QR code</b> and scan this:</li></ol>
-    <div class="mfa-qr"><img src="${esc(qr)}" alt="QR code for the authenticator app" width="180" height="180"></div>
-    <details class="small"><summary>Can't scan? Type this key instead</summary><code class="mfa-secret">${esc(secret)}</code></details>
-    <label>Then type the 6-digit code it shows<input name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required class="otp"></label>`;
-  if (inModal) {
-    const m = modal('2-step login', `<form id="enF">${html}<button class="btn primary" type="submit">Turn on 2-step login</button></form>`);
-    $('#enF', m.el).onsubmit = async e => {
-      e.preventDefault();
-      const { error } = await sb.auth.mfa.challengeAndVerify({ factorId: fid, code: e.target.code.value.trim() });
-      if (error) return toast('That code did not work — try the newest code', true);
-      m.close ? m.close() : $$('[data-x]', m.el)[0]?.click();
-      toast('2-step login is on. You will be asked for a code at each new sign-in.');
-    };
-    return;
-  }
-  root.innerHTML = authShell(`<form class="card auth" id="enForm">${html}
-    <button class="btn primary full" type="submit">Turn on and continue</button>
-    <button class="link small" type="button" id="enOut">Sign out</button></form>`);
-  wireAuthShell();
-  $('#enOut').onclick = () => SESS.end();
-  $('#enForm').onsubmit = async e => {
-    e.preventDefault();
-    const { error } = await sb.auth.mfa.challengeAndVerify({ factorId: fid, code: e.target.code.value.trim() });
-    if (error) { toast('That code did not work — try the newest code', true); return; }
-    toast('2-step login is on');
-    boot();
-  };
-}
-async function myTwoStep() {
-  const fac = await mfaFactor();
-  if (!fac) return mfaEnrollScreen(false, me, true);
-  modal('2-step login', `<p><span class="pill g">● On</span> Your sign-in asks for a 6-digit code from your authenticator app.</p>
-    <p class="muted small">New phone or lost phone? Ask the Admin to <b>Reset 2-step</b> for you (Settings → Staff &amp; senior), then set it up again at your next sign-in.</p>`);
-}
-
-/* Settings → Staff & senior: security card (Admin) */
-async function renderSecurityCard(box) {
-  const r = await safe(sb.rpc('admin_security_list'));
-  if (r.error) { box.innerHTML = '<div class="card"><h3>Sign-in security</h3><p class="note small">Run <b>update-2step-login.sql</b> in Supabase to switch this on.</p></div>'; return; }
-  const list = r.data || [], when = t => t ? new Date(t).toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' }) : '—';
-  const staff = list.filter(x => ['admin', 'partner', 'manager', 'staff'].includes(x.role));
-  const need = staff.filter(x => ['admin', 'partner', 'manager'].includes(x.role) && x.active !== false && !x.mfa);
-  const meHas = (staff.find(x => x.id === me.id) || {}).mfa;
-  box.innerHTML = `<div class="card"><h3>Sign-in security</h3>
-    <p class="muted small">2-step login asks for a 6-digit code from an authenticator app at each new sign-in. Sessions last 3 days (1 day on phones); after 5 minutes idle the screen locks and opens with the password. Shared computers sign out when the browser closes.</p>
-    <label class="check"><input type="checkbox" id="mfaReq" ${settings.mfa_enforced ? 'checked' : ''}> <b>Require 2-step login for Admin, Partner and Manager</b></label>
-    ${!meHas ? '<p class="note warn small">First set up your own code: name menu (top right) → <b>2-step login</b>. Then tick the box above.</p>' : need.length ? `<p class="note small">Not set up yet: ${need.map(x => esc(x.name)).join(', ')}. ${settings.mfa_enforced ? 'They will be asked to set it up at their next sign-in.' : 'They will be asked once you switch this on.'}</p>` : ''}
-    <div class="table-wrap" style="margin-top:10px"><table><thead><tr><th>Name</th><th>Role</th><th>2-step</th><th>Last sign-in</th><th class="r">Devices</th><th></th></tr></thead><tbody>
-      ${staff.map(x => `<tr><td>${esc(x.name)}${x.id === me.id ? ' <span class="muted small">(you)</span>' : ''}</td><td>${esc(ROLE_LABEL[x.role] || x.role)}</td>
-        <td>${x.mfa ? '<span class="pill g">● On</span>' : '<span class="pill a">Off</span>'}</td><td class="small">${when(x.last_sign_in)}</td><td class="r">${x.sessions || 0}</td>
-        <td class="row-btns">${x.id === me.id ? '' : `${x.mfa ? `<button class="btn sm" data-rs="${x.id}">Reset 2-step</button>` : ''}<button class="btn sm" data-so="${x.id}">Sign out devices</button>`}</td></tr>`).join('')}
-    </tbody></table></div>
-    <div class="toolbar" style="margin-top:12px"><button class="btn" id="soAll">Sign out everyone except me</button></div></div>`;
-  $('#mfaReq', box).onchange = async e => {
-    try { await must(sb.rpc('set_mfa_enforced', { p_on: e.target.checked })); settings.mfa_enforced = e.target.checked; toast(e.target.checked ? '2-step login is now required for Admin, Partner and Manager' : 'No longer required'); renderSecurityCard(box); }
-    catch (err) { e.target.checked = !e.target.checked; toast(friendly(err), true); }
-  };
-  box.onclick = async e => {
-    const b = e.target.closest('button'); if (!b) return;
-    const who = id => (staff.find(x => x.id === id) || {}).name || 'this person';
-    try {
-      if (b.dataset.rs) { if (!confirm(`Reset 2-step login for ${who(b.dataset.rs)}? They are signed out and set it up again on their new phone at the next sign-in.`)) return; await must(sb.rpc('admin_reset_mfa', { p_user: b.dataset.rs })); toast('2-step reset — they set it up again at next sign-in'); }
-      else if (b.dataset.so) { if (!confirm(`Sign ${who(b.dataset.so)} out on all devices?`)) return; const { data } = await must(sb.rpc('admin_sign_out', { p_user: b.dataset.so })); toast(`Signed out (${data || 0} device${data === 1 ? '' : 's'}) — takes effect within the hour at most`); }
-      else if (b.id === 'soAll') { if (!confirm('Sign out everyone except you, on all devices?')) return; const { data } = await must(sb.rpc('admin_sign_out', { p_user: null })); toast(`${data || 0} device session(s) signed out`); }
-      else return;
-      renderSecurityCard(box);
-    } catch (err) { toast(friendly(err), true); }
-  };
-}
-
 function showLogin(msg) {
   IDLE.stop(); ['#helpFab', '#helpPane', '.modal-back', '.modal-wrap'].forEach(q => $$(q).forEach(x => x.remove()));
   root.innerHTML = authShell(`<form class="card auth" id="loginForm">
@@ -514,7 +335,6 @@ function showLogin(msg) {
     <h2>Sign in</h2>${msg ? `<p class="note warn">${esc(msg)}</p>` : ''}
     <label>Email<input name="email" type="email" required autocomplete="username" placeholder="you@firm.in"></label>
     ${pwField('Password', 'password', 'required autocomplete="current-password"')}
-    <label class="check small"><input type="checkbox" name="shared"> Shared computer — sign me out when I close the browser</label>
     <button class="btn primary full" type="submit">Sign in</button>
     <button class="link small" type="button" id="forgot">Forgot password?</button></form>`);
   wireAuthShell();
@@ -524,7 +344,7 @@ function showLogin(msg) {
     const b = $('button[type=submit]', f); b.disabled = true; b.textContent = 'Signing in…';
     const { error } = await sb.auth.signInWithPassword({ email: f.email.value.trim(), password: f.password.value });
     if (error) { toast(error.message, true); b.disabled = false; b.textContent = 'Sign in'; f.classList.remove('shake'); void f.offsetWidth; f.classList.add('shake'); }
-    else { f.classList.add('done'); SESS.mark(f.shared.checked); IDLE.stamp(true); boot(); }
+    else { f.classList.add('done'); IDLE.stamp(true); boot(); }
   };
   $('#forgot').onclick = async () => {
     const email = f.email.value.trim();
@@ -557,13 +377,13 @@ async function boot() {
   try {
     const { data: { user } } = await sb.auth.getUser();
     if (!user) return showLogin();
-    const why = SESS.endReason(); if (why) return SESS.end(why);
-    if (SESS.locked() || IDLE.expired()) { me = { email: user.email }; return showLock(); }
-    const { data: prof } = await sb.from('profiles').select('*').eq('id', user.id).maybeSingle();
-    if (!prof) { await SESS.end('Your login has no profile. Ask the admin to check the setup (schema.sql).'); return; }
-    if (!prof.active) { await SESS.end('Your account has been deactivated. Please contact the admin.'); return; }
-    if (!(await mfaGate(prof))) return;                           // code screen / set-up screen shown instead
-    const refs = await loadRefs().then(() => null, e => e);
+    if (IDLE.expired()) { try { await sb.auth.signOut({ scope: 'local' }); } catch (e) {} return showLogin('You were signed out after 5 minutes without activity. Please sign in again.'); }
+    const [{ data: prof }, refs] = await Promise.all([            // profile and lists in one round trip
+      sb.from('profiles').select('*').eq('id', user.id).maybeSingle(),
+      loadRefs().then(() => null, e => e)
+    ]);
+    if (!prof) { await sb.auth.signOut(); return showLogin('Your login has no profile. Ask the admin to check the setup (schema.sql).'); }
+    if (!prof.active) { await sb.auth.signOut(); return showLogin('Your account has been deactivated. Please contact the admin.'); }
     if (refs) throw refs;
     me = prof;
     IDLE.start();
@@ -580,17 +400,15 @@ async function boot() {
 }
 
 async function loadRefs() {
-  const [p, c, s, t, r, gr] = await Promise.all([          // all in one round trip
+  const [p, c, s, t, r] = await Promise.all([          // all in one round trip
     must(sb.from('profiles').select('*').order('full_name')),
     must(sb.from('clients').select('*').order('name')),
     must(sb.from('settings').select('*').eq('id', 1).maybeSingle()),
     sb.from('checklist_templates').select('*').order('id'),     // empty if update-checklists.sql has not been run yet
-    sb.from('linked_rules').select('*').order('id'),
-    sb.from('client_groups').select('*').order('name')          // v43: empty if update-client-groups.sql has not been run yet
+    sb.from('linked_rules').select('*').order('id')
   ]);
   profiles = p.data || []; clients = c.data || []; settings = s.data || {};
   templates = t.error ? [] : t.data || []; rules = r.error ? [] : r.data || [];
-  groupsOn = !gr.error; groups = gr.error ? [] : gr.data || [];
 }
 
 const canLayoutB = () => !!me && (me.role === 'admin' || me.role === 'staff');      // Performance layout: Admin and Team members only
@@ -636,11 +454,10 @@ const NI = {   // menu icons (stroke SVG paths)
 const navIcon = k => `<svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${NI[k] || NI.work}</svg>`;
 function navGroups() {
   const G = [
-    ['Overview', [['dashboard', 'Dashboard'], ['calendar', 'Due-date calendar'], ['work', isManager() ? 'All work' : 'My work']]],
-    ['GST', [['work-gst', isManager() ? 'GST work' : 'My GST work', 'gstw'], ['gst', 'GST review', 'gst']]],
-    ['TDS', [['work-tds', isManager() ? 'TDS / TCS work' : 'My TDS work', 'tds'], ['tds', 'TDS working', 'tdsw']]],
-    ['MCA', [['work-mca', isManager() ? 'MCA / ROC work' : 'My MCA work', 'mca'], ['mca', 'Companies & LLPs', 'companies']]],
-    !settings.notices_off && ['Notices', [['notices', 'All notices', 'notices'], ['notices-gst', 'GST notices', 'notices'], ['notices-tds', 'TDS notices', 'notices'], ['notices-mca', 'MCA notices', 'notices']]],
+    ['Overview', [['dashboard', 'Dashboard'], ['calendar', 'Due-date calendar'], ['work', isManager() ? 'All work' : 'My work'], ['notices', 'All notices', 'notices']]],
+    ['GST', [['work-gst', isManager() ? 'GST work' : 'My GST work', 'gstw'], ['gst', 'GST review', 'gst'], ['notices-gst', 'GST notices', 'notices']]],
+    ['TDS', [['work-tds', isManager() ? 'TDS / TCS work' : 'My TDS work', 'tds'], ['tds', 'TDS working', 'tdsw'], ['notices-tds', 'TDS notices', 'notices']]],
+    ['MCA', [['work-mca', isManager() ? 'MCA / ROC work' : 'My MCA work', 'mca'], ['mca', 'Companies & LLPs', 'companies'], ['notices-mca', 'MCA notices', 'notices']]],
     ['Tools', [['bank', 'Bank statements', 'bank'], ['acks', 'Filing acknowledgements'], ['calc', 'Late fee calculator'], ['checklists', 'Checklists'], ['updates', 'Law updates']]],
     ['Clients', [isManager() && ['clients', 'Clients'], ['docs', 'Documents for the month'], ['onboarding', 'Onboarding'], ['renewals', 'Renewals (DSC, LUT…)'], ['inbox', 'Client mail'], ['clientreport', 'Monthly client reports']]],
     ['Payments & billing', [['taxpay', 'Tax payment intimation'], isManager() && ['billing', 'Billing & fees']]],
@@ -672,7 +489,7 @@ function renderShell() {
         <div class="user"><button class="btn ghost sm user-btn" id="userBtn"><span class="u-av" aria-hidden="true">${esc(((me.full_name || me.email || '?').trim()[0] || '?').toUpperCase())}</span><span class="u-nm">${esc(me.full_name || me.email)}<small>${esc(ROLE_LABEL[me.role] || me.role)}</small></span> ▾</button>
           <div class="menu" id="userMenu" hidden>
             <div class="menu-info">${esc(me.email)}<br><span class="badge">${esc(ROLE_LABEL[me.role] || me.role)}</span></div>
-            <button data-act="theme">Theme &amp; layout</button><button data-act="install">Install app on this device</button><button data-act="pw">Change password</button><button data-act="2step">2-step login</button><button data-act="out">Sign out</button></div></div>
+            <button data-act="theme">Theme &amp; layout</button><button data-act="install">Install app on this device</button><button data-act="pw">Change password</button><button data-act="out">Sign out</button></div></div>
       </header>
       <main id="view"></main>
     </div></div>`;
@@ -682,8 +499,7 @@ function renderShell() {
   document.addEventListener('click', () => { menu.hidden = true; const r = $('#gRes'); if (r) r.hidden = true; });
   menu.onclick = async e => {
     const act = e.target.dataset.act;
-    if (act === 'out') { IDLE.stop(); try { await AUDIT.event('sign_out'); } catch (err) {} location.hash = ''; SESS.end(); }
-    if (act === '2step') myTwoStep();
+    if (act === 'out') { IDLE.stop(); me = null; await AUDIT.event('sign_out'); await sb.auth.signOut(); location.hash = ''; showLogin(); }
     if (act === 'pw') changePassword();
     if (act === 'theme') pickTheme();
     if (act === 'install') installApp();
@@ -1484,8 +1300,8 @@ const dashFull = async v => {      // the full dashboard (Admin → System tab)
   const waitingClients = new Set(waiting.map(r => r.client_id)).size;
   const nLate = notRows.filter(n => isOpenNotice(n.status) && n.status !== 'Hearing' && n.reply_due && n.reply_due < t).length;
   const nSoon = notRows.filter(n => isOpenNotice(n.status) && n.reply_due >= t && n.reply_due <= in7).length;
-  const nHear = notRows.filter(n => n.status !== 'Closed' && n.hearing_date && n.hearing_date >= t && n.hearing_date <= in7).length;
-  if (!settings.notices_off && (nLate || nSoon || nHear)) chips.push(noticeChip(nLate, nSoon, nHear));
+  if (nLate && !settings.notices_off) chips.push(`<a class="chip red" href="#/notices">${nLate} notice repl${nLate > 1 ? 'ies' : 'y'} overdue</a>`);
+  if (nSoon && !settings.notices_off) chips.push(`<a class="chip amber" href="#/notices">${nSoon} notice repl${nSoon > 1 ? 'ies' : 'y'} due in 7 days</a>`);
   if (invRows) { const bal = invRows.reduce((a, i) => a + num(i.total) - num(i.paid), 0); if (bal > 0.009) chips.push(`<a class="chip blue" href="#/billing" data-billdue>${inr(bal)} payments pending</a>`); }
   if (luNew) chips.push(`<a class="chip blue" href="#/updates">${luNew} new law update${luNew > 1 ? 's' : ''}</a>`);
   if (fuDue.length) chips.push(`<a class="chip amber" href="#/work" data-jump="fudue">${fuDue.length} client follow-up${fuDue.length > 1 ? 's' : ''} due today</a>`);
@@ -1755,48 +1571,43 @@ VIEWS.clients = async v => {
   const obMap = Object.fromEntries((obR.error ? [] : obR.data || []).map(o => [o.client_id, o]));
   v.innerHTML = `<div class="page-head"><h2>Clients</h2><span class="muted">${clients.filter(c => c.active).length} active</span><span class="spacer"></span>
       ${isAdmin() ? '<button class="btn ghost" id="lgLog">Login access log</button>' : ''}<button class="btn" id="tplBtn">CSV template</button><button class="btn" id="impBtn">Import CSV</button>
-      ${groupsOn && isManager() ? '<button class="btn" id="grpBtn">Groups</button>' : ''}<button class="btn primary" id="addC">+ Add client</button><input type="file" id="impFile" accept=".csv,text/csv" hidden></div>
+      <button class="btn primary" id="addC">+ Add client</button><input type="file" id="impFile" accept=".csv,text/csv" hidden></div>
     <div id="cMiss"></div>
     <div class="toolbar"><input type="search" id="cq" placeholder="Search code / name / GSTIN / PAN" value="${esc(clientQ)}">
-      ${groupsOn && groups.length ? `<select id="cGrp"><option value="">All groups</option>${groups.map(g => `<option value="${g.id}" ${clientGrp === g.id ? 'selected' : ''}>${esc(g.name)}</option>`).join('')}<option value="none" ${clientGrp === 'none' ? 'selected' : ''}>Not in a group</option></select>` : ''}
       <label class="check"><input type="checkbox" id="inact" ${showInactive ? 'checked' : ''}> Show inactive</label></div>
     <div id="cList"></div>`;
   const render = () => {
     const s = clientQ.toLowerCase();
-    const list = clients.filter(c => (showInactive || c.active) && (!s || [c.client_code, c.name, c.gstin, c.pan, c.tan, c.cin, groupName(c.group_id)].join(' ').toLowerCase().includes(s))
-      && (!clientGrp || (clientGrp === 'none' ? !c.group_id : c.group_id === clientGrp)))
+    const list = clients.filter(c => (showInactive || c.active) && (!s || [c.client_code, c.name, c.gstin, c.pan, c.tan, c.cin].join(' ').toLowerCase().includes(s)))
       .sort((a, b) => (a.client_code ? 0 : 1) - (b.client_code ? 0 : 1) || String(a.client_code || a.name).localeCompare(String(b.client_code || b.name), 'en', { numeric: true }));
     const miss = clients.filter(c => c.active && clientProblems({ ...c, client_code: (c.client_code || '').toUpperCase() }, c.id).length);
     $('#cMiss').innerHTML = miss.length ? `<p class="note warn small">${miss.length} active client${miss.length > 1 ? 's are' : ' is'} missing required details (client code, PAN, GSTIN, phone or email): ${miss.slice(0, 8).map(c => `<button class="link" data-ed="${c.id}">${esc(c.name)}</button>`).join(', ')}${miss.length > 8 ? ' …' : ''}. Open each one and fill them in.</p>` : '';
     $('#cMiss').onclick = e => { if (e.target.dataset.ed) editClient(clientById(e.target.dataset.ed)); };
-    $('#cList').innerHTML = list.length ? `<div class="table-wrap"><table><thead><tr><th>Code</th><th>Client</th><th>GSTIN</th><th>PAN / TAN</th><th>GST scheme</th><th>Services</th><th>Default staff</th><th>Status link</th></tr></thead><tbody>
+    $('#cList').innerHTML = list.length ? `<div class="table-wrap"><table><thead><tr><th>Code</th><th>Client</th><th>GSTIN</th><th>PAN / TAN</th><th>GST scheme</th><th>Services</th><th>Default staff</th><th>Status link</th><th></th></tr></thead><tbody>
       ${list.map(c => `<tr>
         <td>${c.client_code ? `<span class="ccode">${esc(c.client_code)}</span>` : '<span class="late small">—</span>'}</td>
-        <td class="wrap"><button class="link c-name" data-ed="${c.id}" title="Edit client"><b>${esc(c.name)}</b></button>${c.active ? '' : ' <span class="badge">inactive</span>'}${c.group_id && groupName(c.group_id) ? ` <span class="pill b small" title="Group">${esc(groupName(c.group_id))}</span>` : ''}<div class="muted small">${esc([c.contact_person, c.phone].filter(Boolean).join(' · '))}</div><div class="c-acts"><button class="btn sm" data-ed="${c.id}">✏️ Edit</button><button class="btn sm" data-lgc="${c.id}" title="GST / TDS / MCA portal logins">🔑 Logins</button><button class="btn sm" data-obc="${c.id}" title="KYC, engagement letter, fees, recurring work">${obMap[c.id] ? (obMap[c.id].status === 'Completed' ? '✓ Onboarded' : `Onboarding ${obProgress(obMap[c.id]).done}/${obProgress(obMap[c.id]).total}`) : 'Onboard'}</button></div></td>
+        <td class="wrap"><b>${esc(c.name)}</b>${c.active ? '' : ' <span class="badge">inactive</span>'}<div class="muted small">${esc([c.contact_person, c.phone].filter(Boolean).join(' · '))}</div></td>
         <td class="small">${esc(c.gstin || '—')}</td><td class="small">${esc(c.pan || '—')}<div class="muted">${esc(c.tan || '')}</div></td>
         <td>${esc(c.gst_scheme)}</td><td class="wrap">${(c.services || []).map(wtBadge).join(' ')}</td>
         <td>${esc(profName(c.default_staff) || '—')}</td>
         <td class="row-btns"><button class="btn sm" data-copy="${c.id}">Copy link</button><a class="btn sm" href="${esc(waShare(clientMsg(c), c.phone))}" target="_blank" rel="noopener" title="Send on WhatsApp">WhatsApp</a><a class="btn sm ghost" href="${esc(statusUrl(c.status_token))}" target="_blank" rel="noopener">Open</a></td>
-        </tr>`).join('')}
+        <td class="row-btns"><button class="btn sm" data-lgc="${c.id}" title="GST / TDS / MCA portal logins">🔑 Logins</button><button class="btn sm" data-obc="${c.id}" title="KYC, engagement letter, fees, recurring work">${obMap[c.id] ? (obMap[c.id].status === 'Completed' ? '✓ Onboarded' : `Onboarding ${obProgress(obMap[c.id]).done}/${obProgress(obMap[c.id]).total}`) : 'Onboard'}</button><button class="btn sm" data-ed="${c.id}">Edit</button></td></tr>`).join('')}
       </tbody></table></div>` : `<div class="table-wrap"><div class="empty">${clients.length ? 'No match.' : 'No clients yet. Add one, or import your list from a CSV file.'}</div></div>`;
   };
   render();
   $('#cq').oninput = e => { clientQ = e.target.value; render(); };
   $('#inact').onchange = e => { showInactive = e.target.checked; render(); };
-  if ($('#cGrp')) $('#cGrp').onchange = e => { clientGrp = e.target.value; render(); };
-  if ($('#grpBtn')) $('#grpBtn').onclick = () => manageGroups();
   $('#addC').onclick = () => editClient(null);
   $('#cList').onclick = e => {
-    const t = e.target.closest('[data-copy],[data-ed],[data-lgc],[data-obc]'); if (!t) return; const d = t.dataset;
-    if (d.copy) copy(statusUrl(clientById(d.copy).status_token));
-    if (d.ed) editClient(clientById(d.ed));
-    if (d.lgc) openLogins(clientById(d.lgc));
-    if (d.obc) openOnboarding(clientById(d.obc));
+    if (e.target.dataset.copy) copy(statusUrl(clientById(e.target.dataset.copy).status_token));
+    if (e.target.dataset.ed) editClient(clientById(e.target.dataset.ed));
+    if (e.target.dataset.lgc) openLogins(clientById(e.target.dataset.lgc));
+    if (e.target.dataset.obc) openOnboarding(clientById(e.target.dataset.obc));
   };
   if ($('#lgLog')) $('#lgLog').onclick = () => loginLog(null);
   $('#tplBtn').onclick = () => download('clients-template.csv', toCSV([
-    ['client_code', 'name', 'gstin', 'pan', 'tan', 'cin', 'contact_person', 'phone', 'email', 'gst_scheme', 'services', 'default_staff_email', ...(groupsOn ? ['group'] : [])],
-    ['JLR001', 'ABC Traders', '33AAAAA0000A1Z5', 'AAAAA0000A', 'CHEA00000A', '', 'Mr. Kumar', '9876543210', 'abc@example.com', 'Monthly', 'GST;TDS;Income Tax', me.email, ...(groupsOn ? ['Vijay Group'] : [])]]));
+    ['client_code', 'name', 'gstin', 'pan', 'tan', 'cin', 'contact_person', 'phone', 'email', 'gst_scheme', 'services', 'default_staff_email'],
+    ['JLR001', 'ABC Traders', '33AAAAA0000A1Z5', 'AAAAA0000A', 'CHEA00000A', '', 'Mr. Kumar', '9876543210', 'abc@example.com', 'Monthly', 'GST;TDS;Income Tax', me.email]]));
   $('#impBtn').onclick = () => $('#impFile').click();
   $('#impFile').onchange = async e => {
     const file = e.target.files[0]; e.target.value = '';
@@ -1814,7 +1625,7 @@ VIEWS.clients = async v => {
         const staff = profiles.find(p => (p.email || '').toLowerCase() === get(r, 'default_staff_email').toLowerCase());
         return { client_code: get(r, 'client_code').toUpperCase() || null, name: get(r, 'name'), gstin: get(r, 'gstin').toUpperCase() || null, pan: get(r, 'pan').toUpperCase() || null, tan: get(r, 'tan').toUpperCase() || null,
           cin: get(r, 'cin').toUpperCase() || null, contact_person: get(r, 'contact_person') || null, phone: cleanPhone(get(r, 'phone')), email: cleanEmail(get(r, 'email')),
-          gst_scheme: scheme, services, default_staff: staff ? staff.id : null, ...(groupsOn && col('group') >= 0 ? { _group: get(r, 'group') } : {}) };
+          gst_scheme: scheme, services, default_staff: staff ? staff.id : null };
       });
       const seenCodes = new Set(), bad = [];
       recs.forEach((r, i) => {
@@ -1828,10 +1639,7 @@ VIEWS.clients = async v => {
           <ul class="small">${bad.slice(0, 40).map(b => `<li>${esc(b)}</li>`).join('')}</ul>${bad.length > 40 ? `<p class="small">…and ${bad.length - 40} more</p>` : ''}`);
         return;
       }
-      const newG = groupsOn ? [...new Set(recs.map(r => r._group).filter(g => g && !groups.some(x => x.name.toLowerCase() === g.toLowerCase())))] : [];
-      if (!confirm(`Import ${recs.length} client(s)?${newG.length ? `\nNew group${newG.length > 1 ? 's' : ''} will be created: ${newG.join(', ')}` : ''}`)) return;
-      if (newG.length) { const { data } = await must(sb.from('client_groups').insert(newG.map(name => ({ name }))).select()); groups.push(...(data || [])); }
-      recs.forEach(r => { if ('_group' in r) { const g = r._group && groups.find(x => x.name.toLowerCase() === r._group.toLowerCase()); delete r._group; r.group_id = g ? g.id : null; } });
+      if (!confirm(`Import ${recs.length} client(s)?`)) return;
       await must(sb.from('clients').insert(recs));
       toast(`${recs.length} clients imported`); route();
     } catch (err) { toast(friendly(err), true); }
@@ -1863,56 +1671,6 @@ const cLabel = c => (c.client_code ? c.client_code + ' · ' : '') + c.name;
 const cleanPhone = v => { let d = String(v || '').replace(/\D/g, ''); if (d.length === 12 && d.startsWith('91')) d = d.slice(2); if (d.length === 11 && d.startsWith('0')) d = d.slice(1); return d || null; };
 const cleanEmail = v => String(v || '').split(/[,;\s]+/).map(x => x.trim().toLowerCase()).filter(Boolean).join(', ') || null;
 
-/* v43: client groups — several companies of one owner (e.g. "Vijay Group"), one shared email / mobile */
-let clientGrp = '';
-const groupName = id => { const g = id && groups.find(x => x.id === id); return g ? g.name : ''; };
-const groupOpts = sel => `<option value="">— Not in a group —</option>${groups.map(g => `<option value="${g.id}" ${g.id === sel ? 'selected' : ''}>${esc(g.name)}</option>`).join('')}${isManager() ? '<option value="__new">+ New group…</option>' : ''}`;
-async function newGroup() {
-  const name = (prompt('Name of the new group (e.g. Vijay Group)') || '').trim(); if (!name) return null;
-  if (groups.some(g => g.name.toLowerCase() === name.toLowerCase())) { toast('A group with that name already exists', true); return groups.find(g => g.name.toLowerCase() === name.toLowerCase()); }
-  try { const { data } = await must(sb.from('client_groups').insert({ name }).select().single()); groups.push(data); groups.sort((a, b) => a.name.localeCompare(b.name)); toast('Group added'); return data; }
-  catch (e) { toast(friendly(e), true); return null; }
-}
-function manageGroups() {
-  const draw = () => groups.length ? `<div class="table-wrap"><table><thead><tr><th>Group</th><th>Companies</th><th>Group email / mobile</th><th></th></tr></thead><tbody>
-    ${groups.map(g => { const mem = clients.filter(c => c.group_id === g.id);
-      return `<tr><td class="wrap"><b>${esc(g.name)}</b>${g.contact_person ? `<div class="muted small">${esc(g.contact_person)}</div>` : ''}</td>
-        <td class="wrap small">${mem.length ? mem.map(c => esc(cLabel(c))).join('<br>') : '<span class="muted">none yet</span>'}</td>
-        <td class="wrap small">${esc(g.emails || '—')}<div class="muted">${esc(g.phone || '')}</div></td>
-        <td class="row-btns"><button class="btn sm" data-ge="${g.id}">Edit</button></td></tr>`; }).join('')}</tbody></table></div>`
-    : '<div class="empty small">No groups yet. Add one, then choose it in each company\'s “Group” field.</div>';
-  const m = modal('Client groups', `<p class="muted small" style="margin-top:0">A group is several companies of one owner. Mail from the group's email is split by company (GSTIN / name in the file), and the owner gets one combined status.</p>
-    <div data-gl>${draw()}</div><div class="toolbar"><button class="btn primary" type="button" data-gadd>+ New group</button></div>`, { wide: true });
-  const el = m.el, redraw = () => { $('[data-gl]', el).innerHTML = draw(); };
-  $('[data-gadd]', el).onclick = async () => { if (await newGroup()) redraw(); };
-  $('[data-gl]', el).onclick = e => { const id = e.target.dataset.ge; if (id) editGroup(groups.find(g => g.id === id), redraw); };
-}
-function editGroup(g, done) {
-  const mem = clients.filter(c => c.group_id === g.id);
-  const m = modal('Edit group', `<div class="form-grid">
-    <label class="full">Group name<input name="name" value="${esc(g.name)}" required></label>
-    <label class="full">Group email(s) — the owner / accountant who sends data for all companies<input name="emails" value="${esc(g.emails || '')}" placeholder="vijay@example.com, accounts@vijaygroup.in" inputmode="email"></label>
-    <label>Mobile / WhatsApp<input name="phone" value="${esc(g.phone || '')}" inputmode="tel" placeholder="10-digit mobile"></label>
-    <label>Contact person<input name="contact_person" value="${esc(g.contact_person || '')}"></label>
-    <label class="full">Notes<textarea name="notes" rows="2">${esc(g.notes || '')}</textarea></label>
-    <div class="full small muted">Companies in this group (${mem.length}): ${mem.length ? mem.map(c => esc(cLabel(c))).join(', ') : 'none — choose this group in each company\'s Edit client window'}</div></div>`, {
-    extra: isManager() ? '<button class="btn danger" type="button" data-gdel>Delete group</button>' : '',
-    onSave: async el => {
-      const rec = { name: fv(el, 'name').trim(), emails: cleanEmail(fv(el, 'emails')), phone: cleanPhone(fv(el, 'phone')), contact_person: fv(el, 'contact_person') || null, notes: fv(el, 'notes') || null };
-      if (!rec.name) { toast('Group name is required', true); return false; }
-      if (rec.phone && !/^[6-9][0-9]{9}$/.test(rec.phone)) { toast('Mobile should be a 10-digit number', true); return false; }
-      if (rec.emails) { const bad = rec.emails.split(',').map(x => x.trim()).filter(x => !/^[^\s@,]+@[^\s@,]+\.[a-z]{2,}$/i.test(x)); if (bad.length) { toast('Email looks wrong: ' + bad.join(', '), true); return false; } }
-      await must(sb.from('client_groups').update(rec).eq('id', g.id)); Object.assign(g, rec); toast('Saved'); done && done();
-    }
-  });
-  const d = $('[data-gdel]', m.el);
-  if (d) d.onclick = async () => {
-    if (!confirm(`Delete the group “${g.name}”?\nThe ${mem.length} compan${mem.length === 1 ? 'y stays' : 'ies stay'} as normal clients — only the grouping is removed.`)) return;
-    try { await must(sb.from('client_groups').delete().eq('id', g.id)); groups = groups.filter(x => x.id !== g.id); clients.forEach(c => { if (c.group_id === g.id) c.group_id = null; }); m.close(); toast('Group deleted'); done && done(); }
-    catch (e) { toast(friendly(e), true); }
-  };
-}
-
 function editClient(c) {
   const isNew = !c;
   c = c || { gst_scheme: 'Monthly', services: ['GST'], active: true };
@@ -1929,7 +1687,6 @@ function editClient(c) {
     <label>CIN / LLPIN<input name="cin" value="${esc(c.cin || '')}" style="text-transform:uppercase"></label>
     <label>Default staff<select name="default_staff">${staffOpts(c.default_staff || '', { blank: 'None' })}</select></label>
     <label>Contact person<input name="contact_person" value="${esc(c.contact_person || '')}"></label>
-    ${groupsOn ? `<label>Group (companies of one owner)<select name="group_id">${groupOpts(c.group_id)}</select></label>` : ''}
     ${P4() ? `<label class="full">Address (for invoices)<textarea name="address" rows="2">${esc(c.address || '')}</textarea></label>` : ''}
     <p class="full muted small" style="margin:0">Several emails? Separate them with commas — reminders go to the first one.</p>
     <div class="full"><div class="small muted" style="margin-bottom:6px;font-weight:500">Services you handle for this client</div>
@@ -1959,8 +1716,7 @@ function editClient(c) {
         ...(P4() ? { address: fv(el, 'address') || null } : {}),
         notes: fv(el, 'notes') || null, active: $('[name=active]', el).checked, ...($('[name=chase_off]', el) ? { chase_off: $('[name=chase_off]', el).checked } : {}),
         services: $$('[data-svc] input:checked', el).map(i => i.value),
-        ...($('[name=tds_pay_work]', el) ? { tds_pay_work: $('[name=tds_pay_work]', el).checked, tds_return: $('[name=tds_return]', el).checked } : {}),
-        ...($('[name=group_id]', el) ? { group_id: fv(el, 'group_id') || null } : {})
+        ...($('[name=tds_pay_work]', el) ? { tds_pay_work: $('[name=tds_pay_work]', el).checked, tds_return: $('[name=tds_return]', el).checked } : {})
       };
       const probs = clientProblems(rec, isNew ? null : c.id);
       $$('.bad', el).forEach(x => x.classList.remove('bad'));
@@ -1984,10 +1740,6 @@ function editClient(c) {
     }
   });
   const el = m.el;
-  if ($('[name=group_id]', el)) $('[name=group_id]', el).onchange = async e => {
-    if (e.target.value !== '__new') return;
-    const g = await newGroup(); e.target.innerHTML = groupOpts(g ? g.id : c.group_id);
-  };
   if ($('[data-hist]', el)) $('[data-hist]', el).onclick = () => showHistory('client', c.id, (c.client_code ? c.client_code + ' · ' : '') + c.name);
   $('[name=gstin]', el).addEventListener('input', e => { const g = e.target.value.toUpperCase(), pan = $('[name=pan]', el); if (g.length >= 12 && !pan.value.trim()) pan.value = g.slice(2, 12); });
   if ($('[data-cp]', el)) $('[data-cp]', el).onclick = () => copy(statusUrl(c.status_token));
@@ -2047,312 +1799,87 @@ VIEWS.team = async v => {
   };
 };
 
-/* ---------- SETTINGS (admin) — sections + setup checklist (v2, Nov 2026) ---------- */
-const SET_SECTIONS = [
-  { id: 'office', label: 'Office & billing', words: 'office name invoice gstin pan address bank upi sac prefix zoho billing' },
-  { id: 'team', label: 'Staff & senior', words: 'team staff users login role senior verify whatsapp number' },
-  { id: 'mailbox', label: 'Mailbox & emails', words: 'mail gmail mailbox script key intake notice watch senior approval signature greeting acknowledgement' },
-  { id: 'whatsapp', label: 'WhatsApp', words: 'whatsapp meta template reminder token phone' },
-  { id: 'arattai', label: 'Arattai reminders', words: 'arattai ifttt chat team group reminder daily work' },
-  { id: 'gst', label: 'GST automation', words: 'gst sandbox auto status filed arn automatic work' },
-  { id: 'clients', label: 'Clients & reminders', words: 'status board link notices module data chasing data request reminder' },
-  { id: 'ai', label: 'AI help', words: 'ai claude key bills assistant' },
-  { id: 'backup', label: 'Backup', words: 'backup onedrive microsoft download excel restore copy' },
-  { id: 'advanced', label: 'Advanced', words: 'sample demo data advanced' }
-];
-const setLink = id => '#/settings?s=' + id;
-const setWhen = t => t ? new Date(t).toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' }) : '—';
-const setSave = async patch => { await must(sb.from('settings').update(patch).eq('id', 1)); Object.assign(settings, patch); toast('Saved'); };
-const setBox = (parent, html) => { const d = document.createElement('div'); if (html) d.innerHTML = html; parent.appendChild(d); return d; };
-
-/* status of every setup step, shared by the checklist and the section dots */
-async function setupStatus() {
-  const [wa, nw, ml, gs, ai] = await Promise.all([
-    safe(sb.from('wa_settings').select('enabled,phone_number_id').eq('id', 1).maybeSingle()), safe(sb.rpc('notice_status')),
-    safe(sb.rpc('mail_admin_status')), safe(sb.rpc('gst_admin_status')), safe(sb.rpc('ai_admin_status'))]);
-  const n = nw.data || {}, m = ml.data || {}, g = gs.data || {}, a = ai.data || {}, w = wa.data || {};
-  const staff = profiles.filter(p => p.active !== false && p.id !== me.id).length;
-  const anyKey = !!(m.key_set || n.connected || settings.mailjob_key_hash);
-  const running = !!(n.last_check_at || settings.mailjob_seen_at);
-  const st = {
-    office: settings.firm_address && settings.firm_gstin ? 'ok' : 'todo',
-    staff: staff ? 'ok' : 'todo',
-    senior: settings.senior_id ? 'ok' : 'todo',
-    mailbox: running ? 'ok' : anyKey ? 'half' : 'todo',
-    whatsapp: w.enabled ? 'ok' : w.phone_number_id ? 'half' : 'todo',
-    gst: g.keys_saved && g.enabled ? 'ok' : g.keys_saved ? 'half' : 'todo',
-    ai: a.key_set ? 'ok' : 'todo',
-    backup: settings.backup_last_ok && settings.backup_last_at && (Date.now() - new Date(settings.backup_last_at)) < 2 * 864e5 ? 'ok' : settings.backup_key_hash ? 'half' : 'todo'
-  };
-  st.team = st.staff === 'ok' && st.senior === 'ok' ? 'ok' : st.staff === 'ok' || st.senior === 'ok' ? 'half' : 'todo';
-  return { st, n, m };
-}
-
+/* ---------- SETTINGS (admin) ---------- */
 VIEWS.settings = async v => {
   await loadRefs();
-  const q = new URLSearchParams((location.hash.split('?')[1] || ''));
-  const cur = SET_SECTIONS.some(s => s.id === q.get('s')) ? q.get('s') : 'office';
-  const sec = SET_SECTIONS.find(s => s.id === cur);
-  v.innerHTML = `<div class="page-head set-head"><div><span class="set-kicker">Admin</span><h2>Settings</h2></div>
-      <label class="set-search"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="M21 21l-4.3-4.3"></path></svg>
-        <input type="search" id="setFind" placeholder="Find a setting…" aria-label="Find a setting" autocomplete="off"></label></div>
-    <div class="card set-check" id="setCheck"><div class="set-check-head"><h3>Setup checklist</h3><span class="muted small" id="setCount">Checking…</span></div>
-      <div class="set-bar"><div id="setBar" style="width:0%"></div></div><div class="set-items" id="setItems"></div></div>
-    <div class="set-layout">
-      <nav class="set-nav" aria-label="Settings sections">${SET_SECTIONS.map(s => `<a href="${setLink(s.id)}" data-sec="${s.id}" class="${s.id === cur ? 'on' : ''}" ${s.id === cur ? 'aria-current="page"' : ''}>${esc(s.label)}<span class="set-dot" data-dot="${s.id}"></span></a>`).join('')}</nav>
-      <label class="set-pick">Section<select id="setPick">${SET_SECTIONS.map(s => `<option value="${s.id}" ${s.id === cur ? 'selected' : ''}>${esc(s.label)}</option>`).join('')}</select></label>
-      <section class="set-main" id="setMain" aria-label="${esc(sec.label)}"></section>
-    </div>`;
-  $('#setPick').onchange = e => { location.hash = setLink(e.target.value); };
-  $('#setFind').oninput = e => {
-    const t = e.target.value.trim().toLowerCase();
-    $$('.set-nav a').forEach(a => { const s = SET_SECTIONS.find(x => x.id === a.dataset.sec); a.classList.toggle('dim', !!t && !(s.label.toLowerCase().includes(t) || s.words.includes(t))); });
-  };
-  $('#setFind').onkeydown = e => { if (e.key !== 'Enter') return; const a = $$('.set-nav a').find(x => !x.classList.contains('dim')); if (a) location.hash = a.getAttribute('href'); };
-
-  setupStatus().then(({ st }) => {
-    const items = [['office', 'office', 'Office name & invoice details'], ['staff', 'team', 'Add staff logins'], ['senior', 'team', 'Pick the senior who verifies GST'],
-      ['mailbox', 'mailbox', 'Connect the office mailbox'], ['whatsapp', 'whatsapp', 'WhatsApp reminders'], ['gst', 'gst', 'GST auto-status (Sandbox key)'], ['backup', 'backup', 'Daily backup to OneDrive'], ['ai', 'ai', 'AI key (optional)']];
-    const done = items.filter(i => st[i[0]] === 'ok').length;
-    $('#setCount').innerHTML = `<b>${done} of ${items.length}</b> done · click an item to set it up`;
-    $('#setBar').style.width = Math.round(done / items.length * 100) + '%';
-    $('#setItems').innerHTML = items.map(([k, s, label]) => `<a class="set-item ${st[k]}" href="${setLink(s)}"><span class="set-ic" aria-hidden="true">${st[k] === 'ok' ? '✓' : st[k] === 'half' ? '◐' : '○'}</span>${esc(label)}</a>`).join('');
-    SET_SECTIONS.forEach(s => { const d = $(`[data-dot="${s.id}"]`); if (d && st[s.id]) d.className = 'set-dot ' + st[s.id]; });
-  }).catch(() => { $('#setCount').textContent = ''; });
-
-  const main = $('#setMain');
-  main.innerHTML = `<div class="set-title"><h2>${esc(sec.label)}</h2></div>`;
-  await ({ office: setOffice, team: setTeam, mailbox: setMailbox, whatsapp: b => renderWhatsApp(setBox(b)), arattai: setArattai, gst: setGstSec, clients: setClients, ai: b => renderAiSettings(setBox(b)), backup: setBackup, advanced: b => renderDemoSettings(setBox(b)) }[cur])(main);
-};
-
-/* Office & billing */
-async function setOffice(main) {
-  setBox(main, `<div class="card"><h3>Office name</h3><div class="toolbar"><input id="firm" value="${esc(settings.firm_name || '')}" style="flex:1;max-width:420px" aria-label="Office name"><button class="btn primary" id="saveFirm">Save</button></div>
-    <p class="muted small">Shown in the app header and on the status pages.</p></div>`);
-  $('#saveFirm').onclick = async () => { try { await setSave({ firm_name: $('#firm').value.trim() || 'Our Office' }); $('.brand').textContent = settings.firm_name; } catch (e) { toast(friendly(e), true); } };
-  main.insertAdjacentHTML('beforeend', invoiceSettingsCard());
-  bindInvoiceSettings(main);
-  if (P4()) renderZohoSettings(setBox(main));
-}
-
-/* Staff & senior */
-async function setTeam(main) {
-  const sen = setBox(main, `<div class="card"><h3>Senior who verifies GST workings</h3>
-    <div class="form-grid g2"><label>Senior<select id="revSenior"><option value="">— choose —</option>${profiles.filter(p => p.active !== false && ['manager', 'partner', 'admin'].includes(p.role)).map(p => `<option value="${p.id}" ${settings.senior_id === p.id ? 'selected' : ''}>${esc(p.full_name || p.email)} · ${esc(p.email || '')}</option>`).join('')}</select></label></div>
-    <p class="muted small">Gets the “for verification” emails with the GST workings and approves them. Only Managers, Partners and the Admin can be chosen.</p></div>`);
-  $('#revSenior', sen).onchange = async e => { try { await setSave({ senior_id: e.target.value || null }); } catch (err) { toast(friendly(err), true); } };
-  renderSecurityCard(setBox(main));
-  const tb = setBox(main);
-  await VIEWS.team(tb);
-  const h = $('.page-head h2', tb); if (h) h.textContent = 'Staff logins';
-}
-
-/* GST automation */
-async function setGstSec(main) {
-  renderGst(setBox(main));
-  await renderAutoWorkSettings(setBox(main));
-}
-
-/* Clients & reminders */
-async function setClients(main) {
-  const c = setBox(main, `<div class="card"><h3>Common status board</h3>
+  v.innerHTML = `<div class="page-head"><h2>Settings</h2></div>
+    <div class="card"><h3>Office name</h3><div class="toolbar"><input id="firm" value="${esc(settings.firm_name || '')}" style="flex:1;max-width:420px"><button class="btn primary" id="saveFirm">Save</button></div>
+      <p class="muted small">Shown in the app header and on the status pages.</p></div>
+    <div class="card"><h3>Common status board</h3>
       <p class="muted">One link anyone can open to see the status of all clients' work due in the last 45 / next 45 days (client name, return, period, due date, status — no ARN, remarks or contact details).</p>
       <label class="check"><input type="checkbox" id="boardOn" ${settings.board_enabled ? 'checked' : ''}> Board link is switched on</label><br>
-      <div class="linkbox"><input readonly value="${esc(boardUrl(settings.board_token))}" aria-label="Board link"><button class="btn sm" id="cpBoard">Copy</button>
+      <div class="linkbox"><input readonly value="${esc(boardUrl(settings.board_token))}"><button class="btn sm" id="cpBoard">Copy</button>
         <a class="btn sm ghost" href="${esc(boardUrl(settings.board_token))}" target="_blank" rel="noopener">Open</a><button class="btn sm" id="regenBoard">New link</button></div>
       <p class="note warn small" style="margin-top:12px">Anyone with this link can see all your client names. For clients, prefer each client's own private link (Clients page → Copy link).</p></div>
-    <div class="card"><h3>Notices module</h3>
-      <label class="check"><input type="checkbox" id="noticesOn" ${settings.notices_off ? '' : 'checked'}> Show Notices in the tracker</label>
-      <p class="muted small">Switch off to hide All notices, GST / TDS / MCA notices and the notice alerts on the dashboard for everyone. Nothing is deleted — switch it back on any time.</p></div>`);
-  $('#boardOn', c).onchange = async e => { try { await setSave({ board_enabled: e.target.checked }); } catch (err) { toast(friendly(err), true); } };
-  $('#cpBoard', c).onclick = () => copy(boardUrl(settings.board_token));
-  $('#regenBoard', c).onclick = async () => {
-    if (!confirm('Create a new board link? The old link will stop working.')) return;
-    try { await setSave({ board_token: newId() }); route(); } catch (e) { toast(friendly(e), true); }
-  };
-  $('#noticesOn', c).onchange = async e => { try { await setSave({ notices_off: !e.target.checked }); $('#nav').innerHTML = navGroups(); } catch (err) { toast(friendly(err), true); e.target.checked = !e.target.checked; } };
-  renderChaseSettings(setBox(main));
-  await renderDataRequestSettings(setBox(main));
-}
-
-/* Backup — nightly copy inside the tracker + daily copy to OneDrive */
-async function setBackup(main) {
-  const r = await safe(sb.from('settings').select('backup_key_hash,backup_key_set_at,backup_last_at,backup_last_ok,backup_last_note').eq('id', 1).maybeSingle());
-  if (r.error) { setBox(main, '<div class="card"><h3>Daily backup to OneDrive</h3><p class="note small">Run <b>update-backup-onedrive.sql</b> in Supabase first.</p></div>'); renderBackups(setBox(main)); return; }
-  const b = r.data || {}; Object.assign(settings, b);
-  const fresh = b.backup_last_at && (Date.now() - new Date(b.backup_last_at)) < 2 * 864e5;
-  const cls = b.backup_last_at ? (b.backup_last_ok && fresh ? 'ok' : 'bad') : b.backup_key_hash ? 'half' : 'todo';
-  const line = b.backup_last_at ? `${b.backup_last_ok ? 'Last backup' : 'Last try failed'} ${setWhen(b.backup_last_at)}${b.backup_last_note ? ' · ' + esc(b.backup_last_note) : ''}` : b.backup_key_hash ? 'Key made · waiting for the first backup (about 1 AM)' : 'Not set up';
-  const box = setBox(main, `<p class="muted set-lead">Every night about 1 AM the office mailbox script copies <b>all tracker data</b> to OneDrive as one zip (an Excel-ready CSV for each table + a full JSON copy), and copies each <b>new client file and acknowledgement</b> once. Folder: <b>JLR Tracker Backups</b>.</p>
-    <div class="set-lights"><div class="set-light ${cls}"><b>OneDrive backup</b><span class="small">${line}</span></div></div>
-    <div class="card set-step"><div class="set-step-h"><span class="set-num">1</span><h3>Make the backup key</h3></div>
-      <div id="bkKey"></div><div class="toolbar"><button class="btn primary" id="bkMake">${b.backup_key_hash ? 'Make a new key' : 'Make the backup key'}</button></div></div>
-    <div class="card set-step"><div class="set-step-h"><span class="set-num">2</span><h3>Register a Microsoft app (once, 5 minutes)</h3></div>
-      <ol class="small steps">
-        <li>Open <a href="https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade" target="_blank" rel="noopener">Microsoft Entra → App registrations</a>, signed in with the Microsoft account that owns the OneDrive → <b>New registration</b>.</li>
-        <li>Name <b>JLR Tracker Backup</b> · Supported account types: <b>Accounts in any organizational directory and personal Microsoft accounts</b> · no redirect URI → <b>Register</b>. Copy the <b>Application (client) ID</b>.</li>
-        <li><b>Authentication</b> → Advanced settings → <b>Allow public client flows: Yes</b> → Save.</li>
-        <li><b>API permissions</b> → Add → Microsoft Graph → Delegated → <b>Files.ReadWrite</b> and <b>offline_access</b> → Add.</li></ol></div>
-    <div class="card set-step"><div class="set-step-h"><span class="set-num">3</span><h3>Connect the script to OneDrive</h3></div>
-      <ol class="small steps">
-        <li>In Apps Script (<b>JLR mail intake</b>) paste the latest script (button below) → Save. Script properties → add <b>BACKUP_KEY</b> = the key from step 1 and <b>MS_CLIENT_ID</b> = the Application (client) ID.</li>
-        <li>Run <b>connectOneDrive</b>. The log shows a link and a code — open the link, enter the code, sign in, Accept.</li>
-        <li>Run <b>finishOneDrive</b> (log says “OneDrive connected”), then run <b>setup</b> once (adds the 1 AM job), then <b>dailyBackup</b> once to test.</li></ol>
-      <div class="toolbar"><button class="btn sm" id="bkScript">Show the script</button><button class="btn sm" id="bkRe">Check again</button></div></div>
-    <p class="muted small">Restore: open the day's zip — each table is a CSV that opens in Excel; all-data.json is the full copy for a restore.</p>`);
-  $('#bkMake', box).onclick = async e => {
-    if (b.backup_key_hash && !confirm('Make a new key? The backup stops until you paste the new key into the script as BACKUP_KEY.')) return;
-    e.target.disabled = true;
-    try {
-      const key = 'jlrb_' + [...crypto.getRandomValues(new Uint8Array(24))].map(x => x.toString(16).padStart(2, '0')).join('');
-      const hash = [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(key)))].map(x => x.toString(16).padStart(2, '0')).join('');
-      await must(sb.rpc('set_backup_key', { p_hash: hash })); settings.backup_key_hash = hash;
-      $('#bkKey', box).innerHTML = `<p class="small"><b>Copy it now</b> — shown only this once.</p><div class="set-keys"><div class="set-key"><code class="set-kname">BACKUP_KEY</code><input readonly value="${esc(key)}" aria-label="BACKUP_KEY"><button class="btn sm" id="bkCp">Copy</button></div></div>`;
-      $('#bkCp', box).onclick = () => copySecret(key, 'BACKUP_KEY copied');
-      e.target.textContent = 'Make a new key';
-    } catch (err) { toast(friendly(err), true); }
-    e.target.disabled = false;
-  };
-  $('#bkRe', box).onclick = () => route();
-  $('#bkScript', box).onclick = async () => {
-    let code = '';
-    try { const rr = await fetch('mail-intake-apps-script.gs', { cache: 'no-store' }); code = rr.ok ? await rr.text() : ''; } catch (err) {}
-    const m = modal('Office mailbox script', code ? `<p class="small" style="margin-top:0">Replace all the code in <b>JLR mail intake</b> with this, then Save. Your script properties stay.</p><textarea readonly rows="16" class="code">${esc(code)}</textarea>` : '<p class="note warn small">Script file not found on the site.</p>',
-      { wide: true, extra: code ? '<button class="btn" id="bkCpS">Copy script</button>' : '' });
-    if (code) $('#bkCpS', m.el).onclick = () => copySecret(code, 'Script copied');
-  };
-  renderBackups(setBox(main));
-}
-
-/* Arattai daily work reminders (through IFTTT webhooks) */
-async function setArattai(main) {
-  const r = await safe(sb.rpc('arattai_admin_status'));
-  if (r.error) { setBox(main, '<div class="card"><h3>Arattai reminders</h3><p class="note small">Run <b>update-arattai.sql</b> in Supabase first.</p></div>'); return; }
-  const s = r.data || {}, people = s.people || [];
-  const cls = !s.key_saved ? 'todo' : s.enabled ? 'ok' : 'half';
-  const box = setBox(main, `<p class="muted set-lead">Every morning at <b>9:30 AM</b> (Mon–Sat) the tracker posts the day's work to Arattai through <b>IFTTT</b>: <b>A</b> one list for the whole team in a group, and/or <b>B</b> each person's own list in their private group. Arattai cannot receive personal messages from other apps yet, so each person's list goes to a small group with just them (and you).</p>
-    <div class="set-lights"><div class="set-light ${cls}"><b>Arattai reminders</b><span class="small">${!s.key_saved ? 'IFTTT key not saved' : s.enabled ? 'On' : 'Switched off'}${s.last_run_at ? ' · last sent ' + setWhen(s.last_run_at) + (s.last_note ? ' · ' + esc(s.last_note) : '') : ''}</span></div></div>
-    <div class="card set-step"><div class="set-step-h"><span class="set-num">1</span><h3>IFTTT key</h3></div>
-      <ol class="small steps"><li>Sign in at <a href="https://ifttt.com" target="_blank" rel="noopener">ifttt.com</a> with the office account and connect <b>Arattai</b> and <b>Webhooks</b>.</li>
-        <li>Open <a href="https://ifttt.com/maker_webhooks/settings" target="_blank" rel="noopener">Webhooks → Settings</a>; the key is the last part of the URL shown there.</li></ol>
-      <div class="toolbar"><input type="password" id="arKey" placeholder="${s.key_saved ? 'Key saved (hidden) — paste a new one to replace' : 'Paste the IFTTT webhooks key'}" autocomplete="off" style="flex:1;max-width:420px" aria-label="IFTTT key"><button class="btn primary" id="arKeySave">Save key</button></div></div>
-    <div class="card set-step"><div class="set-step-h"><span class="set-num">2</span><h3>Make the IFTTT applets</h3></div>
-      <p class="small">For each applet: <b>Create</b> → If This: <b>Webhooks → Receive a web request</b> (event name below) → Then That: <b>Arattai → Post a message</b> → choose the group → Message: <code>{{Value1}}</code> → Finish.</p>
-      <div class="form-grid g2">
-        <label class="check"><input type="checkbox" id="arTeamOn" ${s.team_on ? 'checked' : ''}> <b>A — Team group</b> (everyone's work, by name)</label>
-        <label>Team event name<input id="arTeamEv" value="${esc(s.team_event || 'jlr_team')}"></label>
-        <label class="check full"><input type="checkbox" id="arPerOn" ${s.personal_on ? 'checked' : ''}> <b>B — Private group per person</b> (fill an event name for each person, e.g. <code>jlr_ravi</code>; one applet each)</label></div>
-      <div class="table-wrap"><table><thead><tr><th>Person</th><th>Role</th><th>IFTTT event name (B)</th><th></th></tr></thead><tbody>
-        ${people.map(p => `<tr><td>${esc(p.name)}</td><td>${esc(ROLE_LABEL[p.role] || p.role)}</td><td><input data-ev="${p.id}" value="${esc(p.event || '')}" placeholder="jlr_${esc((p.name || '').toLowerCase().split(/[ @]/)[0].replace(/[^a-z0-9]/g, ''))}" aria-label="Event name for ${esc(p.name)}"></td>
-          <td><button class="btn sm" data-test="${p.id}">Test</button></td></tr>`).join('')}
-      </tbody></table></div>
-      <p class="muted small">A free IFTTT plan allows only a few applets; option B for many people may need IFTTT Pro.</p></div>
-    <div class="card set-step"><div class="set-step-h"><span class="set-num">3</span><h3>Switch on</h3></div>
-      <label class="check"><input type="checkbox" id="arOn" ${s.enabled ? 'checked' : ''}> Send the daily work list at 9:30 AM, Monday–Saturday</label>
-      <div class="toolbar" style="margin-top:10px"><button class="btn primary" id="arSave">Save</button><button class="btn" data-test="team">Test team group</button><button class="btn" id="arNow">Send today's lists now</button></div></div>`);
-  const collect = () => ({ enabled: $('#arOn', box).checked, team_on: $('#arTeamOn', box).checked, personal_on: $('#arPerOn', box).checked, team_event: $('#arTeamEv', box).value,
-    people: $$('[data-ev]', box).map(i => ({ id: i.dataset.ev, event: i.value })) });
-  $('#arKeySave', box).onclick = async () => {
-    const k = $('#arKey', box).value.trim(); if (!k) return toast('Paste the IFTTT key first', true);
-    try { await must(sb.rpc('arattai_admin_set_key', { p_key: k })); $('#arKey', box).value = ''; toast('IFTTT key saved (hidden)'); route(); } catch (e) { toast(friendly(e), true); }
-  };
-  $('#arSave', box).onclick = async () => { try { await must(sb.rpc('arattai_admin_save', { p: collect() })); toast('Saved'); route(); } catch (e) { toast(friendly(e), true); } };
-  $('#arNow', box).onclick = async e => {
-    if (!confirm("Send today's work lists to Arattai now?")) return;
-    e.target.disabled = true;
-    try { await must(sb.rpc('arattai_admin_save', { p: collect() })); const { data } = await must(sb.rpc('arattai_send_now')); toast(`${data || 0} message(s) sent`); route(); } catch (err) { toast(friendly(err), true); e.target.disabled = false; }
-  };
-  $$('[data-test]', box).forEach(b => b.onclick = async () => {
-    b.disabled = true;
-    try { await must(sb.rpc('arattai_admin_save', { p: collect() })); const { data } = await must(sb.rpc('arattai_admin_test', { p_target: b.dataset.test })); toast(data || 'Sent'); } catch (e) { toast(friendly(e), true); }
-    b.disabled = false;
-  });
-}
-
-/* Mailbox & emails — one 3-step setup */
-async function setMailbox(main) {
-  const hex = n => [...crypto.getRandomValues(new Uint8Array(n))].map(x => x.toString(16).padStart(2, '0')).join('');
-  const sha = async t => [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(t)))].map(x => x.toString(16).padStart(2, '0')).join('');
-  const box = setBox(main, `<p class="muted set-lead">One Gmail script in the office mailbox does all mail jobs: client data mails, notice watch, data reminders and the senior-approval &amp; filing mails. Three steps, once.</p>
-    <div class="card set-step"><div class="set-step-h"><span class="set-num">1</span><h3>Make the keys</h3></div>
-      <p class="muted small" id="mbKeyNote">One click makes all three keys. They are shown only once — keep this page open until step 2 is done.</p>
-      <div id="mbKeys"></div>
-      <div class="toolbar"><button class="btn primary" id="mbMake">Make all 3 keys</button></div></div>
-    <div class="card set-step"><div class="set-step-h"><span class="set-num">2</span><h3>Paste them into the script</h3></div>
-      <ol class="small steps">
-        <li>Open <a href="https://script.google.com/home" target="_blank" rel="noopener">script.google.com</a> signed in as the office mailbox → project <b>JLR mail intake</b>. (First time: New project, paste the script, Save.)</li>
-        <li>Gear icon (Project Settings) → <b>Script properties</b> → <b>Add script property</b> for each row in step 1 → <b>Save script properties</b>.</li></ol>
-      <div class="toolbar"><button class="btn sm" id="mbScript">Show the script</button></div></div>
-    <div class="card set-step"><div class="set-step-h"><span class="set-num">3</span><h3>Start it and check</h3></div>
-      <p class="muted small">In Apps Script choose <b>setup</b> at the top → <b>Run</b> → allow access. Within a minute or two the lights turn green.</p>
-      <div class="set-lights" id="mbLights"><div class="loading">Checking…</div></div>
-      <div class="toolbar"><button class="btn sm" id="mbRe">Check again</button></div></div>
-    <details class="card set-more"><summary><b>Options</b> — senior mails, signature, filters, alerts, each key separately</summary>
-      <div id="mbOpts"></div></details>`);
-
-  const lights = async () => {
-    const [ml, nw, sj] = await Promise.all([safe(sb.rpc('mail_admin_status')), safe(sb.rpc('notice_status')), safe(sb.from('settings').select('mailjob_key_hash,mailjob_seen_at').eq('id', 1).maybeSingle())]);
-    const m = ml.data || {}, n = nw.data || {}, j = sj.data || {};
-    if (sj.data) Object.assign(settings, j);
-    const live = !!n.last_check_at || !!j.mailjob_seen_at;
-    const L = (name, cls, line) => `<div class="set-light ${cls}"><b>${name}</b><span class="small">${line}</span></div>`;
-    $('#mbLights', box).innerHTML = [
-      L('Client data mails', !m.key_set ? 'todo' : !m.enabled ? 'half' : live ? 'ok' : 'half',
-        !m.key_set ? 'No key yet' : !m.enabled ? 'Key set · switched off (Options)' : m.last_mail_at ? 'Last client mail ' + setWhen(m.last_mail_at) : live ? 'Ready · no client mail yet' : 'Waiting for the script to run'),
-      L('Notice watch', !n.connected ? 'todo' : !n.enabled ? 'half' : n.last_check_at ? (n.last_error ? 'bad' : 'ok') : 'half',
-        !n.connected ? 'No key yet' : !n.enabled ? 'Key set · switched off (Options)' : n.last_error ? 'Problem: ' + esc(n.last_error) : n.last_check_at ? 'Checked ' + setWhen(n.last_check_at) : 'Waiting for the script to run'),
-      L('Senior-approval &amp; filing mails', !j.mailjob_key_hash ? 'todo' : j.mailjob_seen_at ? 'ok' : 'half',
-        !j.mailjob_key_hash ? 'No key yet' : j.mailjob_seen_at ? 'Checked ' + setWhen(j.mailjob_seen_at) : 'Waiting for the script to run')
-    ].join('');
-    $('#mbMake', box).textContent = m.key_set || n.connected || j.mailjob_key_hash ? 'Make 3 new keys' : 'Make all 3 keys';
-    return { m, n };
-  };
-  let cur = await lights();
-
-  $('#mbRe', box).onclick = async () => { cur = await lights(); toast('Status updated'); };
-  $('#mbMake', box).onclick = async e => {
-    const { m, n } = cur;
-    if ((m.key_set || n.connected || settings.mailjob_key_hash) && !confirm('Make 3 new keys? The old keys stop working at once — the script stops until you paste the new ones.')) return;
-    e.target.disabled = true;
-    try {
-      const k = { INTAKE_KEY: 'jlr_' + hex(24), NOTICE_KEY: 'jlrn_' + hex(24), MAILJOB_KEY: 'mj_' + hex(16) };
-      await must(sb.rpc('mail_admin_set_key', { p_hash: await sha(k.INTAKE_KEY) }));
-      await must(sb.rpc('notice_admin_set_key', { p_hash: await sha(k.NOTICE_KEY) }));
-      const mh = await sha(k.MAILJOB_KEY);
-      await must(sb.rpc('set_mailjob_key', { p_hash: mh })); settings.mailjob_key_hash = mh;
-      await must(sb.rpc('mail_admin_save', { p_enabled: true, p_filter: m.subject_filter || '', p_mailbox: m.mailbox || me.email || '' }));
-      await must(sb.rpc('notice_admin_save', { p: { enabled: true, alert_email: n.alert_email !== false, alert_wa: !!n.alert_wa, wa_template: n.wa_template || 'notice_alert', every_minutes: n.every_minutes || 15 } }));
-      $('#mbKeyNote', box).innerHTML = '<b>Copy each key now</b> — they are shown only this once. Client mails and notice watch are switched on.';
-      $('#mbKeys', box).innerHTML = `<div class="set-keys">${Object.entries(k).map(([name, val]) => `<div class="set-key"><code class="set-kname">${name}</code><input readonly value="${esc(val)}" aria-label="${name}"><button class="btn sm" data-ck="${name}">Copy</button></div>`).join('')}</div>`;
-      $$('[data-ck]', box).forEach(b => b.onclick = () => copySecret(k[b.dataset.ck], b.dataset.ck + ' copied'));
-      e.target.textContent = 'Make 3 new keys';
-      cur = await lights();
-    } catch (err) { toast(friendly(err), true); }
-    e.target.disabled = false;
-  };
-  $('#mbScript', box).onclick = async () => {
-    let code = '';
-    try { const rr = await fetch('mail-intake-apps-script.gs', { cache: 'no-store' }); code = rr.ok ? await rr.text() : ''; } catch (err) {}
-    const m = modal('Office mailbox script', code ? `<p class="small" style="margin-top:0">Replace all the code in <b>JLR mail intake</b> with this, then Save.</p><textarea readonly rows="16" class="code">${esc(code)}</textarea>` : '<p class="note warn small">Script file not found on the site — upload mail-intake-apps-script.gs with the other files.</p>',
-      { wide: true, extra: code ? '<button class="btn" id="mbCpS">Copy script</button>' : '' });
-    if (code) $('#mbCpS', m.el).onclick = () => copySecret(code, 'Script copied');
-  };
-
-  /* Options: senior mails look, then the original cards */
-  const o = $('#mbOpts', box);
-  const look = setBox(o, `<div class="card"><h3>Senior-approval &amp; filing mails</h3>
-      <label class="check"><input type="checkbox" id="revAuto" ${settings.auto_send_filed ? 'checked' : ''}> After filing, send the acknowledgement and workings to the client automatically</label>
-      <p class="muted small">GSTR-1 and GSTR-3B are verified separately. When a return's acknowledgement is uploaded, that return's acknowledgement + workings go to the client — only if the senior approved it. The senior is chosen under <a href="${setLink('team')}">Staff &amp; senior</a>.</p>
+    <div class="card" id="revCard"><h3>Senior verification &amp; filing mails</h3>
+      <div class="form-grid g2"><label>Senior who verifies GST workings<select id="revSenior"><option value="">— choose —</option>${profiles.filter(p => p.active !== false && ['manager', 'partner', 'admin'].includes(p.role)).map(p => `<option value="${p.id}" ${settings.senior_id === p.id ? 'selected' : ''}>${esc(p.full_name || p.email)} · ${esc(p.email || '')}</option>`).join('')}</select></label></div>
+      <label class="check" style="margin-top:8px"><input type="checkbox" id="revAuto" ${settings.auto_send_filed ? 'checked' : ''}> After filing, send the acknowledgement and workings to the client automatically</label>
+      <p class="muted small">GSTR-1 and GSTR-3B are verified separately. When a return's acknowledgement is uploaded, that return's acknowledgement + workings go to the client — only if the senior approved it. A “Send to client” button is always there too.</p>
       <h4 style="margin:14px 0 6px">How the mails look</h4>
       <div class="form-grid g2"><label>Greeting<input id="revGreet" value="${esc(settings.mail_greeting || 'Respected Sir,')}"></label>
         <label class="full">Signature (below “Thanks &amp; Regards, &lt;your name&gt;”)<textarea id="revSign" rows="4" placeholder="JLR &amp; Co&#10;Chartered Accountants&#10;Address · Phone">${esc(settings.mail_signature || '')}</textarea></label></div>
-      <div class="toolbar"><button class="btn sm" id="revSaveLook">Save</button><span class="muted small" id="revOut"></span></div></div>`);
-  $('#revAuto', look).onchange = async e => { try { await setSave({ auto_send_filed: e.target.checked }); } catch (err) { toast(friendly(err), true); e.target.checked = !e.target.checked; } };
-  $('#revSaveLook', look).onclick = async () => { try { await setSave({ mail_greeting: $('#revGreet', look).value.trim() || 'Respected Sir,', mail_signature: $('#revSign', look).value.trim() || null }); } catch (err) { toast(friendly(err), true); } };
-  safe(sb.from('mail_jobs').select('id').eq('status', 'new').limit(200)).then(r => { if (!r.error && $('#revOut', look)) $('#revOut', look).textContent = r.data.length ? `${r.data.length} email(s) waiting to be sent` : ''; });
-  renderMailSettings(setBox(o));
-  renderNoticeWatchSettings(setBox(o));
-}
+      <div class="toolbar"><button class="btn sm" id="revSaveLook">Save</button><span class="muted small">If the Gmail script can read the mailbox's own Gmail signature (with the logo), it uses that instead.</span></div>
+      <h4 style="margin:14px 0 6px">Mailbox key for these emails</h4>
+      <p class="muted small">The office Gmail script sends these emails with their attachments and reads the senior's replies. ${settings.mailjob_key_hash ? `Key is set. ${settings.mailjob_seen_at ? 'Script last checked ' + new Date(settings.mailjob_seen_at).toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' }) + '.' : '<span class="late">The script has not checked in yet — add MAILJOB_KEY to it (steps below).</span>'}` : '<span class="late">No key yet.</span>'}</p>
+      <div class="toolbar"><button class="btn sm" id="revKey">${settings.mailjob_key_hash ? 'Make a new key' : 'Make the key'}</button><span class="muted small" id="revOut"></span></div>
+      <p class="muted small">Script steps: script.google.com → “JLR mail intake” → paste the new <b>mail-intake-apps-script.gs</b> → Save → Project Settings → Script properties → add <b>MAILJOB_KEY</b> = the key → Run <b>setup</b> once and allow access.</p></div>
+    <div class="card"><h3>Notices module</h3>
+      <label class="check"><input type="checkbox" id="noticesOn" ${settings.notices_off ? '' : 'checked'}> Show Notices in the tracker</label>
+      <p class="muted small">Switch off to hide All notices, GST / TDS / MCA notices and the notice alerts on the dashboard for everyone (for example when notices move to their own site). Nothing is deleted — switch it back on any time.</p></div>`;
+  const save = async patch => { await must(sb.from('settings').update(patch).eq('id', 1)); Object.assign(settings, patch); toast('Saved'); };
+  $('#saveFirm').onclick = async () => { try { await save({ firm_name: $('#firm').value.trim() || 'Our Office' }); $('.brand').textContent = settings.firm_name; } catch (e) { toast(friendly(e), true); } };
+  $('#boardOn').onchange = async e => { try { await save({ board_enabled: e.target.checked }); } catch (err) { toast(friendly(err), true); } };
+  $('#revSenior').onchange = async e => { try { await save({ senior_id: e.target.value || null }); } catch (err) { toast(/senior_id/.test(err.message || '') ? 'Run update-session18.sql in Supabase first' : friendly(err), true); } };
+  $('#revAuto').onchange = async e => { try { await save({ auto_send_filed: e.target.checked }); } catch (err) { toast(/auto_send/.test(err.message || '') ? 'Run update-session18.sql in Supabase first' : friendly(err), true); e.target.checked = !e.target.checked; } };
+  $('#revSaveLook').onclick = async () => { try { await save({ mail_greeting: $('#revGreet').value.trim() || 'Respected Sir,', mail_signature: $('#revSign').value.trim() || null }); } catch (err) { toast(/mail_greeting|mail_signature/.test(err.message || '') ? 'Run update-session19.sql in Supabase first' : friendly(err), true); } };
+  $('#revKey').onclick = async () => {
+    if (settings.mailjob_key_hash && !confirm('Make a new key? The script stops sending until you paste the new key into it.')) return;
+    const key = 'mj_' + REV.rand(32), hash = await REV.sha(key);
+    const { error } = await safe(sb.rpc('set_mailjob_key', { p_hash: hash }));
+    if (error) return toast(/set_mailjob_key/.test(error.message || '') ? 'Run update-session18.sql in Supabase first' : friendly(error), true);
+    settings.mailjob_key_hash = hash;
+    const m = modal('Mailbox key — copy it now', `<p>Paste this into the Gmail script as the script property <b>MAILJOB_KEY</b>. It is shown only once.</p><div class="linkbox"><input readonly value="${key}" id="mjk"><button class="btn sm" id="mjc">Copy</button></div>`);
+    $('#mjc', m.el).onclick = () => copySecret(key, 'Key copied');
+    safe(sb.from('mail_jobs').select('id', { count: 'exact', head: true }).eq('status', 'new')).then(r => { if (!r.error) $('#revOut').textContent = `${r.count || 0} email(s) waiting to be sent`; });
+  };
+  safe(sb.from('mail_jobs').select('id,status').eq('status', 'new').limit(200)).then(r => { if (!r.error && $('#revOut')) $('#revOut').textContent = r.data.length ? `${r.data.length} email(s) waiting to be sent` : ''; });
+  $('#noticesOn').onchange = async e => { try { await save({ notices_off: !e.target.checked }); $("#nav").innerHTML = navGroups(); } catch (err) { toast(/notices_off/.test(err.message || '') ? 'Run update-session16.sql in Supabase first' : friendly(err), true); e.target.checked = !e.target.checked; } };
+  $('#cpBoard').onclick = () => copy(boardUrl(settings.board_token));
+  $('#regenBoard').onclick = async () => {
+    if (!confirm('Create a new board link? The old link will stop working.')) return;
+    try { await save({ board_token: newId() }); route(); } catch (e) { toast(friendly(e), true); }
+  };
+  v.insertAdjacentHTML('beforeend', invoiceSettingsCard());
+  bindInvoiceSettings(v);
+  if (P4()) { const zb = document.createElement('div'); v.appendChild(zb); renderZohoSettings(zb); }
+  const wa = document.createElement('div');
+  v.appendChild(wa);
+  renderWhatsApp(wa);
+  const gst = document.createElement('div');
+  v.appendChild(gst);
+  renderGst(gst);
+  const ml = document.createElement('div');
+  v.appendChild(ml);
+  renderMailSettings(ml);
+  const nw = document.createElement('div');
+  v.appendChild(nw);
+  renderNoticeWatchSettings(nw);
+  const aw = document.createElement('div');
+  v.appendChild(aw);
+  renderAutoWorkSettings(aw);
+  const ch = document.createElement('div');
+  v.appendChild(ch);
+  renderChaseSettings(ch);
+  const dr = document.createElement('div');
+  v.appendChild(dr);
+  renderDataRequestSettings(dr);
+  const dm = document.createElement('div');
+  v.appendChild(dm);
+  renderDemoSettings(dm);
+  const ai = document.createElement('div');
+  v.appendChild(ai);
+  renderAiSettings(ai);
+};
 
 /* ---------- Settings: automatic GST work ---------- */
 async function renderAutoWorkSettings(box) {
@@ -2998,8 +2525,8 @@ let nf = { status: 'open', dept: '', q: '' };
 VIEWS.notices = async v => {
   const r = await safe(sb.from('notices').select('*').order('reply_due', { ascending: true, nullsFirst: false }).limit(3000));
   if (r.error) { v.innerHTML = '<div class="card"><h3>Notices</h3><p class="note">Not set up yet — run <b>update-phase4.sql</b> in Supabase, then reload.</p></div>'; return; }
-  const all = r.data || [], t = today(), in7 = iso(addDays(new Date(), 7));
-  v.innerHTML = `<div class="page-head"><h2>${nf.dept ? (nf.dept === 'ROC/MCA' ? 'MCA' : esc(nf.dept)) + ' notices' : 'All notices'}</h2><span class="spacer"></span>
+  const all = (r.data || []).filter(n => isManager() || n.assigned_to === me.id), t = today(), in7 = iso(addDays(new Date(), 7));
+  v.innerHTML = `<div class="page-head"><h2>${nf.dept ? (nf.dept === 'ROC/MCA' ? 'MCA' : esc(nf.dept)) + ' notices' : isManager() ? 'All notices' : 'My notices'}</h2><span class="spacer"></span>
       <button class="btn" id="nCheck" title="Look in the office mailbox for new notice emails now">${navIcon('refresh')}<span>Check now</span></button>${isManager() ? '<button class="btn primary" id="addN">+ Add notice</button>' : ''}</div>
     <div id="nWatch"></div><div id="nMails"></div>
     <div class="bento-stats card stats4" style="margin-bottom:14px">
@@ -3008,12 +2535,12 @@ VIEWS.notices = async v => {
       <div class="mini blue"><span>Hearings coming</span><b>${all.filter(n => n.status !== 'Closed' && n.hearing_date && n.hearing_date >= t).length}</b></div>
       <div class="mini green"><span>Closed</span><b>${all.filter(n => n.status === 'Closed').length}</b></div></div>
     <div class="toolbar"><select id="nS"><option value="open">Open (not closed)</option><option value="all">All</option>${opts(NOTICE_STATUSES, nf.status)}</select>
-      <select id="nMine"><option value="">Everyone's notices</option><option value="me" ${nf.mine ? 'selected' : ''}>Assigned to me</option></select><select id="nD"><option value="">All departments</option>${opts(NOTICE_DEPTS, nf.dept, d => d === 'ROC/MCA' ? 'MCA' : d)}</select>
+      <select id="nD"><option value="">All departments</option>${opts(NOTICE_DEPTS, nf.dept, d => d === 'ROC/MCA' ? 'MCA' : d)}</select>
       <input type="search" id="nQ" placeholder="Search client / notice / ref" value="${esc(nf.q)}"></div><div id="nList"></div>`;
   $('#nS').value = nf.status;
   const render = () => {
     const s = nf.q.toLowerCase();
-    const list = all.filter(n => (nf.status === 'all' || (nf.status === 'open' ? n.status !== 'Closed' : n.status === nf.status)) && (!nf.dept || n.dept === nf.dept) && (!nf.mine || n.assigned_to === me.id)
+    const list = all.filter(n => (nf.status === 'all' || (nf.status === 'open' ? n.status !== 'Closed' : n.status === nf.status)) && (!nf.dept || n.dept === nf.dept)
       && (!s || [clientName(n.client_id), n.notice_type, n.ref_no, n.period, n.remarks].join(' ').toLowerCase().includes(s)));
     $('#nList').innerHTML = list.length ? `<div class="count">${list.length} notice${list.length > 1 ? 's' : ''}</div><div class="table-wrap"><table><thead><tr><th>Client</th><th>Dept</th><th>Notice</th><th>Notice date</th><th>Reply due</th><th class="r">Amount</th><th>Assigned</th><th>Status</th><th></th></tr></thead><tbody>
       ${list.map(n => { const late = isOpenNotice(n.status) && n.status !== 'Hearing' && n.reply_due && n.reply_due < t, soon = isOpenNotice(n.status) && n.reply_due >= t && n.reply_due <= in7;
@@ -3029,7 +2556,6 @@ VIEWS.notices = async v => {
   render();
   $('#nS').onchange = e => { nf.status = e.target.value; render(); };
   $('#nD').onchange = e => { nf.dept = e.target.value; render(); };
-  $('#nMine').onchange = e => { nf.mine = e.target.value === 'me'; render(); };
   $('#nQ').oninput = e => { nf.q = e.target.value; render(); };
   if ($('#addN')) $('#addN').onclick = () => editNotice(null);
   $('#nList').addEventListener('change', async e => {
@@ -3041,11 +2567,6 @@ VIEWS.notices = async v => {
   if (isManager()) noticeMailList($('#nMails'));
 };
 
-/* small notice count for dashboards (opens the Notices tab) */
-function noticeChip(late, soon, hear) {
-  const parts = [late && `${late} reply overdue`, soon && `${soon} reply due in 7 days`, hear && `${hear} hearing${hear > 1 ? 's' : ''} this week`].filter(Boolean);
-  return `<a class="chip ${late ? 'red' : 'amber'} n-count" href="#/notices" data-k="notices" title="Open the Notices tab">${navIcon('notices')}<span>Notices: ${parts.join(' · ')}</span></a>`;
-}
 /* notice watch: status line + Check now */
 async function noticeWatchBar(box, btn) {
   const r = await safe(sb.rpc('notice_status'));
@@ -3053,7 +2574,7 @@ async function noticeWatchBar(box, btn) {
   const s = r.data, ago = t => { if (!t) return 'never'; const m = Math.round((Date.now() - new Date(t)) / 60000); return m < 1 ? 'just now' : m < 60 ? m + ' min ago' : m < 1440 ? Math.round(m / 60) + ' h ago' : new Date(t).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' }); };
   box.innerHTML = s.connected && s.enabled
     ? `<p class="muted small nwatch">● Notice emails checked automatically every ${s.every_minutes} min, with a summary at 8 AM and 8 PM · last check <b>${ago(s.last_check_at)}</b>${s.last_error ? ` · <span class="late">problem: ${esc(s.last_error)}</span>` : ''}</p>`
-    : `<p class="note small">Automatic notice check is not connected yet${isAdmin() ? ' — <a href="#/settings?s=mailbox">Settings → Mailbox</a>' : ' — ask the Admin to set it up'}. You can still add notices by hand.</p>`;
+    : `<p class="note small">Automatic notice check is not connected yet${isAdmin() ? ' — <a href="#/settings">Settings → Notice watch</a>' : ' — ask the Admin to set it up'}. You can still add notices by hand.</p>`;
   btn.onclick = async () => {
     if (!(s.connected && s.enabled)) return toast('Notice watch is not connected yet' + (isAdmin() ? ' — see Settings → Notice watch' : ''), true);
     btn.disabled = true; const lbl = $('span', btn); lbl.textContent = 'Checking…';
@@ -4701,7 +4222,7 @@ const prevMonth = () => { const d = new Date(); d.setDate(1); d.setMonth(d.getMo
 const periodToMonth = p => { const m = String(p || '').match(/([A-Za-z]{3})[a-z]*[\s-]+(\d{4})/); if (!m) return ''; const i = MONTHS.findIndex(x => x.toLowerCase() === m[1].toLowerCase()); return i < 0 ? '' : `${m[2]}-${pad(i + 1)}`; };
 const gTax = o => GR.tax(o || {});
 const gst$ = n => inr(Math.round(n || 0));
-let grOv = true, grClient = '', grMonth = prevMonth(), grTab = 'g1', grRecFilter = 'books_only', grRecView = 'inv', grImsF = 'all';
+let grOv = true, gr3Last = 's2', grClient = '', grMonth = prevMonth(), grTab = 'g1', grRecFilter = 'books_only', grRecView = 'inv', grImsF = 'all';
 
 VIEWS.gst = async v => {
   const gClients = clients.filter(c => c.active && c.gstin && (isManager() || c.default_staff === me.id || c.id === grClient));
@@ -4719,6 +4240,10 @@ VIEWS.gst = async v => {
   const r = await safe(sb.from('gst_months').select('*').eq('client_id', grClient).eq('period', period).maybeSingle());
   if (r.error) { body.innerHTML = '<div class="card"><p class="note">GST review is not set up yet — run <b>update-gst-review.sql</b> in Supabase.</p></div>'; return; }
   let row = r.data || { client_id: grClient, period, status: 'Draft' }, recoHist = null, revs = await REV.load(c, period).catch(() => ({ gstr1: null, gstr3b: null }));
+  // v38: this month's GSTR-1 / GSTR-3B work items (to know Filed and to upload the acknowledgement from here)
+  const loadGT = async () => { const q = await safe(sb.from('tasks').select('id,client_id,return_name,period,status,due_date,arn,filed_on').eq('client_id', c.id).limit(800)); return (q.data || []).filter(t => REV.kindOf(t.return_name) && periodToMonth(t.period) === grMonth); };
+  let gtasks = await loadGT().catch(() => []), G3gate = { ok: true, why: [] }, FL = { gstr1: [], gstr3b: [] };
+  const taskOf = k => gtasks.filter(t => REV.kindOf(t.return_name) === k).sort((a, b) => (a.status === 'Filed') - (b.status === 'Filed'))[0] || null;
   const save = async patch => {
     const next = { ...row, ...patch };
     const sm = gsum(next);
@@ -4777,6 +4302,33 @@ VIEWS.gst = async v => {
     return { M, ready, reco, dec, asked, eff, list, cf, lw, cl, sup, toAsk, undecided: cl.undecided, decideN, openN };
   }
   const chip = (k, label, d, info, btns) => `<div class="grc ${d ? 'ok' : ''}"><span class="grc-i" aria-hidden="true">${d ? '✓' : '○'}</span><div class="grc-b"><b>${label}</b><small>${d ? info : 'Not added'}</small></div><div class="grc-a">${btns}${d ? `<button class="link small danger-t" data-clr="${k}" aria-label="Remove ${esc(label)}">Remove</button>` : ''}</div></div>`;
+  // v38: GSTR-3B goes for verification only when 2B is complete (2B in, reco ready, nothing left to decide)
+  function gate3(sm, st) {
+    const M = meth(), why = [], [y, m] = grMonth.split('-').map(Number), nx = new Date(y, m, 14);
+    if (!row.gstr2b) why.push(`GSTR-2B is not added yet — it comes on ${nx.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })} (upload or fetch with OTP)`);
+    else if (M !== '2b_confirm' && !row.purchases) why.push('The purchase register is not added');
+    else if (!st.ready) why.push('2B vs books is not ready');
+    if (st.ready && st.decideN) why.push(`${st.decideN} bill${st.decideN > 1 ? 's' : ''} still to decide in 2B vs books`);
+    return { ok: !why.length, why };
+  }
+  const SENT = ['sent', 'changes', 'approved', 'sent_client'], OKD = ['approved', 'sent_client'];
+  function flows() {
+    const one = k => { const rv = revs[k], RS = rv ? rv.state : 'draft', t = taskOf(k); return { RS, filed: RS === 'sent_client' || !!(t && t.status === 'Filed') }; };
+    const a = one('gstr1'), b = one('gstr3b'), ok = k => !!(stepOf(k) || {}).ok;
+    const mk = (list, RS) => { const L = list.map(x => ({ l: x[0], d: !!x[1] }));
+      for (let i = L.length - 2; i >= 0; i--) if (L[i + 1].d) L[i].d = true;
+      const ci = L.findIndex(x => !x.d); if (ci >= 0) L[ci].cur = true;
+      const si = L.findIndex(x => x.l === 'Sent for verification'); if (RS === 'changes') { L[si].bad = true; L[si].l = 'Changes needed'; L[si].d = false; L.forEach(x => { if (x !== L[si]) x.cur = false; }); L[si].cur = true; }
+      return L; };
+    FL.gstr1 = mk([['Data received', row.sales || row.g1], ['Workings done', ok('s1') || (row.g1 && (row.g1.sales || []).length)], ['Sent for verification', SENT.includes(a.RS)], ['Verified — ready to file', OKD.includes(a.RS)], ['Filed', a.filed]], a.RS);
+    FL.gstr3b = mk([['Data received', row.purchases || row.gstr2b], ['2B complete', G3gate.ok], ['Workings done', ok('s3')], ['Sent for verification', SENT.includes(b.RS)], ['Verified — ready to file', OKD.includes(b.RS)], ['Filed', b.filed]], b.RS);
+  }
+  const flowNow = k => { const L = FL[k], cur = L.find(x => x.cur); return cur ? [cur.bad ? 'Changes needed' : (cur.l === 'Filed' ? 'Ready to file' : 'Next: ' + cur.l), cur.bad ? 'bad' : cur.l === 'Filed' ? 'ok' : 'info'] : ['Filed ✓', 'ok']; };
+  const flowHtml = (k, small) => `<ol class="rf ${small ? 'rf-sm' : ''}" aria-label="${REV.KIND[k].label} status">${FL[k].map((x, i) => `<li class="${x.d ? 'done' : ''} ${x.cur ? 'cur' : ''} ${x.bad ? 'bad' : ''}" ${x.cur ? 'aria-current="step"' : ''}><span class="rf-n">${x.d ? '✓' : x.bad ? '!' : i + 1}</span>${esc(x.l)}</li>`).join('')}</ol>`;
+  const retTabs = on => { const t = k => { const [l, tone] = flowNow(k); return `<span class="grt-p ${tone}">${esc(l)}</span>`; };
+    return `<nav class="grt" aria-label="Returns"><button class="grt-b ${on === 'ov' ? 'on' : ''}" data-ov ${on === 'ov' ? 'aria-current="page"' : ''}><b>Overview</b><span class="grt-p">Both returns</span></button>
+      <button class="grt-b ${on === 'gstr1' ? 'on' : ''}" data-go="s1" ${on === 'gstr1' ? 'aria-current="page"' : ''}><b>GSTR-1</b>${t('gstr1')}</button>
+      <button class="grt-b ${on === 'gstr3b' ? 'on' : ''}" data-go="${gr3Last}" ${on === 'gstr3b' ? 'aria-current="page"' : ''}><b>GSTR-3B</b>${t('gstr3b')}</button></nav>`; };
   async function render() {
     if (!recoHist) { body.innerHTML = '<div class="loading">Loading…</div>'; await loadHist(); }
     const sm = gsum(row), M = meth(), st = itcState(sm), D3 = draft3b(row, sm, c, st.ready ? st.cl.claim : null), mLabel = (() => { const [y, m] = grMonth.split('-'); return `${MONTHS_FULL[+m - 1]} ${y}`; })();
@@ -4790,15 +4342,20 @@ VIEWS.gst = async v => {
       s3: !(sm.counts.sales || sm.counts.b2b || sm.counts.purchases || G1f) ? ['Waiting for data', 'todo'] : [`Cash ${gst$(D3.depositTotal)} to deposit`, G3 ? 'ok' : 'info'],
       s4: r3 ? ['GSTR-3B: ' + r3[0], r3[1]] : row.status === 'Verified' ? ['Verified ✓', 'ok'] : sm.checks.some(x => !x.ok) ? [`${sm.checks.filter(x => !x.ok).length} check${sm.checks.filter(x => !x.ok).length > 1 ? 's' : ''} to look at`, 'bad'] : ['Not verified yet', 'info']
     };
+    G3gate = gate3(sm, st); flows();
     const head = `<div class="grh"><div class="grh-pick"><label>Client<select id="grC">${gClients.length ? opts(gClients, grClient, x => `${x.name} · ${x.gstin}`, x => x.id) : '<option value="">No GST clients</option>'}</select></label>
         <label>Month<input type="month" id="grM" value="${esc(grMonth)}"></label></div>
       ${REV.KINDS.some(k => revs[k] && revs[k].state !== 'draft') ? REV.KINDS.filter(k => revs[k] && revs[k].state !== 'draft').map(k => `<span class="pill ${REV.STATE[revs[k].state][1]}">${REV.KIND[k].label}: ${REV.STATE[revs[k].state][0]}</span>`).join(' ') : row.status === 'Verified' ? `<span class="st st-filed">✓ Verified · ${esc(profName(row.verified_by) || '')}</span>` : '<span class="st st-pending-data">Draft</span>'}
       <span class="spacer"></span><button class="btn sm" data-portal-api>Fetch from GST portal</button><a class="btn sm" href="#/clientreport" data-crgo>Client report</a>
       ${isManager() ? (row.status === 'Verified' ? '<button class="btn sm" id="grUnver">Back to draft</button>' : '<button class="btn sm primary" id="grVer">✓ Mark as verified</button>') : ''}</div>`;
-    if (grOv) { body.innerHTML = head + overviewHtml(sm, st, D3, stat, mLabel); bindPickers(body); return; }
-    const sNow = stepFor(grTab), si = STEPS.findIndex(s => s[0] === sNow), chk = stepOf(sNow);
-    const bar = `<nav class="grs" aria-label="Steps"><button class="grs-ov" data-ov>← Overview</button>${STEPS.map(([k, l], i) => { const [t, tone] = stat[k];
-      return `<button class="grs-s ${k === sNow ? 'on' : ''} ${tone}" data-go="${k}" ${k === sNow ? 'aria-current="step"' : ''}><span class="grs-n">${tone === 'ok' ? '✓' : i + 1}</span><span><b>${i + 1} · ${l}</b><small>${esc(t)}</small></span></button>`; }).join('')}</nav>`;
+    if (grOv) { body.innerHTML = head + retTabs('ov') + overviewHtml(sm, st, D3, stat, mLabel); bindPickers(body); return; }
+    const sNow = stepFor(grTab), chk = stepOf(sNow), RET = sNow === 's1' ? 'gstr1' : 'gstr3b';
+    if (RET === 'gstr3b') gr3Last = sNow;
+    const S3 = STEPS.slice(1), si = S3.findIndex(s => s[0] === sNow);
+    const inner = RET === 'gstr3b' ? `<nav class="grs grs3" aria-label="GSTR-3B steps">${S3.map(([k, l], i) => { const [t, tone] = stat[k];
+      return `<button class="grs-s ${k === sNow ? 'on' : ''} ${tone}" data-go="${k}" ${k === sNow ? 'aria-current="step"' : ''}><span class="grs-n">${tone === 'ok' ? '✓' : i + 1}</span><span><b>${i + 1} · ${k === 's4' ? 'Check' : l}</b><small>${esc(t)}</small></span></button>`; }).join('')}</nav>` : '';
+    const lock = RET === 'gstr3b' && !G3gate.ok && !SENT.includes((revs.gstr3b || {}).state) ? `<div class="rf-lock" role="note"><b>Send for verification is locked until 2B is complete.</b> You can still work on purchases and the draft 3B. ${G3gate.why.map(esc).join(' · ')}</div>` : '';
+    const bar = retTabs(RET) + `<section class="rf-w"><div class="rf-h"><h2>${RET === 'gstr1' ? 'GSTR-1 workspace' : 'GSTR-3B workspace'}</h2><span class="muted small">${RET === 'gstr1' ? 'Sales register, GSTR-1 entry, portal draft — verify, then file' : 'Purchases, 2B reco, ITC, draft 3B — verify after 2B, then file'}</span></div>${flowHtml(RET)}${lock}</section>` + inner;
     const SUBS = { s1: [['g1', 'Our working (GSTR-1 entry)'], ['g1f', 'Filed — portal summary']],
       s2: [['recon', M === '2b_confirm' ? 'Client confirms 2B' : '2B vs Books'], M !== '2b_confirm' && ['pur', 'Books (purchase register)'], ['b2b', 'GSTR-2B'], M !== '2b_confirm' && ['sup', `Supplier follow-up${st.sup.length ? ' · ' + st.sup.length : ''}`], ['ims', 'IMS actions']].filter(Boolean),
       s3: [], s4: [['checks', 'GSTR-1 vs 3B checks'], ['trend', 'Last 6 months']] }[sNow];
@@ -4817,14 +4374,15 @@ VIEWS.gst = async v => {
         ${SUBS.length ? `<div class="seg grs-sub" role="tablist">${SUBS.map(([k, l]) => `<button role="tab" aria-selected="${grTab === k}" class="${grTab === k ? 'on' : ''}" data-gt="${k}">${l}</button>`).join('')}</div>` : ''}
         <div id="grOut"></div>
         ${sNow === 's1' ? revPanel('gstr1') : ''}
+        ${RET === 'gstr3b' && sNow !== 's4' ? revPanel('gstr3b') : ''}
         ${sNow === 's4' ? `<div class="gr-verify"><label class="full">Review notes<textarea id="grNotes" rows="3" placeholder="e.g. Reversed ITC on 2 invoices missing in 2B; client informed">${esc(row.notes || '')}</textarea></label>
           <div class="toolbar" style="margin:8px 0 0"><button class="btn sm" id="grSaveNotes">Save notes</button><span class="spacer"></span>
           ${isManager() && !(revs.gstr3b && ['sent', 'approved', 'sent_client'].includes(revs.gstr3b.state)) ? (row.status === 'Verified' ? '<button class="btn sm" id="grUnver">Back to draft</button>' : '<button class="btn sm" id="grVer" title="Without sending to the senior">Mark as verified here</button>') : ''}</div></div>
           ${revPanel('gstr3b')}` : ''}
       </section>
-      <div class="grs-nav">${si > 0 ? `<button class="btn" data-go="${STEPS[si - 1][0]}">← ${si} · ${STEPS[si - 1][1]}</button>` : '<button class="btn" data-ov>← Overview</button>'}
-        <span class="spacer"></span><label class="check small grs-chk"><input type="checkbox" data-step="${sNow}" ${chk && chk.ok ? 'checked' : ''}> Step checked${chk && chk.ok ? ` <span class="muted">· ${esc(profName(chk.by) || '')}</span>` : ''}</label>
-        ${si < 3 ? `<button class="btn primary" data-go="${STEPS[si + 1][0]}">Next: ${si + 2} · ${STEPS[si + 1][1]} →</button>` : '<button class="btn primary" data-ov>Done — overview</button>'}</div>`;
+      <div class="grs-nav">${RET === 'gstr1' ? '<button class="btn" data-ov>← Overview</button>' : si > 0 ? `<button class="btn" data-go="${S3[si - 1][0]}">← ${S3[si - 1][1]}</button>` : '<button class="btn" data-go="s1">← GSTR-1</button>'}
+        <span class="spacer"></span><label class="check small grs-chk"><input type="checkbox" data-step="${sNow}" ${chk && chk.ok ? 'checked' : ''}> ${sNow === 's1' ? 'GSTR-1 workings done' : sNow === 's3' ? 'GSTR-3B workings done' : 'Step checked'}${chk && chk.ok ? ` <span class="muted">· ${esc(profName(chk.by) || '')}</span>` : ''}</label>
+        ${RET === 'gstr1' ? '<button class="btn primary" data-go="s2">Next: GSTR-3B →</button>' : si < S3.length - 1 ? `<button class="btn primary" data-go="${S3[si + 1][0]}">Next: ${S3[si + 1][0] === 's4' ? 'Check' : S3[si + 1][1]} →</button>` : '<button class="btn primary" data-ov>Done — overview</button>'}</div>`;
     bindPickers(body);
     renderOut(sm, st);
   }
@@ -4833,7 +4391,10 @@ VIEWS.gst = async v => {
     const rev = revs[kind], K = REV.KIND[kind], sr = REV.senior(), RS = (rev && REV.STATE[rev.state] && rev.state) || 'draft', sn = esc(sr ? sr.full_name || sr.email : 'the senior');
     const sh = d => d ? new Date(d).toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' }) : '';
     const canDecide = (settings.senior_id && me.id === settings.senior_id) || isManager();
-    const btn = (a, label, cls = '') => `<button class="btn ${cls}" data-rev="${a}" data-rk="${kind}" ${a === 'send' && !sr ? 'disabled' : ''}>${label}</button>`;
+    const locked = kind === 'gstr3b' && !G3gate.ok, tk = taskOf(kind), filed = tk && tk.status === 'Filed';
+    const btn = (a, label, cls = '') => a === 'send' && locked ? `<button class="btn" data-rev="send" data-rk="${kind}" aria-disabled="true" title="${esc(G3gate.why.join(' · '))}">Locked until 2B is complete</button>`
+      : `<button class="btn ${cls}" data-rev="${a}" data-rk="${kind}" ${a === 'send' && !sr ? 'disabled' : ''}>${label}</button>`;
+    const ackBtn = tk ? (filed ? `<span class="ok-t small">Filed${tk.arn ? ' · ARN ' + esc(tk.arn) : ''}${tk.filed_on ? ' · ' + esc(tk.filed_on) : ''}</span>` : btn('ack', `Upload ${K.label} acknowledgement`, 'primary')) : `<span class="muted small">No ${K.label} work item for this month — upload the acknowledgement from Work.</span>`;
     const rem = ((rev && rev.remarks) || []).slice().reverse().map(x => `<li><b>${esc(x.by || '')}</b> <span class="muted small">${sh(x.at)} · ${x.via === 'link' ? 'by link' : x.via === 'email' ? 'by email reply' : 'in tracker'}</span><div>${esc(x.text)}</div></li>`).join('');
     const sent = ((rev && rev.client_sent) || []).slice().reverse().map(x => `<li>${esc(x.what || 'Workings')} → ${esc(x.to)} <span class="muted small">${sh(x.at)}${x.auto ? ' · automatic' : ''} · ${esc(profName(x.by) || '')}</span></li>`).join('');
     const dr = rev && rev.draft;
@@ -4841,7 +4402,7 @@ VIEWS.gst = async v => {
         ${dr ? `<span class="small">${esc(dr.name)} <span class="muted">· ${dr.src === 'api' ? 'fetched' : 'uploaded'} ${sh(dr.at)}</span></span>` : '<span class="small muted">Not added — the tracker\'s own summary PDF (portal format) goes instead.</span>'}</div>
         <span class="spacer"></span><button class="btn sm" data-rev="draft" data-rk="${kind}">${dr ? 'Replace' : 'Upload PDF'}</button><button class="btn sm" data-rev="fetch" data-rk="${kind}" title="Uses the GST API">Fetch from portal</button>${dr ? `<button class="link small danger-t" data-rev="undraft" data-rk="${kind}">Remove</button>` : ''}</div>` : '';
     const body = {
-      draft: `<p>Send the ${K.label} workings to <b>${sn}</b>: the portal draft PDF and the ${K.short} workings (Excel). The senior approves from the mail — by the button or by replying.</p>
+      draft: `${locked ? `<p class="note warn small">${K.label} can go for verification only after 2B is complete: ${G3gate.why.map(esc).join(' · ')}</p>` : ''}<p>Send the ${K.label} workings to <b>${sn}</b>: the portal draft PDF and the ${K.short} workings (Excel). The senior approves from the mail — by the button or by replying.</p>
         ${sr ? '' : '<p class="note warn small">Choose the senior first: Settings → Senior verification &amp; filing mails.</p>'}
         <div class="toolbar">${btn('send', `Send ${K.label} for verification`, 'primary')}</div>`,
       sent: `<p>Sent to <b>${sn}</b> on ${sh(rev && rev.sent_at)}${rev && rev.sends > 1 ? ` (${rev.sends} times)` : ''} by ${esc(profName(rev && rev.sent_by) || '')}. Waiting for the answer.</p>
@@ -4849,7 +4410,7 @@ VIEWS.gst = async v => {
       changes: `<p class="late"><b>The senior asked for changes.</b> Update the workings, then send again.</p><div class="toolbar">${btn('send', 'Send again for verification', 'primary')}</div>`,
       approved: `<p class="ok-t"><b>Approved</b> ${rev && rev.decided_at ? 'on ' + sh(rev.decided_at) : ''}${rev && rev.decided_via ? ` (${rev.decided_via === 'link' ? 'by link' : rev.decided_via === 'email' ? 'by email reply' : 'in the tracker'})` : ''}. File ${K.label} on the portal, then upload the ${K.label} acknowledgement.</p>
         <p class="small muted">${settings.auto_send_filed ? `Automatic: when the ${K.label} acknowledgement is uploaded, it goes to the client with the workings.` : 'Automatic sending is off (Settings). Use the button after filing.'}</p>
-        <div class="toolbar">${btn('client', 'Send acknowledgement &amp; workings to client', 'primary')}${btn('wa', 'WhatsApp')}</div>`,
+        <div class="toolbar">${ackBtn}${btn('client', 'Send acknowledgement &amp; workings to client', filed ? 'primary' : '')}${btn('wa', 'WhatsApp')}</div>`,
       sent_client: `<p class="ok-t"><b>${K.label} filed and sent to the client.</b></p><div class="toolbar">${btn('client', 'Send again to client')}${btn('wa', 'WhatsApp')}</div>`
     }[RS];
     return `<section class="rev-p rev-${RS}" aria-label="${K.label} verification"><div class="rev-h"><h3>${K.label} — senior verification</h3><span class="pill ${REV.STATE[RS][1]}">${REV.STATE[RS][0]}</span></div>${draftRow}${body}
@@ -4861,6 +4422,8 @@ VIEWS.gst = async v => {
       const txt = `Dear ${c.contact_person || c.name}, your ${K.label} for ${REV.mon(period)} is filed. The acknowledgement and workings have been emailed to you, and you can also download them from your client portal: ${new URL('portal.html', location.href).href} — ${settings.firm_name || cfg.FIRM_NAME || ''}`;
       window.open(waShare(txt, c.phone), '_blank', 'noopener'); return;
     }
+    if (act === 'ack') { const tk = taskOf(kind); if (tk) ackForTask(tk, async () => { gtasks = await loadGT().catch(() => gtasks); revs = await REV.load(c, period).catch(() => revs); render(); }); return; }
+    if (act === 'send' && kind === 'gstr3b' && !G3gate.ok) { toast(`GSTR-3B can go for verification only after 2B is complete — ${G3gate.why.join('; ')}`, true); return; }
     if (act === 'fetch') { gstPortalFetch(c, grMonth, async patch => { await save(patch); }, kind === 'gstr1' ? 'g1' : ''); return; }
     btn.disabled = true; const old = btn.textContent; btn.textContent = 'Working…';
     try {
@@ -4871,7 +4434,6 @@ VIEWS.gst = async v => {
       if (act === 'undraft') { if (!confirm('Remove the portal draft PDF?')) return; await REV.clearDraft(c, period, kind); }
       if (act === 'send') {
         if (kind === 'gstr1' && !(row.sales || row.g1)) throw new Error('Add the sales register or the GSTR-1 entry first');
-        if (kind === 'gstr3b' && st.decideN && !confirm(`${st.decideN} bill(s) in step 2 are not decided yet. Send for verification anyway?`)) return;
         if (!(rev && rev.draft) && !confirm(`No ${K.label} draft from the portal is added.\n\nSend with the tracker's own summary PDF (portal format) instead?`)) return;
         await REV.send({ kind, c, period, row, sm, st, D3, rev });
         toast(`${K.label} sent to ${(REV.senior() || {}).full_name || 'the senior'} for verification`);
@@ -4913,7 +4475,7 @@ VIEWS.gst = async v => {
     if (!G3 && (S || G1f)) todo.push(['s3', 'Add the filed GSTR-3B after filing']);
     if (sm.checks.some(x => !x.ok)) todo.push(['s4', 'Look at the GSTR-1 vs 3B checks']);
     const srN = (REV.senior() || {}).full_name || 'the senior', dd = d => new Date(d).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
-    [['gstr1', 's1', !!(S || row.g1)], ['gstr3b', 's4', !!((S || G1f) && (B || P) && !st.decideN)]].forEach(([k, s, ready]) => {
+    [['gstr1', 's1', !!(S || row.g1)], ['gstr3b', 's4', !!((S || G1f) && G3gate.ok)]].forEach(([k, s, ready]) => {
       const rv = revs[k], RS = rv ? rv.state : 'draft', L = REV.KIND[k].label;
       if (RS === 'changes') todo.unshift([s, `Senior asked for changes on ${L}: ${((rv.remarks || []).slice(-1)[0] || {}).text || ''}`.slice(0, 130)]);
       else if (RS === 'sent') todo.push([s, `${L} waiting for ${srN} to verify (sent ${dd(rv.sent_at)})`]);
@@ -4921,7 +4483,8 @@ VIEWS.gst = async v => {
       else if (RS === 'draft' && ready) todo.push([s, `${L} workings ready — send for verification to ${srN}`]);
     });
     if (!todo.length && row.status !== 'Verified') todo.push(['s4', 'Everything is in — review and mark as verified']);
-    return `<div class="gro">
+    const fl = (k, go) => `<button class="gro-f" data-go="${go}"><b>${REV.KIND[k].label}</b>${flowHtml(k, true)}</button>`;
+    return `<div class="gro-fs" aria-label="Return status">${fl('gstr1', 's1')}${fl('gstr3b', gr3Last)}</div><div class="gro">
       <div class="gro-cards">
         ${card('s1', 'GSTR-1', num('Taxable', gst$(g1t.t)) + num('Tax', gst$(gTax(g1t))), `${tick(S, `Sales register${S ? ` (${S.rows.length})` : ''}`)} · ${tick(G1f, 'Filed')}`, 'Open GSTR-1', stat.s1[1])}
         ${card('s2', 'Purchases &amp; ITC', num('ITC in 2B', gst$(gTax(sm.itc2b))) + num(M === 'books' ? 'ITC as per books' : 'To claim', st.cl ? gst$(gTax(st.cl.claim)) : '—', 'g'),
@@ -9590,7 +9153,7 @@ const HELP = {
   // offline guide: [keywords, answer, [ [label, route] ...] ]
   topics: [
     [['start', 'new', 'joiner', 'begin', 'first day', 'tour', 'features', 'what can', 'overview', 'menu', 'kya hai', 'enna'],
-      'Welcome! The menu on the left is grouped by work: **Overview** (Dashboard, calendar, all your work), **GST**, **TDS** and **MCA** (each with its work list and working page), **Notices** (all notices, by department — everyone can see them), **Tools** (bank statements, late fee calculator, checklists, law updates), **Clients**, and **Payments & billing**. Start each day on the Dashboard — it shows what is overdue and due this week.',
+      'Welcome! The menu on the left is grouped by work: **Overview** (Dashboard, calendar, all your work and notices), **GST**, **TDS** and **MCA** (each with its work list, working page and notices), **Tools** (bank statements, late fee calculator, checklists, law updates), **Clients**, and **Payments & billing**. Start each day on the Dashboard — it shows what is overdue and due this week.',
       [['Dashboard', 'dashboard'], ['My work', 'work'], ['Due-date calendar', 'calendar']]],
     [['my work', 'my task', 'assigned', 'today', 'pending', 'overdue', 'what should i do'],
       'Your work is in **Overview → My work** (Managers see **All work**). Filter by month or status; click a row to update its status (Pending data → In progress → Ready to file → Filed), add the ARN and tick the checklist. The Dashboard shows your overdue and due-in-7-days items.',
@@ -9608,7 +9171,7 @@ const HELP = {
       '**MCA → Companies & LLPs** holds each company / LLP with its AGM date, ROC due dates (AOC-4, MGT-7, Form 11, Form 8) and directors with DIR-3 KYC. The filing work itself is in **MCA → MCA / ROC work**.',
       [['Companies & LLPs', 'mca'], ['MCA work', 'work']]],
     [['notice', 'scn', 'show cause', 'asmt', 'drc', 'demand', 'hearing', 'intimation', '143', '148', 'reply'],
-      'Notices have their own **Notices** section in the menu (All, GST, TDS and MCA notices). Everyone in the office can see them. Notice emails from the portals are added automatically; press **Check now** to look right away. Open a notice and use **Draft reply with AI** for a first draft, then edit, save and set the status to Reply drafted / Replied.',
+      'Notices are under **Overview → All notices** (or GST / TDS / MCA notices in each group). Notice emails from the portals are added automatically; press **Check now** to look right away. Open a notice and use **Draft reply with AI** for a first draft, then edit, save and set the status to Reply drafted / Replied.',
       [['All notices', 'notices']]],
     [['bank', 'statement', 'tally', 'excel', 'convert', 'passbook'],
       '**Tools → Bank statements**: drop a bank statement (PDF, password PDF, Excel / CSV or a scan). Every row is checked against the running balance. Fill ledgers, then download **Excel** or **Tally XML** (ledgers first, then vouchers).',
@@ -9923,7 +9486,7 @@ async function renderChaseSettings(box) {
    Rows are written by the database itself (triggers), so nothing can skip them.
    ===================================================================== */
 const AUDIT = {
-  AREA: { clients: 'Client', client_groups: 'Client group', tasks: 'Work', notices: 'Notice', invoices: 'Invoice', payments: 'Payment', profiles: 'Team member', task_docs: 'Work file', renewals: 'Renewal',
+  AREA: { clients: 'Client', tasks: 'Work', notices: 'Notice', invoices: 'Invoice', payments: 'Payment', profiles: 'Team member', task_docs: 'Work file', renewals: 'Renewal',
     mca_companies: 'Company / LLP', mca_directors: 'Director', tds_challans: 'TDS challan', tds_returns: 'TDS return', fee_rates: 'Fee rate', due_dates: 'Due date',
     onboarding: 'Onboarding', tax_intimations: 'Tax intimation', checklist_templates: 'Checklist', settings: 'Settings', login: 'Sign-in' },
   ACT: { insert: 'Added', update: 'Changed', delete: 'Deleted', sign_in: 'Signed in', sign_out: 'Signed out', idle_sign_out: 'Signed out (5 min idle)', export: 'Exported' },
@@ -10115,7 +9678,7 @@ async function dashOffice(body) {
   const [open, month, nt, wr, inv, pay] = await Promise.all([
     must(sb.from('tasks').select('*').not('status', 'in', '("Filed","Not applicable")').order('due_date', { ascending: true, nullsFirst: false }).limit(5000)),
     must(sb.from('tasks').select('id,client_id,work_type,return_name,status,due_date,filed_on,assigned_to').gte('due_date', mStart).lte('due_date', mEnd).limit(10000)),
-    safe(sb.from('notices').select('id,client_id,dept,notice_type,status,reply_due,hearing_date,assigned_to').neq('status', 'Closed').limit(3000)),
+    safe(sb.from('notices').select('id,client_id,dept,notice_type,status,reply_due,assigned_to').neq('status', 'Closed').limit(3000)),
     safe(sb.from('work_requests').select('*').in('status', ['New', 'In progress']).order('due_date', { ascending: true, nullsFirst: false }).limit(500)),
     isPartner() && P4() ? safe(sb.from('invoices').select('client_id,total,paid').limit(10000)) : Promise.resolve({ data: null }),
     isPartner() && P4() ? safe(sb.from('payments').select('amount,paid_on').gte('paid_on', mStart).lte('paid_on', mEnd).limit(5000)) : Promise.resolve({ data: null })
@@ -10123,8 +9686,7 @@ async function dashOffice(body) {
   const rows = open.data || [], mrows = (month.data || []).filter(r => r.status !== 'Not applicable');
   const notices = nt.error ? [] : nt.data || [], reqs = wr.error ? null : wr.data || [];
   const overdue = rows.filter(r => r.due_date && r.due_date < t), soon = rows.filter(r => r.due_date && r.due_date >= t && r.due_date <= in7);
-  const nDue = notices.filter(n => isOpenNotice(n.status) && n.status !== 'Hearing' && n.reply_due && n.reply_due <= in7);
-  const nLateO = nDue.filter(n => n.reply_due < t).length, nHearO = notices.filter(n => n.hearing_date && n.hearing_date >= t && n.hearing_date <= in7).length;
+  const nDue = notices.filter(n => isOpenNotice(n.status) && n.reply_due && n.reply_due <= in7).sort((a, b) => a.reply_due.localeCompare(b.reply_due));
 
   // this month by department
   const dept = ['GST', 'TDS', 'ROC/MCA', 'Other'].map(w => {
@@ -10161,8 +9723,7 @@ async function dashOffice(body) {
       <a class="mini red k-late" href="#/work" data-oq="overdue">${kpiIco('late')}<span>Overdue</span><b>${overdue.length}</b></a>
       <a class="mini amber k-soon" href="#/work" data-oq="soon">${kpiIco('soon')}<span>Due in 7 days</span><b>${soon.length}</b></a>
       <a class="mini blue k-wait" href="#/work" data-oq="waiting">${kpiIco('wait')}<span>Waiting for client data</span><b>${rows.filter(r => r.status === 'Pending data').length}</b></a>
-      <div class="mini green k-done">${kpiIco('done')}<span>Filed this month</span><b>${filedM}</b><small>of ${mrows.length}</small></div></div>
-    ${!settings.notices_off && (nLateO || nDue.length || nHearO) ? `<div class="od-fees">${noticeChip(nLateO, nDue.length - nLateO, nHearO)}</div>` : ''}
+      <a class="mini ${nDue.length ? 'red' : 'green'} k-note" href="#/notices">${kpiIco('note')}<span>Notice replies due (7 days)</span><b>${nDue.length}</b></a></div>
     ${fees !== null ? `<div class="od-fees"><a class="chip blue" href="#/billing" data-billdue>Fees outstanding ${inr(fees)}</a><span class="chip green">Collected this month ${inr(got || 0)}</span><span id="oGstBill"></span></div>` : ''}
     <h3 class="od-h">This month by department</h3><div class="od-depts">${dept}</div>
     <div class="card"><h3>Team</h3>${people.length || un.length ? `<div class="table-wrap"><table class="od-staff"><thead><tr><th>Person</th><th>Overdue</th><th>Due 7 days</th><th>Waiting data</th><th>All open</th><th>Filed this month</th><th>Requests</th><th></th></tr></thead><tbody>
@@ -10171,7 +9732,8 @@ async function dashOffice(body) {
     <div class="card"><h3>Work requests in progress${reqs ? ` (${reqs.length})` : ''}</h3><div id="oReqList">${reqs ? '' : '<p class="note small">Run <b>update-session10.sql</b> in Supabase to switch on work requests.</p>'}</div></div>
     <div class="card"><h3>Overdue (${overdue.length})</h3><div data-t="late"></div></div>
     <div class="card"><h3>Due in the next 7 days (${soon.length})</h3><div data-t="soon"></div></div>
-
+    ${nDue.length ? `<div class="card"><h3>Notice replies due</h3><div class="table-wrap"><table><thead><tr><th>Client</th><th>Notice</th><th>Reply by</th><th>Staff</th></tr></thead><tbody>
+      ${nDue.slice(0, 30).map(n => `<tr><td>${esc(clientName(n.client_id))}</td><td>${esc((n.dept === 'ROC/MCA' ? 'MCA' : n.dept) + ' · ' + n.notice_type)}</td><td class="${n.reply_due < t ? 'late' : ''}">${fmtDate(n.reply_due)}</td><td>${esc(profName(n.assigned_to) || '—')}</td></tr>`).join('')}</tbody></table></div></div>` : ''}
     <div id="oHealth"></div>`;
   const refresh = () => route();
   const lateEl = $('[data-t=late]', body), soonEl = $('[data-t=soon]', body);
@@ -10205,7 +9767,7 @@ async function dashMine(body) {
   const [open, done, nt, wr] = await Promise.all([
     must(sb.from('tasks').select('*').eq('assigned_to', me.id).not('status', 'in', '("Filed","Not applicable")').order('due_date', { ascending: true, nullsFirst: false }).limit(3000)),
     must(sb.from('tasks').select('id,status,due_date,filed_on').eq('assigned_to', me.id).eq('status', 'Filed').gte('filed_on', mStart).lte('filed_on', mEnd).limit(3000)),
-    safe(sb.from('notices').select('id,status,reply_due,hearing_date,assigned_to').neq('status', 'Closed').limit(3000)),
+    safe(sb.from('notices').select('*').eq('assigned_to', me.id).neq('status', 'Closed').order('reply_due', { ascending: true, nullsFirst: false }).limit(500)),
     safe(sb.from('work_requests').select('*').eq('assigned_to', me.id).in('status', ['New', 'In progress']).order('due_date', { ascending: true, nullsFirst: false }).limit(300))
   ]);
   const rows = open.data || [], filed = done.data || [], notices = nt.error ? [] : nt.data || [], reqs = wr.error ? null : wr.data || [];
@@ -10213,9 +9775,7 @@ async function dashMine(body) {
   const waiting = rows.filter(r => r.status === 'Pending data');
   const ontime = filed.filter(r => !r.due_date || (r.filed_on || '') <= r.due_date).length;
   const hour = now.getHours(), hello = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
-  const nOpen = notices.filter(n => isOpenNotice(n.status) && n.status !== 'Hearing' && n.reply_due);
-  const nLateM = nOpen.filter(n => n.reply_due < t).length, nSoonM = nOpen.filter(n => n.reply_due >= t && n.reply_due <= in7).length;
-  const nHearM = notices.filter(n => n.hearing_date && n.hearing_date >= t && n.hearing_date <= in7).length;
+  const nLate = notices.filter(n => n.reply_due && n.reply_due < t && n.status !== 'Hearing');
   body.innerHTML = `
     <div class="page-head"><h2>${hello}, ${esc((me.full_name || '').split(' ')[0] || 'there')}</h2><span class="muted">${now.toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long' })}</span></div>
     <div class="bento-stats card stats4" style="margin-bottom:14px">
@@ -10229,7 +9789,8 @@ async function dashMine(body) {
     <div class="card"><h3>Due today (${todayL.length})</h3><div data-t="today"></div></div>
     <div class="card"><h3>Due in the next 7 days (${week.length})</h3><div data-t="week"></div></div>
     <div class="card"><h3>Waiting for client data (${waiting.length})</h3><p class="muted small" style="margin-top:-4px">Use Follow-up to call or WhatsApp the client and note when they promised the data.</p><div data-t="wait"></div></div>
-    ${!settings.notices_off && (nLateM || nSoonM || nHearM) ? `<div class="od-fees">${noticeChip(nLateM, nSoonM, nHearM)}</div>` : ''}`;
+    ${notices.length ? `<div class="card"><h3>My notices (${notices.length})${nLate.length ? ` <span class="chip red small">${nLate.length} reply overdue</span>` : ''}</h3><div class="table-wrap"><table><thead><tr><th>Client</th><th>Notice</th><th>Reply by</th><th>Status</th></tr></thead><tbody>
+      ${notices.map(n => `<tr><td>${esc(clientName(n.client_id))}</td><td><a href="#/notices">${esc((n.dept === 'ROC/MCA' ? 'MCA' : n.dept) + ' · ' + n.notice_type)}</a></td><td class="${n.reply_due && n.reply_due < t ? 'late' : ''}">${n.reply_due ? fmtDate(n.reply_due) : '—'}</td><td>${esc(n.status)}</td></tr>`).join('')}</tbody></table></div></div>` : ''}`;
   const refresh = () => route();
   [['late', overdue], ['today', todayL], ['week', week], ['wait', waiting]].forEach(([k, list]) => {
     const el = $(`[data-t=${k}]`, body);
@@ -10252,13 +9813,13 @@ async function dashSystemTab(body) {
     const n = nw.data || {}, a = aw.data || {}, c = ch.data || {}, mm = ml.data || {}, b = (bk.data || [])[0], ia = ai.data || {}, w = ws.data || {};
     const bkAge = b ? (Date.now() - new Date(b.taken_at)) / 36e5 : null;
     $('#sysGrid', body).innerHTML = [
-      tile('WhatsApp reminders', wa.error || ws.error || !w.enabled ? null : true, wa.error || ws.error ? 'not set up' : w.enabled ? 'on — staff 9:30 AM daily' : 'switched off', '#/settings?s=whatsapp'),
+      tile('WhatsApp reminders', wa.error || ws.error || !w.enabled ? null : true, wa.error || ws.error ? 'not set up' : w.enabled ? 'on — staff 9:30 AM daily' : 'switched off', '#/settings'),
       tile('Notice watch', nw.error ? null : n.connected && n.enabled ? !n.last_error && !!n.last_check_at && (Date.now() - new Date(n.last_check_at)) < 3 * 36e5 : null, nw.error ? 'not installed' : !n.connected ? 'not set up' : n.last_error ? 'problem: ' + esc(n.last_error) : 'last check ' + when(n.last_check_at), '#/notices'),
-      tile('Automatic GST work', aw.error ? null : a.gst_enabled ? true : null, aw.error ? 'not installed' : a.gst_enabled ? 'last run ' + when(a.last_run_at) + (a.last_made != null ? ` · ${a.last_made} made` : '') : 'switched off', '#/settings?s=gst'),
-      tile('Data chasing', ch.error ? null : c.enabled ? !c.failed_7 : null, ch.error ? 'not installed' : c.enabled ? `on · ${c.sent_7 || 0} clients reminded in 7 days${c.failed_7 ? ` · ${c.failed_7} failed` : ''}${c.queued ? ` · ${c.queued} emails waiting` : ''}` : 'switched off', '#/settings?s=clients'),
+      tile('Automatic GST work', aw.error ? null : a.gst_enabled ? true : null, aw.error ? 'not installed' : a.gst_enabled ? 'last run ' + when(a.last_run_at) + (a.last_made != null ? ` · ${a.last_made} made` : '') : 'switched off', '#/settings'),
+      tile('Data chasing', ch.error ? null : c.enabled ? !c.failed_7 : null, ch.error ? 'not installed' : c.enabled ? `on · ${c.sent_7 || 0} clients reminded in 7 days${c.failed_7 ? ` · ${c.failed_7} failed` : ''}${c.queued ? ` · ${c.queued} emails waiting` : ''}` : 'switched off', '#/settings'),
       tile('Client mail', ml.error ? null : mm.enabled && mm.key_set ? !mm.last_error : null, ml.error ? 'not installed' : mm.enabled && mm.key_set ? 'last mail ' + when(mm.last_mail_at) + (mm.new ? ` · ${mm.new} waiting` : '') : 'not set up', '#/inbox'),
       tile('Backup', bk.error ? null : b ? bkAge < 30 : false, bk.error ? 'not available' : b ? 'last ' + when(b.taken_at) + ` · ${b.rows} rows` : 'no backup yet', '#/settings'),
-      tile('AI (bills, help, replies)', ai.error ? null : ia.enabled && ia.key_set ? true : null, ai.error ? 'not installed' : ia.key_set ? `this month ₹${(+ia.month_cost || 0).toFixed(2)}` : 'no key — free reading only', '#/settings?s=ai')
+      tile('AI (bills, help, replies)', ai.error ? null : ia.enabled && ia.key_set ? true : null, ai.error ? 'not installed' : ia.key_set ? `this month ₹${(+ia.month_cost || 0).toFixed(2)}` : 'no key — free reading only', '#/settings')
     ].join('');
   });
   await dashFull($('#sysOld', body));
