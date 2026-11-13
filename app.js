@@ -1769,15 +1769,15 @@ VIEWS.clients = async v => {
     const miss = clients.filter(c => c.active && clientProblems({ ...c, client_code: (c.client_code || '').toUpperCase() }, c.id).length);
     $('#cMiss').innerHTML = miss.length ? `<p class="note warn small">${miss.length} active client${miss.length > 1 ? 's are' : ' is'} missing required details (client code, PAN, GSTIN, phone or email): ${miss.slice(0, 8).map(c => `<button class="link" data-ed="${c.id}">${esc(c.name)}</button>`).join(', ')}${miss.length > 8 ? ' …' : ''}. Open each one and fill them in.</p>` : '';
     $('#cMiss').onclick = e => { if (e.target.dataset.ed) editClient(clientById(e.target.dataset.ed)); };
-    $('#cList').innerHTML = list.length ? `<div class="table-wrap"><table><thead><tr><th>Code</th><th>Client</th><th>GSTIN</th><th>PAN / TAN</th><th>GST scheme</th><th>Services</th><th>Default staff</th><th>Status link</th><th></th></tr></thead><tbody>
+    $('#cList').innerHTML = list.length ? `<div class="table-wrap"><table><thead><tr><th>Code</th><th>Client</th><th>GSTIN</th><th>PAN / TAN</th><th>GST scheme</th><th>Services</th><th>Default staff</th><th>Status link</th></tr></thead><tbody>
       ${list.map(c => `<tr>
         <td>${c.client_code ? `<span class="ccode">${esc(c.client_code)}</span>` : '<span class="late small">—</span>'}</td>
-        <td class="wrap"><b>${esc(c.name)}</b>${c.active ? '' : ' <span class="badge">inactive</span>'}${c.group_id && groupName(c.group_id) ? ` <span class="pill b small" title="Group">${esc(groupName(c.group_id))}</span>` : ''}<div class="muted small">${esc([c.contact_person, c.phone].filter(Boolean).join(' · '))}</div></td>
+        <td class="wrap"><button class="link c-name" data-ed="${c.id}" title="Edit client"><b>${esc(c.name)}</b></button>${c.active ? '' : ' <span class="badge">inactive</span>'}${c.group_id && groupName(c.group_id) ? ` <span class="pill b small" title="Group">${esc(groupName(c.group_id))}</span>` : ''}<div class="muted small">${esc([c.contact_person, c.phone].filter(Boolean).join(' · '))}</div><div class="c-acts"><button class="btn sm" data-ed="${c.id}">✏️ Edit</button><button class="btn sm" data-lgc="${c.id}" title="GST / TDS / MCA portal logins">🔑 Logins</button><button class="btn sm" data-obc="${c.id}" title="KYC, engagement letter, fees, recurring work">${obMap[c.id] ? (obMap[c.id].status === 'Completed' ? '✓ Onboarded' : `Onboarding ${obProgress(obMap[c.id]).done}/${obProgress(obMap[c.id]).total}`) : 'Onboard'}</button></div></td>
         <td class="small">${esc(c.gstin || '—')}</td><td class="small">${esc(c.pan || '—')}<div class="muted">${esc(c.tan || '')}</div></td>
         <td>${esc(c.gst_scheme)}</td><td class="wrap">${(c.services || []).map(wtBadge).join(' ')}</td>
         <td>${esc(profName(c.default_staff) || '—')}</td>
         <td class="row-btns"><button class="btn sm" data-copy="${c.id}">Copy link</button><a class="btn sm" href="${esc(waShare(clientMsg(c), c.phone))}" target="_blank" rel="noopener" title="Send on WhatsApp">WhatsApp</a><a class="btn sm ghost" href="${esc(statusUrl(c.status_token))}" target="_blank" rel="noopener">Open</a></td>
-        <td class="row-btns"><button class="btn sm" data-lgc="${c.id}" title="GST / TDS / MCA portal logins">🔑 Logins</button><button class="btn sm" data-obc="${c.id}" title="KYC, engagement letter, fees, recurring work">${obMap[c.id] ? (obMap[c.id].status === 'Completed' ? '✓ Onboarded' : `Onboarding ${obProgress(obMap[c.id]).done}/${obProgress(obMap[c.id]).total}`) : 'Onboard'}</button><button class="btn sm" data-ed="${c.id}">Edit</button></td></tr>`).join('')}
+        </tr>`).join('')}
       </tbody></table></div>` : `<div class="table-wrap"><div class="empty">${clients.length ? 'No match.' : 'No clients yet. Add one, or import your list from a CSV file.'}</div></div>`;
   };
   render();
@@ -1787,10 +1787,11 @@ VIEWS.clients = async v => {
   if ($('#grpBtn')) $('#grpBtn').onclick = () => manageGroups();
   $('#addC').onclick = () => editClient(null);
   $('#cList').onclick = e => {
-    if (e.target.dataset.copy) copy(statusUrl(clientById(e.target.dataset.copy).status_token));
-    if (e.target.dataset.ed) editClient(clientById(e.target.dataset.ed));
-    if (e.target.dataset.lgc) openLogins(clientById(e.target.dataset.lgc));
-    if (e.target.dataset.obc) openOnboarding(clientById(e.target.dataset.obc));
+    const t = e.target.closest('[data-copy],[data-ed],[data-lgc],[data-obc]'); if (!t) return; const d = t.dataset;
+    if (d.copy) copy(statusUrl(clientById(d.copy).status_token));
+    if (d.ed) editClient(clientById(d.ed));
+    if (d.lgc) openLogins(clientById(d.lgc));
+    if (d.obc) openOnboarding(clientById(d.obc));
   };
   if ($('#lgLog')) $('#lgLog').onclick = () => loginLog(null);
   $('#tplBtn').onclick = () => download('clients-template.csv', toCSV([
