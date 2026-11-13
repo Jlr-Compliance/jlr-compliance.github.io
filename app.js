@@ -634,10 +634,11 @@ const NI = {   // menu icons (stroke SVG paths)
 const navIcon = k => `<svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${NI[k] || NI.work}</svg>`;
 function navGroups() {
   const G = [
-    ['Overview', [['dashboard', 'Dashboard'], ['calendar', 'Due-date calendar'], ['work', isManager() ? 'All work' : 'My work'], ['notices', 'All notices', 'notices']]],
-    ['GST', [['work-gst', isManager() ? 'GST work' : 'My GST work', 'gstw'], ['gst', 'GST review', 'gst'], ['notices-gst', 'GST notices', 'notices']]],
-    ['TDS', [['work-tds', isManager() ? 'TDS / TCS work' : 'My TDS work', 'tds'], ['tds', 'TDS working', 'tdsw'], ['notices-tds', 'TDS notices', 'notices']]],
-    ['MCA', [['work-mca', isManager() ? 'MCA / ROC work' : 'My MCA work', 'mca'], ['mca', 'Companies & LLPs', 'companies'], ['notices-mca', 'MCA notices', 'notices']]],
+    ['Overview', [['dashboard', 'Dashboard'], ['calendar', 'Due-date calendar'], ['work', isManager() ? 'All work' : 'My work']]],
+    ['GST', [['work-gst', isManager() ? 'GST work' : 'My GST work', 'gstw'], ['gst', 'GST review', 'gst']]],
+    ['TDS', [['work-tds', isManager() ? 'TDS / TCS work' : 'My TDS work', 'tds'], ['tds', 'TDS working', 'tdsw']]],
+    ['MCA', [['work-mca', isManager() ? 'MCA / ROC work' : 'My MCA work', 'mca'], ['mca', 'Companies & LLPs', 'companies']]],
+    !settings.notices_off && ['Notices', [['notices', 'All notices', 'notices'], ['notices-gst', 'GST notices', 'notices'], ['notices-tds', 'TDS notices', 'notices'], ['notices-mca', 'MCA notices', 'notices']]],
     ['Tools', [['bank', 'Bank statements', 'bank'], ['acks', 'Filing acknowledgements'], ['calc', 'Late fee calculator'], ['checklists', 'Checklists'], ['updates', 'Law updates']]],
     ['Clients', [isManager() && ['clients', 'Clients'], ['docs', 'Documents for the month'], ['onboarding', 'Onboarding'], ['renewals', 'Renewals (DSC, LUT…)'], ['inbox', 'Client mail'], ['clientreport', 'Monthly client reports']]],
     ['Payments & billing', [['taxpay', 'Tax payment intimation'], isManager() && ['billing', 'Billing & fees']]],
@@ -1481,8 +1482,8 @@ const dashFull = async v => {      // the full dashboard (Admin → System tab)
   const waitingClients = new Set(waiting.map(r => r.client_id)).size;
   const nLate = notRows.filter(n => isOpenNotice(n.status) && n.status !== 'Hearing' && n.reply_due && n.reply_due < t).length;
   const nSoon = notRows.filter(n => isOpenNotice(n.status) && n.reply_due >= t && n.reply_due <= in7).length;
-  if (nLate && !settings.notices_off) chips.push(`<a class="chip red" href="#/notices">${nLate} notice repl${nLate > 1 ? 'ies' : 'y'} overdue</a>`);
-  if (nSoon && !settings.notices_off) chips.push(`<a class="chip amber" href="#/notices">${nSoon} notice repl${nSoon > 1 ? 'ies' : 'y'} due in 7 days</a>`);
+  const nHear = notRows.filter(n => n.status !== 'Closed' && n.hearing_date && n.hearing_date >= t && n.hearing_date <= in7).length;
+  if (!settings.notices_off && (nLate || nSoon || nHear)) chips.push(noticeChip(nLate, nSoon, nHear));
   if (invRows) { const bal = invRows.reduce((a, i) => a + num(i.total) - num(i.paid), 0); if (bal > 0.009) chips.push(`<a class="chip blue" href="#/billing" data-billdue>${inr(bal)} payments pending</a>`); }
   if (luNew) chips.push(`<a class="chip blue" href="#/updates">${luNew} new law update${luNew > 1 ? 's' : ''}</a>`);
   if (fuDue.length) chips.push(`<a class="chip amber" href="#/work" data-jump="fudue">${fuDue.length} client follow-up${fuDue.length > 1 ? 's' : ''} due today</a>`);
@@ -2931,8 +2932,8 @@ let nf = { status: 'open', dept: '', q: '' };
 VIEWS.notices = async v => {
   const r = await safe(sb.from('notices').select('*').order('reply_due', { ascending: true, nullsFirst: false }).limit(3000));
   if (r.error) { v.innerHTML = '<div class="card"><h3>Notices</h3><p class="note">Not set up yet — run <b>update-phase4.sql</b> in Supabase, then reload.</p></div>'; return; }
-  const all = (r.data || []).filter(n => isManager() || n.assigned_to === me.id), t = today(), in7 = iso(addDays(new Date(), 7));
-  v.innerHTML = `<div class="page-head"><h2>${nf.dept ? (nf.dept === 'ROC/MCA' ? 'MCA' : esc(nf.dept)) + ' notices' : isManager() ? 'All notices' : 'My notices'}</h2><span class="spacer"></span>
+  const all = r.data || [], t = today(), in7 = iso(addDays(new Date(), 7));
+  v.innerHTML = `<div class="page-head"><h2>${nf.dept ? (nf.dept === 'ROC/MCA' ? 'MCA' : esc(nf.dept)) + ' notices' : 'All notices'}</h2><span class="spacer"></span>
       <button class="btn" id="nCheck" title="Look in the office mailbox for new notice emails now">${navIcon('refresh')}<span>Check now</span></button>${isManager() ? '<button class="btn primary" id="addN">+ Add notice</button>' : ''}</div>
     <div id="nWatch"></div><div id="nMails"></div>
     <div class="bento-stats card stats4" style="margin-bottom:14px">
@@ -2941,12 +2942,12 @@ VIEWS.notices = async v => {
       <div class="mini blue"><span>Hearings coming</span><b>${all.filter(n => n.status !== 'Closed' && n.hearing_date && n.hearing_date >= t).length}</b></div>
       <div class="mini green"><span>Closed</span><b>${all.filter(n => n.status === 'Closed').length}</b></div></div>
     <div class="toolbar"><select id="nS"><option value="open">Open (not closed)</option><option value="all">All</option>${opts(NOTICE_STATUSES, nf.status)}</select>
-      <select id="nD"><option value="">All departments</option>${opts(NOTICE_DEPTS, nf.dept, d => d === 'ROC/MCA' ? 'MCA' : d)}</select>
+      <select id="nMine"><option value="">Everyone's notices</option><option value="me" ${nf.mine ? 'selected' : ''}>Assigned to me</option></select><select id="nD"><option value="">All departments</option>${opts(NOTICE_DEPTS, nf.dept, d => d === 'ROC/MCA' ? 'MCA' : d)}</select>
       <input type="search" id="nQ" placeholder="Search client / notice / ref" value="${esc(nf.q)}"></div><div id="nList"></div>`;
   $('#nS').value = nf.status;
   const render = () => {
     const s = nf.q.toLowerCase();
-    const list = all.filter(n => (nf.status === 'all' || (nf.status === 'open' ? n.status !== 'Closed' : n.status === nf.status)) && (!nf.dept || n.dept === nf.dept)
+    const list = all.filter(n => (nf.status === 'all' || (nf.status === 'open' ? n.status !== 'Closed' : n.status === nf.status)) && (!nf.dept || n.dept === nf.dept) && (!nf.mine || n.assigned_to === me.id)
       && (!s || [clientName(n.client_id), n.notice_type, n.ref_no, n.period, n.remarks].join(' ').toLowerCase().includes(s)));
     $('#nList').innerHTML = list.length ? `<div class="count">${list.length} notice${list.length > 1 ? 's' : ''}</div><div class="table-wrap"><table><thead><tr><th>Client</th><th>Dept</th><th>Notice</th><th>Notice date</th><th>Reply due</th><th class="r">Amount</th><th>Assigned</th><th>Status</th><th></th></tr></thead><tbody>
       ${list.map(n => { const late = isOpenNotice(n.status) && n.status !== 'Hearing' && n.reply_due && n.reply_due < t, soon = isOpenNotice(n.status) && n.reply_due >= t && n.reply_due <= in7;
@@ -2962,6 +2963,7 @@ VIEWS.notices = async v => {
   render();
   $('#nS').onchange = e => { nf.status = e.target.value; render(); };
   $('#nD').onchange = e => { nf.dept = e.target.value; render(); };
+  $('#nMine').onchange = e => { nf.mine = e.target.value === 'me'; render(); };
   $('#nQ').oninput = e => { nf.q = e.target.value; render(); };
   if ($('#addN')) $('#addN').onclick = () => editNotice(null);
   $('#nList').addEventListener('change', async e => {
@@ -2973,6 +2975,11 @@ VIEWS.notices = async v => {
   if (isManager()) noticeMailList($('#nMails'));
 };
 
+/* small notice count for dashboards (opens the Notices tab) */
+function noticeChip(late, soon, hear) {
+  const parts = [late && `${late} reply overdue`, soon && `${soon} reply due in 7 days`, hear && `${hear} hearing${hear > 1 ? 's' : ''} this week`].filter(Boolean);
+  return `<a class="chip ${late ? 'red' : 'amber'} n-count" href="#/notices" data-k="notices" title="Open the Notices tab">${navIcon('notices')}<span>Notices: ${parts.join(' · ')}</span></a>`;
+}
 /* notice watch: status line + Check now */
 async function noticeWatchBar(box, btn) {
   const r = await safe(sb.rpc('notice_status'));
@@ -9517,7 +9524,7 @@ const HELP = {
   // offline guide: [keywords, answer, [ [label, route] ...] ]
   topics: [
     [['start', 'new', 'joiner', 'begin', 'first day', 'tour', 'features', 'what can', 'overview', 'menu', 'kya hai', 'enna'],
-      'Welcome! The menu on the left is grouped by work: **Overview** (Dashboard, calendar, all your work and notices), **GST**, **TDS** and **MCA** (each with its work list, working page and notices), **Tools** (bank statements, late fee calculator, checklists, law updates), **Clients**, and **Payments & billing**. Start each day on the Dashboard — it shows what is overdue and due this week.',
+      'Welcome! The menu on the left is grouped by work: **Overview** (Dashboard, calendar, all your work), **GST**, **TDS** and **MCA** (each with its work list and working page), **Notices** (all notices, by department — everyone can see them), **Tools** (bank statements, late fee calculator, checklists, law updates), **Clients**, and **Payments & billing**. Start each day on the Dashboard — it shows what is overdue and due this week.',
       [['Dashboard', 'dashboard'], ['My work', 'work'], ['Due-date calendar', 'calendar']]],
     [['my work', 'my task', 'assigned', 'today', 'pending', 'overdue', 'what should i do'],
       'Your work is in **Overview → My work** (Managers see **All work**). Filter by month or status; click a row to update its status (Pending data → In progress → Ready to file → Filed), add the ARN and tick the checklist. The Dashboard shows your overdue and due-in-7-days items.',
@@ -10042,7 +10049,7 @@ async function dashOffice(body) {
   const [open, month, nt, wr, inv, pay] = await Promise.all([
     must(sb.from('tasks').select('*').not('status', 'in', '("Filed","Not applicable")').order('due_date', { ascending: true, nullsFirst: false }).limit(5000)),
     must(sb.from('tasks').select('id,client_id,work_type,return_name,status,due_date,filed_on,assigned_to').gte('due_date', mStart).lte('due_date', mEnd).limit(10000)),
-    safe(sb.from('notices').select('id,client_id,dept,notice_type,status,reply_due,assigned_to').neq('status', 'Closed').limit(3000)),
+    safe(sb.from('notices').select('id,client_id,dept,notice_type,status,reply_due,hearing_date,assigned_to').neq('status', 'Closed').limit(3000)),
     safe(sb.from('work_requests').select('*').in('status', ['New', 'In progress']).order('due_date', { ascending: true, nullsFirst: false }).limit(500)),
     isPartner() && P4() ? safe(sb.from('invoices').select('client_id,total,paid').limit(10000)) : Promise.resolve({ data: null }),
     isPartner() && P4() ? safe(sb.from('payments').select('amount,paid_on').gte('paid_on', mStart).lte('paid_on', mEnd).limit(5000)) : Promise.resolve({ data: null })
@@ -10050,7 +10057,8 @@ async function dashOffice(body) {
   const rows = open.data || [], mrows = (month.data || []).filter(r => r.status !== 'Not applicable');
   const notices = nt.error ? [] : nt.data || [], reqs = wr.error ? null : wr.data || [];
   const overdue = rows.filter(r => r.due_date && r.due_date < t), soon = rows.filter(r => r.due_date && r.due_date >= t && r.due_date <= in7);
-  const nDue = notices.filter(n => isOpenNotice(n.status) && n.reply_due && n.reply_due <= in7).sort((a, b) => a.reply_due.localeCompare(b.reply_due));
+  const nDue = notices.filter(n => isOpenNotice(n.status) && n.status !== 'Hearing' && n.reply_due && n.reply_due <= in7);
+  const nLateO = nDue.filter(n => n.reply_due < t).length, nHearO = notices.filter(n => n.hearing_date && n.hearing_date >= t && n.hearing_date <= in7).length;
 
   // this month by department
   const dept = ['GST', 'TDS', 'ROC/MCA', 'Other'].map(w => {
@@ -10087,7 +10095,8 @@ async function dashOffice(body) {
       <a class="mini red k-late" href="#/work" data-oq="overdue">${kpiIco('late')}<span>Overdue</span><b>${overdue.length}</b></a>
       <a class="mini amber k-soon" href="#/work" data-oq="soon">${kpiIco('soon')}<span>Due in 7 days</span><b>${soon.length}</b></a>
       <a class="mini blue k-wait" href="#/work" data-oq="waiting">${kpiIco('wait')}<span>Waiting for client data</span><b>${rows.filter(r => r.status === 'Pending data').length}</b></a>
-      <a class="mini ${nDue.length ? 'red' : 'green'} k-note" href="#/notices">${kpiIco('note')}<span>Notice replies due (7 days)</span><b>${nDue.length}</b></a></div>
+      <div class="mini green k-done">${kpiIco('done')}<span>Filed this month</span><b>${filedM}</b><small>of ${mrows.length}</small></div></div>
+    ${!settings.notices_off && (nLateO || nDue.length || nHearO) ? `<div class="od-fees">${noticeChip(nLateO, nDue.length - nLateO, nHearO)}</div>` : ''}
     ${fees !== null ? `<div class="od-fees"><a class="chip blue" href="#/billing" data-billdue>Fees outstanding ${inr(fees)}</a><span class="chip green">Collected this month ${inr(got || 0)}</span><span id="oGstBill"></span></div>` : ''}
     <h3 class="od-h">This month by department</h3><div class="od-depts">${dept}</div>
     <div class="card"><h3>Team</h3>${people.length || un.length ? `<div class="table-wrap"><table class="od-staff"><thead><tr><th>Person</th><th>Overdue</th><th>Due 7 days</th><th>Waiting data</th><th>All open</th><th>Filed this month</th><th>Requests</th><th></th></tr></thead><tbody>
@@ -10096,8 +10105,7 @@ async function dashOffice(body) {
     <div class="card"><h3>Work requests in progress${reqs ? ` (${reqs.length})` : ''}</h3><div id="oReqList">${reqs ? '' : '<p class="note small">Run <b>update-session10.sql</b> in Supabase to switch on work requests.</p>'}</div></div>
     <div class="card"><h3>Overdue (${overdue.length})</h3><div data-t="late"></div></div>
     <div class="card"><h3>Due in the next 7 days (${soon.length})</h3><div data-t="soon"></div></div>
-    ${nDue.length ? `<div class="card"><h3>Notice replies due</h3><div class="table-wrap"><table><thead><tr><th>Client</th><th>Notice</th><th>Reply by</th><th>Staff</th></tr></thead><tbody>
-      ${nDue.slice(0, 30).map(n => `<tr><td>${esc(clientName(n.client_id))}</td><td>${esc((n.dept === 'ROC/MCA' ? 'MCA' : n.dept) + ' · ' + n.notice_type)}</td><td class="${n.reply_due < t ? 'late' : ''}">${fmtDate(n.reply_due)}</td><td>${esc(profName(n.assigned_to) || '—')}</td></tr>`).join('')}</tbody></table></div></div>` : ''}
+
     <div id="oHealth"></div>`;
   const refresh = () => route();
   const lateEl = $('[data-t=late]', body), soonEl = $('[data-t=soon]', body);
@@ -10131,7 +10139,7 @@ async function dashMine(body) {
   const [open, done, nt, wr] = await Promise.all([
     must(sb.from('tasks').select('*').eq('assigned_to', me.id).not('status', 'in', '("Filed","Not applicable")').order('due_date', { ascending: true, nullsFirst: false }).limit(3000)),
     must(sb.from('tasks').select('id,status,due_date,filed_on').eq('assigned_to', me.id).eq('status', 'Filed').gte('filed_on', mStart).lte('filed_on', mEnd).limit(3000)),
-    safe(sb.from('notices').select('*').eq('assigned_to', me.id).neq('status', 'Closed').order('reply_due', { ascending: true, nullsFirst: false }).limit(500)),
+    safe(sb.from('notices').select('id,status,reply_due,hearing_date,assigned_to').neq('status', 'Closed').limit(3000)),
     safe(sb.from('work_requests').select('*').eq('assigned_to', me.id).in('status', ['New', 'In progress']).order('due_date', { ascending: true, nullsFirst: false }).limit(300))
   ]);
   const rows = open.data || [], filed = done.data || [], notices = nt.error ? [] : nt.data || [], reqs = wr.error ? null : wr.data || [];
@@ -10139,7 +10147,9 @@ async function dashMine(body) {
   const waiting = rows.filter(r => r.status === 'Pending data');
   const ontime = filed.filter(r => !r.due_date || (r.filed_on || '') <= r.due_date).length;
   const hour = now.getHours(), hello = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
-  const nLate = notices.filter(n => n.reply_due && n.reply_due < t && n.status !== 'Hearing');
+  const nOpen = notices.filter(n => isOpenNotice(n.status) && n.status !== 'Hearing' && n.reply_due);
+  const nLateM = nOpen.filter(n => n.reply_due < t).length, nSoonM = nOpen.filter(n => n.reply_due >= t && n.reply_due <= in7).length;
+  const nHearM = notices.filter(n => n.hearing_date && n.hearing_date >= t && n.hearing_date <= in7).length;
   body.innerHTML = `
     <div class="page-head"><h2>${hello}, ${esc((me.full_name || '').split(' ')[0] || 'there')}</h2><span class="muted">${now.toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long' })}</span></div>
     <div class="bento-stats card stats4" style="margin-bottom:14px">
@@ -10153,8 +10163,7 @@ async function dashMine(body) {
     <div class="card"><h3>Due today (${todayL.length})</h3><div data-t="today"></div></div>
     <div class="card"><h3>Due in the next 7 days (${week.length})</h3><div data-t="week"></div></div>
     <div class="card"><h3>Waiting for client data (${waiting.length})</h3><p class="muted small" style="margin-top:-4px">Use Follow-up to call or WhatsApp the client and note when they promised the data.</p><div data-t="wait"></div></div>
-    ${notices.length ? `<div class="card"><h3>My notices (${notices.length})${nLate.length ? ` <span class="chip red small">${nLate.length} reply overdue</span>` : ''}</h3><div class="table-wrap"><table><thead><tr><th>Client</th><th>Notice</th><th>Reply by</th><th>Status</th></tr></thead><tbody>
-      ${notices.map(n => `<tr><td>${esc(clientName(n.client_id))}</td><td><a href="#/notices">${esc((n.dept === 'ROC/MCA' ? 'MCA' : n.dept) + ' · ' + n.notice_type)}</a></td><td class="${n.reply_due && n.reply_due < t ? 'late' : ''}">${n.reply_due ? fmtDate(n.reply_due) : '—'}</td><td>${esc(n.status)}</td></tr>`).join('')}</tbody></table></div></div>` : ''}`;
+    ${!settings.notices_off && (nLateM || nSoonM || nHearM) ? `<div class="od-fees">${noticeChip(nLateM, nSoonM, nHearM)}</div>` : ''}`;
   const refresh = () => route();
   [['late', overdue], ['today', todayL], ['week', week], ['wait', waiting]].forEach(([k, list]) => {
     const el = $(`[data-t=${k}]`, body);
