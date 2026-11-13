@@ -4701,7 +4701,7 @@ const prevMonth = () => { const d = new Date(); d.setDate(1); d.setMonth(d.getMo
 const periodToMonth = p => { const m = String(p || '').match(/([A-Za-z]{3})[a-z]*[\s-]+(\d{4})/); if (!m) return ''; const i = MONTHS.findIndex(x => x.toLowerCase() === m[1].toLowerCase()); return i < 0 ? '' : `${m[2]}-${pad(i + 1)}`; };
 const gTax = o => GR.tax(o || {});
 const gst$ = n => inr(Math.round(n || 0));
-let grOv = true, grClient = '', grMonth = prevMonth(), grTab = 'g1', grRecFilter = 'books_only', grRecView = 'inv', grImsF = 'all';
+let grOv = true, gr3Last = 's2', grClient = '', grMonth = prevMonth(), grTab = 'g1', grRecFilter = 'books_only', grRecView = 'inv', grImsF = 'all';
 
 VIEWS.gst = async v => {
   const gClients = clients.filter(c => c.active && c.gstin && (isManager() || c.default_staff === me.id || c.id === grClient));
@@ -4719,6 +4719,10 @@ VIEWS.gst = async v => {
   const r = await safe(sb.from('gst_months').select('*').eq('client_id', grClient).eq('period', period).maybeSingle());
   if (r.error) { body.innerHTML = '<div class="card"><p class="note">GST review is not set up yet — run <b>update-gst-review.sql</b> in Supabase.</p></div>'; return; }
   let row = r.data || { client_id: grClient, period, status: 'Draft' }, recoHist = null, revs = await REV.load(c, period).catch(() => ({ gstr1: null, gstr3b: null }));
+  // v38: this month's GSTR-1 / GSTR-3B work items (to know Filed and to upload the acknowledgement from here)
+  const loadGT = async () => { const q = await safe(sb.from('tasks').select('id,client_id,return_name,period,status,due_date,arn,filed_on').eq('client_id', c.id).limit(800)); return (q.data || []).filter(t => REV.kindOf(t.return_name) && periodToMonth(t.period) === grMonth); };
+  let gtasks = await loadGT().catch(() => []), G3gate = { ok: true, why: [] }, FL = { gstr1: [], gstr3b: [] };
+  const taskOf = k => gtasks.filter(t => REV.kindOf(t.return_name) === k).sort((a, b) => (a.status === 'Filed') - (b.status === 'Filed'))[0] || null;
   const save = async patch => {
     const next = { ...row, ...patch };
     const sm = gsum(next);
@@ -4777,6 +4781,33 @@ VIEWS.gst = async v => {
     return { M, ready, reco, dec, asked, eff, list, cf, lw, cl, sup, toAsk, undecided: cl.undecided, decideN, openN };
   }
   const chip = (k, label, d, info, btns) => `<div class="grc ${d ? 'ok' : ''}"><span class="grc-i" aria-hidden="true">${d ? '✓' : '○'}</span><div class="grc-b"><b>${label}</b><small>${d ? info : 'Not added'}</small></div><div class="grc-a">${btns}${d ? `<button class="link small danger-t" data-clr="${k}" aria-label="Remove ${esc(label)}">Remove</button>` : ''}</div></div>`;
+  // v38: GSTR-3B goes for verification only when 2B is complete (2B in, reco ready, nothing left to decide)
+  function gate3(sm, st) {
+    const M = meth(), why = [], [y, m] = grMonth.split('-').map(Number), nx = new Date(y, m, 14);
+    if (!row.gstr2b) why.push(`GSTR-2B is not added yet — it comes on ${nx.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })} (upload or fetch with OTP)`);
+    else if (M !== '2b_confirm' && !row.purchases) why.push('The purchase register is not added');
+    else if (!st.ready) why.push('2B vs books is not ready');
+    if (st.ready && st.decideN) why.push(`${st.decideN} bill${st.decideN > 1 ? 's' : ''} still to decide in 2B vs books`);
+    return { ok: !why.length, why };
+  }
+  const SENT = ['sent', 'changes', 'approved', 'sent_client'], OKD = ['approved', 'sent_client'];
+  function flows() {
+    const one = k => { const rv = revs[k], RS = rv ? rv.state : 'draft', t = taskOf(k); return { RS, filed: RS === 'sent_client' || !!(t && t.status === 'Filed') }; };
+    const a = one('gstr1'), b = one('gstr3b'), ok = k => !!(stepOf(k) || {}).ok;
+    const mk = (list, RS) => { const L = list.map(x => ({ l: x[0], d: !!x[1] }));
+      for (let i = L.length - 2; i >= 0; i--) if (L[i + 1].d) L[i].d = true;
+      const ci = L.findIndex(x => !x.d); if (ci >= 0) L[ci].cur = true;
+      const si = L.findIndex(x => x.l === 'Sent for verification'); if (RS === 'changes') { L[si].bad = true; L[si].l = 'Changes needed'; L[si].d = false; L.forEach(x => { if (x !== L[si]) x.cur = false; }); L[si].cur = true; }
+      return L; };
+    FL.gstr1 = mk([['Data received', row.sales || row.g1], ['Workings done', ok('s1') || (row.g1 && (row.g1.sales || []).length)], ['Sent for verification', SENT.includes(a.RS)], ['Verified — ready to file', OKD.includes(a.RS)], ['Filed', a.filed]], a.RS);
+    FL.gstr3b = mk([['Data received', row.purchases || row.gstr2b], ['2B complete', G3gate.ok], ['Workings done', ok('s3')], ['Sent for verification', SENT.includes(b.RS)], ['Verified — ready to file', OKD.includes(b.RS)], ['Filed', b.filed]], b.RS);
+  }
+  const flowNow = k => { const L = FL[k], cur = L.find(x => x.cur); return cur ? [cur.bad ? 'Changes needed' : (cur.l === 'Filed' ? 'Ready to file' : 'Next: ' + cur.l), cur.bad ? 'bad' : cur.l === 'Filed' ? 'ok' : 'info'] : ['Filed ✓', 'ok']; };
+  const flowHtml = (k, small) => `<ol class="rf ${small ? 'rf-sm' : ''}" aria-label="${REV.KIND[k].label} status">${FL[k].map((x, i) => `<li class="${x.d ? 'done' : ''} ${x.cur ? 'cur' : ''} ${x.bad ? 'bad' : ''}" ${x.cur ? 'aria-current="step"' : ''}><span class="rf-n">${x.d ? '✓' : x.bad ? '!' : i + 1}</span>${esc(x.l)}</li>`).join('')}</ol>`;
+  const retTabs = on => { const t = k => { const [l, tone] = flowNow(k); return `<span class="grt-p ${tone}">${esc(l)}</span>`; };
+    return `<nav class="grt" aria-label="Returns"><button class="grt-b ${on === 'ov' ? 'on' : ''}" data-ov ${on === 'ov' ? 'aria-current="page"' : ''}><b>Overview</b><span class="grt-p">Both returns</span></button>
+      <button class="grt-b ${on === 'gstr1' ? 'on' : ''}" data-go="s1" ${on === 'gstr1' ? 'aria-current="page"' : ''}><b>GSTR-1</b>${t('gstr1')}</button>
+      <button class="grt-b ${on === 'gstr3b' ? 'on' : ''}" data-go="${gr3Last}" ${on === 'gstr3b' ? 'aria-current="page"' : ''}><b>GSTR-3B</b>${t('gstr3b')}</button></nav>`; };
   async function render() {
     if (!recoHist) { body.innerHTML = '<div class="loading">Loading…</div>'; await loadHist(); }
     const sm = gsum(row), M = meth(), st = itcState(sm), D3 = draft3b(row, sm, c, st.ready ? st.cl.claim : null), mLabel = (() => { const [y, m] = grMonth.split('-'); return `${MONTHS_FULL[+m - 1]} ${y}`; })();
@@ -4790,15 +4821,20 @@ VIEWS.gst = async v => {
       s3: !(sm.counts.sales || sm.counts.b2b || sm.counts.purchases || G1f) ? ['Waiting for data', 'todo'] : [`Cash ${gst$(D3.depositTotal)} to deposit`, G3 ? 'ok' : 'info'],
       s4: r3 ? ['GSTR-3B: ' + r3[0], r3[1]] : row.status === 'Verified' ? ['Verified ✓', 'ok'] : sm.checks.some(x => !x.ok) ? [`${sm.checks.filter(x => !x.ok).length} check${sm.checks.filter(x => !x.ok).length > 1 ? 's' : ''} to look at`, 'bad'] : ['Not verified yet', 'info']
     };
+    G3gate = gate3(sm, st); flows();
     const head = `<div class="grh"><div class="grh-pick"><label>Client<select id="grC">${gClients.length ? opts(gClients, grClient, x => `${x.name} · ${x.gstin}`, x => x.id) : '<option value="">No GST clients</option>'}</select></label>
         <label>Month<input type="month" id="grM" value="${esc(grMonth)}"></label></div>
       ${REV.KINDS.some(k => revs[k] && revs[k].state !== 'draft') ? REV.KINDS.filter(k => revs[k] && revs[k].state !== 'draft').map(k => `<span class="pill ${REV.STATE[revs[k].state][1]}">${REV.KIND[k].label}: ${REV.STATE[revs[k].state][0]}</span>`).join(' ') : row.status === 'Verified' ? `<span class="st st-filed">✓ Verified · ${esc(profName(row.verified_by) || '')}</span>` : '<span class="st st-pending-data">Draft</span>'}
       <span class="spacer"></span><button class="btn sm" data-portal-api>Fetch from GST portal</button><a class="btn sm" href="#/clientreport" data-crgo>Client report</a>
       ${isManager() ? (row.status === 'Verified' ? '<button class="btn sm" id="grUnver">Back to draft</button>' : '<button class="btn sm primary" id="grVer">✓ Mark as verified</button>') : ''}</div>`;
-    if (grOv) { body.innerHTML = head + overviewHtml(sm, st, D3, stat, mLabel); bindPickers(body); return; }
-    const sNow = stepFor(grTab), si = STEPS.findIndex(s => s[0] === sNow), chk = stepOf(sNow);
-    const bar = `<nav class="grs" aria-label="Steps"><button class="grs-ov" data-ov>← Overview</button>${STEPS.map(([k, l], i) => { const [t, tone] = stat[k];
-      return `<button class="grs-s ${k === sNow ? 'on' : ''} ${tone}" data-go="${k}" ${k === sNow ? 'aria-current="step"' : ''}><span class="grs-n">${tone === 'ok' ? '✓' : i + 1}</span><span><b>${i + 1} · ${l}</b><small>${esc(t)}</small></span></button>`; }).join('')}</nav>`;
+    if (grOv) { body.innerHTML = head + retTabs('ov') + overviewHtml(sm, st, D3, stat, mLabel); bindPickers(body); return; }
+    const sNow = stepFor(grTab), chk = stepOf(sNow), RET = sNow === 's1' ? 'gstr1' : 'gstr3b';
+    if (RET === 'gstr3b') gr3Last = sNow;
+    const S3 = STEPS.slice(1), si = S3.findIndex(s => s[0] === sNow);
+    const inner = RET === 'gstr3b' ? `<nav class="grs grs3" aria-label="GSTR-3B steps">${S3.map(([k, l], i) => { const [t, tone] = stat[k];
+      return `<button class="grs-s ${k === sNow ? 'on' : ''} ${tone}" data-go="${k}" ${k === sNow ? 'aria-current="step"' : ''}><span class="grs-n">${tone === 'ok' ? '✓' : i + 1}</span><span><b>${i + 1} · ${k === 's4' ? 'Check' : l}</b><small>${esc(t)}</small></span></button>`; }).join('')}</nav>` : '';
+    const lock = RET === 'gstr3b' && !G3gate.ok && !SENT.includes((revs.gstr3b || {}).state) ? `<div class="rf-lock" role="note"><b>Send for verification is locked until 2B is complete.</b> You can still work on purchases and the draft 3B. ${G3gate.why.map(esc).join(' · ')}</div>` : '';
+    const bar = retTabs(RET) + `<section class="rf-w"><div class="rf-h"><h2>${RET === 'gstr1' ? 'GSTR-1 workspace' : 'GSTR-3B workspace'}</h2><span class="muted small">${RET === 'gstr1' ? 'Sales register, GSTR-1 entry, portal draft — verify, then file' : 'Purchases, 2B reco, ITC, draft 3B — verify after 2B, then file'}</span></div>${flowHtml(RET)}${lock}</section>` + inner;
     const SUBS = { s1: [['g1', 'Our working (GSTR-1 entry)'], ['g1f', 'Filed — portal summary']],
       s2: [['recon', M === '2b_confirm' ? 'Client confirms 2B' : '2B vs Books'], M !== '2b_confirm' && ['pur', 'Books (purchase register)'], ['b2b', 'GSTR-2B'], M !== '2b_confirm' && ['sup', `Supplier follow-up${st.sup.length ? ' · ' + st.sup.length : ''}`], ['ims', 'IMS actions']].filter(Boolean),
       s3: [], s4: [['checks', 'GSTR-1 vs 3B checks'], ['trend', 'Last 6 months']] }[sNow];
@@ -4817,14 +4853,15 @@ VIEWS.gst = async v => {
         ${SUBS.length ? `<div class="seg grs-sub" role="tablist">${SUBS.map(([k, l]) => `<button role="tab" aria-selected="${grTab === k}" class="${grTab === k ? 'on' : ''}" data-gt="${k}">${l}</button>`).join('')}</div>` : ''}
         <div id="grOut"></div>
         ${sNow === 's1' ? revPanel('gstr1') : ''}
+        ${RET === 'gstr3b' && sNow !== 's4' ? revPanel('gstr3b') : ''}
         ${sNow === 's4' ? `<div class="gr-verify"><label class="full">Review notes<textarea id="grNotes" rows="3" placeholder="e.g. Reversed ITC on 2 invoices missing in 2B; client informed">${esc(row.notes || '')}</textarea></label>
           <div class="toolbar" style="margin:8px 0 0"><button class="btn sm" id="grSaveNotes">Save notes</button><span class="spacer"></span>
           ${isManager() && !(revs.gstr3b && ['sent', 'approved', 'sent_client'].includes(revs.gstr3b.state)) ? (row.status === 'Verified' ? '<button class="btn sm" id="grUnver">Back to draft</button>' : '<button class="btn sm" id="grVer" title="Without sending to the senior">Mark as verified here</button>') : ''}</div></div>
           ${revPanel('gstr3b')}` : ''}
       </section>
-      <div class="grs-nav">${si > 0 ? `<button class="btn" data-go="${STEPS[si - 1][0]}">← ${si} · ${STEPS[si - 1][1]}</button>` : '<button class="btn" data-ov>← Overview</button>'}
-        <span class="spacer"></span><label class="check small grs-chk"><input type="checkbox" data-step="${sNow}" ${chk && chk.ok ? 'checked' : ''}> Step checked${chk && chk.ok ? ` <span class="muted">· ${esc(profName(chk.by) || '')}</span>` : ''}</label>
-        ${si < 3 ? `<button class="btn primary" data-go="${STEPS[si + 1][0]}">Next: ${si + 2} · ${STEPS[si + 1][1]} →</button>` : '<button class="btn primary" data-ov>Done — overview</button>'}</div>`;
+      <div class="grs-nav">${RET === 'gstr1' ? '<button class="btn" data-ov>← Overview</button>' : si > 0 ? `<button class="btn" data-go="${S3[si - 1][0]}">← ${S3[si - 1][1]}</button>` : '<button class="btn" data-go="s1">← GSTR-1</button>'}
+        <span class="spacer"></span><label class="check small grs-chk"><input type="checkbox" data-step="${sNow}" ${chk && chk.ok ? 'checked' : ''}> ${sNow === 's1' ? 'GSTR-1 workings done' : sNow === 's3' ? 'GSTR-3B workings done' : 'Step checked'}${chk && chk.ok ? ` <span class="muted">· ${esc(profName(chk.by) || '')}</span>` : ''}</label>
+        ${RET === 'gstr1' ? '<button class="btn primary" data-go="s2">Next: GSTR-3B →</button>' : si < S3.length - 1 ? `<button class="btn primary" data-go="${S3[si + 1][0]}">Next: ${S3[si + 1][0] === 's4' ? 'Check' : S3[si + 1][1]} →</button>` : '<button class="btn primary" data-ov>Done — overview</button>'}</div>`;
     bindPickers(body);
     renderOut(sm, st);
   }
@@ -4833,7 +4870,10 @@ VIEWS.gst = async v => {
     const rev = revs[kind], K = REV.KIND[kind], sr = REV.senior(), RS = (rev && REV.STATE[rev.state] && rev.state) || 'draft', sn = esc(sr ? sr.full_name || sr.email : 'the senior');
     const sh = d => d ? new Date(d).toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' }) : '';
     const canDecide = (settings.senior_id && me.id === settings.senior_id) || isManager();
-    const btn = (a, label, cls = '') => `<button class="btn ${cls}" data-rev="${a}" data-rk="${kind}" ${a === 'send' && !sr ? 'disabled' : ''}>${label}</button>`;
+    const locked = kind === 'gstr3b' && !G3gate.ok, tk = taskOf(kind), filed = tk && tk.status === 'Filed';
+    const btn = (a, label, cls = '') => a === 'send' && locked ? `<button class="btn" data-rev="send" data-rk="${kind}" aria-disabled="true" title="${esc(G3gate.why.join(' · '))}">Locked until 2B is complete</button>`
+      : `<button class="btn ${cls}" data-rev="${a}" data-rk="${kind}" ${a === 'send' && !sr ? 'disabled' : ''}>${label}</button>`;
+    const ackBtn = tk ? (filed ? `<span class="ok-t small">Filed${tk.arn ? ' · ARN ' + esc(tk.arn) : ''}${tk.filed_on ? ' · ' + esc(tk.filed_on) : ''}</span>` : btn('ack', `Upload ${K.label} acknowledgement`, 'primary')) : `<span class="muted small">No ${K.label} work item for this month — upload the acknowledgement from Work.</span>`;
     const rem = ((rev && rev.remarks) || []).slice().reverse().map(x => `<li><b>${esc(x.by || '')}</b> <span class="muted small">${sh(x.at)} · ${x.via === 'link' ? 'by link' : x.via === 'email' ? 'by email reply' : 'in tracker'}</span><div>${esc(x.text)}</div></li>`).join('');
     const sent = ((rev && rev.client_sent) || []).slice().reverse().map(x => `<li>${esc(x.what || 'Workings')} → ${esc(x.to)} <span class="muted small">${sh(x.at)}${x.auto ? ' · automatic' : ''} · ${esc(profName(x.by) || '')}</span></li>`).join('');
     const dr = rev && rev.draft;
@@ -4841,7 +4881,7 @@ VIEWS.gst = async v => {
         ${dr ? `<span class="small">${esc(dr.name)} <span class="muted">· ${dr.src === 'api' ? 'fetched' : 'uploaded'} ${sh(dr.at)}</span></span>` : '<span class="small muted">Not added — the tracker\'s own summary PDF (portal format) goes instead.</span>'}</div>
         <span class="spacer"></span><button class="btn sm" data-rev="draft" data-rk="${kind}">${dr ? 'Replace' : 'Upload PDF'}</button><button class="btn sm" data-rev="fetch" data-rk="${kind}" title="Uses the GST API">Fetch from portal</button>${dr ? `<button class="link small danger-t" data-rev="undraft" data-rk="${kind}">Remove</button>` : ''}</div>` : '';
     const body = {
-      draft: `<p>Send the ${K.label} workings to <b>${sn}</b>: the portal draft PDF and the ${K.short} workings (Excel). The senior approves from the mail — by the button or by replying.</p>
+      draft: `${locked ? `<p class="note warn small">${K.label} can go for verification only after 2B is complete: ${G3gate.why.map(esc).join(' · ')}</p>` : ''}<p>Send the ${K.label} workings to <b>${sn}</b>: the portal draft PDF and the ${K.short} workings (Excel). The senior approves from the mail — by the button or by replying.</p>
         ${sr ? '' : '<p class="note warn small">Choose the senior first: Settings → Senior verification &amp; filing mails.</p>'}
         <div class="toolbar">${btn('send', `Send ${K.label} for verification`, 'primary')}</div>`,
       sent: `<p>Sent to <b>${sn}</b> on ${sh(rev && rev.sent_at)}${rev && rev.sends > 1 ? ` (${rev.sends} times)` : ''} by ${esc(profName(rev && rev.sent_by) || '')}. Waiting for the answer.</p>
@@ -4849,7 +4889,7 @@ VIEWS.gst = async v => {
       changes: `<p class="late"><b>The senior asked for changes.</b> Update the workings, then send again.</p><div class="toolbar">${btn('send', 'Send again for verification', 'primary')}</div>`,
       approved: `<p class="ok-t"><b>Approved</b> ${rev && rev.decided_at ? 'on ' + sh(rev.decided_at) : ''}${rev && rev.decided_via ? ` (${rev.decided_via === 'link' ? 'by link' : rev.decided_via === 'email' ? 'by email reply' : 'in the tracker'})` : ''}. File ${K.label} on the portal, then upload the ${K.label} acknowledgement.</p>
         <p class="small muted">${settings.auto_send_filed ? `Automatic: when the ${K.label} acknowledgement is uploaded, it goes to the client with the workings.` : 'Automatic sending is off (Settings). Use the button after filing.'}</p>
-        <div class="toolbar">${btn('client', 'Send acknowledgement &amp; workings to client', 'primary')}${btn('wa', 'WhatsApp')}</div>`,
+        <div class="toolbar">${ackBtn}${btn('client', 'Send acknowledgement &amp; workings to client', filed ? 'primary' : '')}${btn('wa', 'WhatsApp')}</div>`,
       sent_client: `<p class="ok-t"><b>${K.label} filed and sent to the client.</b></p><div class="toolbar">${btn('client', 'Send again to client')}${btn('wa', 'WhatsApp')}</div>`
     }[RS];
     return `<section class="rev-p rev-${RS}" aria-label="${K.label} verification"><div class="rev-h"><h3>${K.label} — senior verification</h3><span class="pill ${REV.STATE[RS][1]}">${REV.STATE[RS][0]}</span></div>${draftRow}${body}
@@ -4861,6 +4901,8 @@ VIEWS.gst = async v => {
       const txt = `Dear ${c.contact_person || c.name}, your ${K.label} for ${REV.mon(period)} is filed. The acknowledgement and workings have been emailed to you, and you can also download them from your client portal: ${new URL('portal.html', location.href).href} — ${settings.firm_name || cfg.FIRM_NAME || ''}`;
       window.open(waShare(txt, c.phone), '_blank', 'noopener'); return;
     }
+    if (act === 'ack') { const tk = taskOf(kind); if (tk) ackForTask(tk, async () => { gtasks = await loadGT().catch(() => gtasks); revs = await REV.load(c, period).catch(() => revs); render(); }); return; }
+    if (act === 'send' && kind === 'gstr3b' && !G3gate.ok) { toast(`GSTR-3B can go for verification only after 2B is complete — ${G3gate.why.join('; ')}`, true); return; }
     if (act === 'fetch') { gstPortalFetch(c, grMonth, async patch => { await save(patch); }, kind === 'gstr1' ? 'g1' : ''); return; }
     btn.disabled = true; const old = btn.textContent; btn.textContent = 'Working…';
     try {
@@ -4871,7 +4913,6 @@ VIEWS.gst = async v => {
       if (act === 'undraft') { if (!confirm('Remove the portal draft PDF?')) return; await REV.clearDraft(c, period, kind); }
       if (act === 'send') {
         if (kind === 'gstr1' && !(row.sales || row.g1)) throw new Error('Add the sales register or the GSTR-1 entry first');
-        if (kind === 'gstr3b' && st.decideN && !confirm(`${st.decideN} bill(s) in step 2 are not decided yet. Send for verification anyway?`)) return;
         if (!(rev && rev.draft) && !confirm(`No ${K.label} draft from the portal is added.\n\nSend with the tracker's own summary PDF (portal format) instead?`)) return;
         await REV.send({ kind, c, period, row, sm, st, D3, rev });
         toast(`${K.label} sent to ${(REV.senior() || {}).full_name || 'the senior'} for verification`);
@@ -4913,7 +4954,7 @@ VIEWS.gst = async v => {
     if (!G3 && (S || G1f)) todo.push(['s3', 'Add the filed GSTR-3B after filing']);
     if (sm.checks.some(x => !x.ok)) todo.push(['s4', 'Look at the GSTR-1 vs 3B checks']);
     const srN = (REV.senior() || {}).full_name || 'the senior', dd = d => new Date(d).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
-    [['gstr1', 's1', !!(S || row.g1)], ['gstr3b', 's4', !!((S || G1f) && (B || P) && !st.decideN)]].forEach(([k, s, ready]) => {
+    [['gstr1', 's1', !!(S || row.g1)], ['gstr3b', 's4', !!((S || G1f) && G3gate.ok)]].forEach(([k, s, ready]) => {
       const rv = revs[k], RS = rv ? rv.state : 'draft', L = REV.KIND[k].label;
       if (RS === 'changes') todo.unshift([s, `Senior asked for changes on ${L}: ${((rv.remarks || []).slice(-1)[0] || {}).text || ''}`.slice(0, 130)]);
       else if (RS === 'sent') todo.push([s, `${L} waiting for ${srN} to verify (sent ${dd(rv.sent_at)})`]);
@@ -4921,7 +4962,8 @@ VIEWS.gst = async v => {
       else if (RS === 'draft' && ready) todo.push([s, `${L} workings ready — send for verification to ${srN}`]);
     });
     if (!todo.length && row.status !== 'Verified') todo.push(['s4', 'Everything is in — review and mark as verified']);
-    return `<div class="gro">
+    const fl = (k, go) => `<button class="gro-f" data-go="${go}"><b>${REV.KIND[k].label}</b>${flowHtml(k, true)}</button>`;
+    return `<div class="gro-fs" aria-label="Return status">${fl('gstr1', 's1')}${fl('gstr3b', gr3Last)}</div><div class="gro">
       <div class="gro-cards">
         ${card('s1', 'GSTR-1', num('Taxable', gst$(g1t.t)) + num('Tax', gst$(gTax(g1t))), `${tick(S, `Sales register${S ? ` (${S.rows.length})` : ''}`)} · ${tick(G1f, 'Filed')}`, 'Open GSTR-1', stat.s1[1])}
         ${card('s2', 'Purchases &amp; ITC', num('ITC in 2B', gst$(gTax(sm.itc2b))) + num(M === 'books' ? 'ITC as per books' : 'To claim', st.cl ? gst$(gTax(st.cl.claim)) : '—', 'g'),
