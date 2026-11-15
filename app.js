@@ -1516,7 +1516,7 @@ const dashFull = async v => {      // the full dashboard (Admin → System tab)
         <span class="hero-date">${esc(dateLabel)}</span>
         <h1>${hello}, ${first}. ${mrows.length} item${mrows.length === 1 ? '' : 's'} this month, ${filedMonth} already filed.</h1>
         <div class="hero-acts">
-          ${isManager() ? `<a class="hero-btn" href="#/calendar">+ Create this month's work</a>${isAdmin() ? '<button class="hero-btn ghost" data-wa-send>Send WhatsApp reminders</button>' : ''}`
+          ${isManager() ? `<a class="hero-btn" href="#/calendar">+ Create this month's work</a>`
             : `<a class="hero-btn" href="#/work">Open my work</a>`}
         </div>
       </div>
@@ -2021,9 +2021,9 @@ VIEWS.team = async v => {
   await loadRefs();
   v.innerHTML = `<div class="page-head"><h2>Team</h2><span class="muted">${profiles.filter(p => p.active).length} active</span></div>
     <div class="note small"><b>To add a team member:</b> open your Supabase project → <b>Authentication</b> → <b>Users</b> → <b>Add user</b> → <b>Create new user</b>.
-      Enter their email and a starting password and tick <b>Auto Confirm User</b>. They will appear here; then click <b>Edit</b> to set their name and WhatsApp number.
+      Enter their email and a starting password and tick <b>Auto Confirm User</b>. They will appear here; then click <b>Edit</b> to set their name and mobile number (used to link the Telegram bot).
       They can change their password after signing in.</div><br>
-    <div class="table-wrap"><table><thead><tr><th>Name</th><th>Email</th><th>WhatsApp</th><th>Role</th><th>Status</th><th></th></tr></thead><tbody>
+    <div class="table-wrap"><table><thead><tr><th>Name</th><th>Email</th><th>Mobile</th><th>Role</th><th>Status</th><th></th></tr></thead><tbody>
       ${profiles.map(p => `<tr><td><b>${esc(p.full_name || '—')}</b>${p.id === me.id ? ' <span class="muted small">(you)</span>' : ''}</td><td>${esc(p.email)}</td>
         <td>${esc(p.phone || '—')}</td><td><span class="badge role-${esc(p.role)}">${esc(ROLE_LABEL[p.role] || p.role)}</span></td><td>${p.active ? 'Active' : '<span class="muted">Inactive</span>'}</td>
         <td><button class="btn sm" data-ed="${p.id}">Edit</button></td></tr>`).join('')}
@@ -2034,10 +2034,10 @@ VIEWS.team = async v => {
     const self = p.id === me.id;
     modal('Edit team member', `<div class="form-grid">
         <label class="full">Full name<input name="full_name" value="${esc(p.full_name || '')}"></label>
-        <label>WhatsApp number<input name="phone" value="${esc(p.phone || '')}" placeholder="919876543210"></label>
+        <label>Mobile number<input name="phone" value="${esc(p.phone || '')}" placeholder="9876543210" inputmode="tel"></label>
         <label>Role<select name="role" ${self ? 'disabled' : ''}>${opts(['staff', 'manager', 'partner', 'admin'], p.role, r => ({ staff: 'Team member — own work only', manager: 'Manager — all work, clients, billing', partner: 'Partner — everything except Settings & Team', admin: 'Admin — everything' })[r])}</select></label>
         <label class="check full"><input type="checkbox" name="active" ${p.active ? 'checked' : ''} ${self ? 'disabled' : ''}> Active (can sign in)</label>
-        <p class="muted small full">WhatsApp number with country code, no + or spaces (used for reminders in Phase 2).</p></div>`,
+        <p class="muted small full">The mobile number on their Telegram account — they link the office bot with it.</p></div>`,
       { onSave: async el => {
         const rec = { full_name: fv(el, 'full_name') || null, phone: fv(el, 'phone').replace(/[^0-9]/g, '') || null };
         if (!self) { rec.role = fv(el, 'role'); rec.active = $('[name=active]', el).checked; }
@@ -2050,9 +2050,8 @@ VIEWS.team = async v => {
 /* ---------- SETTINGS (admin) — sections + setup checklist (v2, Nov 2026) ---------- */
 const SET_SECTIONS = [
   { id: 'office', label: 'Office & billing', words: 'office name invoice gstin pan address bank upi sac prefix zoho billing' },
-  { id: 'team', label: 'Staff & senior', words: 'team staff users login role senior verify whatsapp number' },
+  { id: 'team', label: 'Staff & senior', words: 'team staff users login role senior verify mobile number telegram' },
   { id: 'mailbox', label: 'Mailbox & emails', words: 'mail gmail mailbox script key intake notice watch senior approval signature greeting acknowledgement' },
-  { id: 'whatsapp', label: 'WhatsApp', words: 'whatsapp meta template reminder token phone' },
   { id: 'telegram', label: 'Telegram bot', words: 'telegram bot botfather chat team group reminder daily work client status approve arattai' },
   { id: 'gst', label: 'GST automation', words: 'gst sandbox auto status filed arn automatic work' },
   { id: 'clients', label: 'Clients & reminders', words: 'status board link notices module data chasing data request reminder' },
@@ -2068,7 +2067,7 @@ const setBox = (parent, html) => { const d = document.createElement('div'); if (
 /* status of every setup step, shared by the checklist and the section dots */
 async function setupStatus() {
   const [wa, nw, ml, gs, ai] = await Promise.all([
-    safe(sb.from('wa_settings').select('enabled,phone_number_id').eq('id', 1).maybeSingle()), safe(sb.rpc('notice_status')),
+    safe(sb.rpc('tg_admin_status')), safe(sb.rpc('notice_status')),
     safe(sb.rpc('mail_admin_status')), safe(sb.rpc('gst_admin_status')), safe(sb.rpc('ai_admin_status'))]);
   const n = nw.data || {}, m = ml.data || {}, g = gs.data || {}, a = ai.data || {}, w = wa.data || {};
   const staff = profiles.filter(p => p.active !== false && p.id !== me.id).length;
@@ -2079,7 +2078,7 @@ async function setupStatus() {
     staff: staff ? 'ok' : 'todo',
     senior: settings.senior_id ? 'ok' : 'todo',
     mailbox: running ? 'ok' : anyKey ? 'half' : 'todo',
-    whatsapp: w.enabled ? 'ok' : w.phone_number_id ? 'half' : 'todo',
+    telegram: w.enabled && w.bot_username ? 'ok' : w.token_saved ? 'half' : 'todo',
     gst: g.keys_saved && g.enabled ? 'ok' : g.keys_saved ? 'half' : 'todo',
     ai: a.key_set ? 'ok' : 'todo',
     backup: settings.backup_last_ok && settings.backup_last_at && (Date.now() - new Date(settings.backup_last_at)) < 2 * 864e5 ? 'ok' : settings.backup_key_hash ? 'half' : 'todo'
@@ -2112,7 +2111,7 @@ VIEWS.settings = async v => {
 
   setupStatus().then(({ st }) => {
     const items = [['office', 'office', 'Office name & invoice details'], ['staff', 'team', 'Add staff logins'], ['senior', 'team', 'Pick the senior who verifies GST'],
-      ['mailbox', 'mailbox', 'Connect the office mailbox'], ['whatsapp', 'whatsapp', 'WhatsApp reminders'], ['gst', 'gst', 'GST auto-status (Sandbox key)'], ['backup', 'backup', 'Daily backup to OneDrive'], ['ai', 'ai', 'AI key (optional)']];
+      ['mailbox', 'mailbox', 'Connect the office mailbox'], ['telegram', 'telegram', 'Telegram bot'], ['gst', 'gst', 'GST auto-status (Sandbox key)'], ['backup', 'backup', 'Daily backup to OneDrive'], ['ai', 'ai', 'AI key (optional)']];
     const done = items.filter(i => st[i[0]] === 'ok').length;
     $('#setCount').innerHTML = `<b>${done} of ${items.length}</b> done · click an item to set it up`;
     $('#setBar').style.width = Math.round(done / items.length * 100) + '%';
@@ -2122,7 +2121,7 @@ VIEWS.settings = async v => {
 
   const main = $('#setMain');
   main.innerHTML = `<div class="set-title"><h2>${esc(sec.label)}</h2></div>`;
-  await ({ office: setOffice, team: setTeam, mailbox: setMailbox, whatsapp: b => renderWhatsApp(setBox(b)), arattai: setArattai, telegram: setTelegram, gst: setGstSec, clients: setClients, ai: b => renderAiSettings(setBox(b)), backup: setBackup, advanced: b => renderDemoSettings(setBox(b)) }[cur])(main);
+  await ({ office: setOffice, team: setTeam, mailbox: setMailbox, telegram: setTelegram, gst: setGstSec, clients: setClients, ai: b => renderAiSettings(setBox(b)), backup: setBackup, advanced: b => renderDemoSettings(setBox(b)) }[cur])(main);
 };
 
 /* Office & billing */
@@ -2432,18 +2431,15 @@ async function renderNoticeWatchSettings(box) {
     ${s.last_error ? `<p class="note warn small">Last problem: ${esc(s.last_error)}</p>` : ''}
     <div class="form-grid" style="margin-top:12px">
       <label>Check the mailbox every (minutes)<input type="number" id="nwEvery" min="5" max="240" value="${esc(s.every_minutes || 15)}"></label>
-      <label>WhatsApp template name<input id="nwTpl" value="${esc(s.wa_template || 'notice_alert')}"></label></div>
+</div>
     <label class="check" style="margin-top:8px"><input type="checkbox" id="nwOn" ${s.enabled ? 'checked' : ''}> Switched on</label>
     <label class="check"><input type="checkbox" id="nwMail" ${s.alert_email ? 'checked' : ''}> Email alert to Managers &amp; Partners</label>
-    <label class="check"><input type="checkbox" id="nwWa" ${s.alert_wa ? 'checked' : ''}> WhatsApp alert to Managers &amp; Partners (needs the approved template below and their phone numbers in Team)</label>
-    <details class="small" style="margin-top:8px"><summary>WhatsApp template to submit in Meta (Utility, English)</summary>
-      <p>Name <b>notice_alert</b>, body:</p><pre class="code">New {{1}} notice for {{2}}: {{3}}. Reply due: {{4}}. Open {{5}}</pre></details>
     <div class="toolbar" style="margin-top:12px"><button class="btn primary" id="nwSave">Save</button><span class="spacer"></span>
       <button class="btn" id="nwKey">${s.connected ? 'Make a new key' : 'Make the notice key'}</button><button class="btn" id="nwScript">Mailbox script &amp; steps</button></div>
     ${s.connected ? `<p class="muted small">Key made ${when(s.key_set_at)}. Making a new key stops the old one — paste the new key in the mailbox script as NOTICE_KEY.</p>` : ''}</div>`;
   if (!isAdmin()) $$('input,button', box).forEach(x => x.disabled = true);
   $('#nwSave', box).onclick = async () => {
-    try { await must(sb.rpc('notice_admin_save', { p: { enabled: $('#nwOn', box).checked, alert_email: $('#nwMail', box).checked, alert_wa: $('#nwWa', box).checked, wa_template: $('#nwTpl', box).value.trim(), every_minutes: Math.round(num($('#nwEvery', box).value)) || 15 } })); toast('Saved'); renderNoticeWatchSettings(box); }
+    try { await must(sb.rpc('notice_admin_save', { p: { enabled: $('#nwOn', box).checked, alert_email: $('#nwMail', box).checked, alert_wa: false, wa_template: s.wa_template || 'notice_alert', every_minutes: Math.round(num($('#nwEvery', box).value)) || 15 } })); toast('Saved'); renderNoticeWatchSettings(box); }
     catch (e) { toast(friendly(e), true); }
   };
   $('#nwKey', box).onclick = async () => {
@@ -9759,8 +9755,8 @@ const HELP = {
     [['password', 'login', 'theme', 'dark', 'layout', 'install', 'phone', 'mobile'],
       'Click your name at the top right: **Theme & layout** (two layouts, light / dark), **Install app on this device** (works on phone too) and **Change password**.',
       []],
-    [['whatsapp', 'reminder'],
-      'Staff get WhatsApp reminders of their pending work, and Managers / Partners get alerts for new notices. Your phone number must be saved in Team & logins — ask the Admin.',
+    [['telegram', 'reminder', 'bot', 'whatsapp'],
+      'Staff get their pending work on **Telegram** every morning at 9:30 (Mon–Sat), and clients can check status and send papers to the office bot. Your mobile number must be saved in Staff & senior — ask the Admin — then open the bot and tap Share my number.',
       []]
   ],
   find(q) {
@@ -9999,7 +9995,7 @@ async function renderChaseSettings(box) {
   const s = r.data || {}, edit = isPartner(), pv = s.preview || [];
   const when = t => t ? new Date(t).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' }) : '—';
   box.innerHTML = `<div class="card"><h3>Automatic data chasing</h3>
-    <p class="muted">While work is in <b>Pending data</b>, the client gets a polite reminder by WhatsApp and email every few days until the data arrives — every morning at 10 AM (Mon–Sat). Each reminder shows as a follow-up on the work. If the client still hasn't sent anything after a set number of reminders, the staff member and Managers get an email to call them.</p>
+    <p class="muted">While work is in <b>Pending data</b>, the client gets a polite reminder by email (and on Telegram, if they have linked the office bot) every few days until the data arrives — every morning at 10 AM (Mon–Sat). Each reminder shows as a follow-up on the work. If the client still hasn't sent anything after a set number of reminders, the staff member and Managers get an email to call them.</p>
     <div class="mail-stat"><span class="pill ${s.enabled ? 'g' : 'a'}">${s.enabled ? '● On' : 'Off'}</span>
       <span class="small">Last run: <b>${when(s.last_run_at)}</b>${s.last_note ? ' · ' + esc(s.last_note) : ''} · Clients reminded in 7 days: <b>${s.sent_7 || 0}</b>${s.queued ? ` · emails waiting to send: <b>${s.queued}</b>` : ''}${s.failed_7 ? ` · <span class="late">${s.failed_7} failed</span>` : ''}</span></div>
     ${!s.mailbox ? '<p class="note warn small">Emails are sent by the office mailbox script — set up Notice watch first (it uses the same key).</p>' : ''}
@@ -10008,20 +10004,19 @@ async function renderChaseSettings(box) {
       <label>Remind again every (days)<input type="number" id="chEvery" min="1" max="15" value="${esc(s.every_days)}"></label>
       <label>At most this many reminders per client in 30 days<input type="number" id="chMax" min="1" max="10" value="${esc(s.max_month)}"></label>
       <label>Tell staff &amp; Managers after this many reminders<input type="number" id="chEsc" min="1" max="10" value="${esc(s.escalate_after)}"></label></div>
-    <label class="check" style="margin-top:8px"><input type="checkbox" id="chOn" ${s.enabled ? 'checked' : ''}> <b>Switched on</b> (this replaces the older one-time client reminder in WhatsApp settings)</label>
-    <label class="check"><input type="checkbox" id="chWa" ${s.use_wa ? 'checked' : ''}> WhatsApp (uses the approved <b>client_data_reminder</b> template)</label>
+    <label class="check" style="margin-top:8px"><input type="checkbox" id="chOn" ${s.enabled ? 'checked' : ''}> <b>Switched on</b></label>
     <label class="check"><input type="checkbox" id="chEm" ${s.use_email ? 'checked' : ''}> Email from the office mailbox (clients can reply with the files — they land in Client mail)</label>
     <div class="toolbar" style="margin-top:12px">${edit ? '<button class="btn primary" id="chSave">Save</button>' : ''}<span class="spacer"></span><button class="btn" id="chRun">Send due reminders now</button></div>
     <h4 style="margin:16px 0 6px">Waiting for data now (${pv.length})</h4>
     ${pv.length ? `<div class="table-wrap"><table class="small"><thead><tr><th>Client</th><th>Waiting for</th><th>Earliest due</th><th>Reminders (30 days)</th><th>Next</th></tr></thead><tbody>
-      ${pv.map(p => `<tr><td><b>${esc(p.client)}</b><div class="muted">${p.phone ? 'WhatsApp' : '<span class="late">no mobile</span>'} · ${p.email ? 'email' : '<span class="late">no email</span>'}</div></td><td class="wrap">${esc(p.items)}</td>
+      ${pv.map(p => `<tr><td><b>${esc(p.client)}</b><div class="muted">${p.email ? 'email' : '<span class="late">no email</span>'}</div></td><td class="wrap">${esc(p.items)}</td>
         <td class="${p.earliest < today() ? 'late' : ''}">${fmtDate(p.earliest)}</td><td>${p.sent_30}${p.last_sent ? `<div class="muted">last ${fmtDate(p.last_sent.slice(0, 10))}</div>` : ''}</td>
         <td>${p.sent_30 >= s.max_month ? '<span class="muted">limit reached</span>' : p.due_now ? '<b>due now</b>' : 'in a few days'}</td></tr>`).join('')}</tbody></table></div>`
       : '<p class="muted small">No client is waiting on data within the reminder window.</p>'}
     <p class="muted small">To leave a client out, open the client and tick “Don't send automatic reminders”.</p></div>`;
   if ($('#chSave', box)) $('#chSave', box).onclick = async () => {
     const n = id => Math.round(num($(id, box).value));
-    try { await must(sb.rpc('chase_save', { p: { enabled: $('#chOn', box).checked, use_wa: $('#chWa', box).checked, use_email: $('#chEm', box).checked, start_days: n('#chStart'), every_days: n('#chEvery'), max_month: n('#chMax'), escalate_after: n('#chEsc') } })); toast('Saved'); renderChaseSettings(box); }
+    try { await must(sb.rpc('chase_save', { p: { enabled: $('#chOn', box).checked, use_wa: false, use_email: $('#chEm', box).checked, start_days: n('#chStart'), every_days: n('#chEvery'), max_month: n('#chMax'), escalate_after: n('#chEsc') } })); toast('Saved'); renderChaseSettings(box); }
     catch (e) { toast(friendly(e), true); }
   };
   if (!edit) $$('input', box).forEach(x => x.disabled = true);
@@ -10361,14 +10356,14 @@ async function dashMine(body) {
 async function dashSystemTab(body) {
   body.innerHTML = '<div class="card sys-card"><h3>Automatic jobs</h3><div class="sys-grid" id="sysGrid"><div class="loading">Checking…</div></div></div><div id="sysOld"></div>';
   const when = x => { if (!x) return 'never'; const mins = Math.round((Date.now() - new Date(x)) / 60000); return mins < 1 ? 'just now' : mins < 60 ? mins + ' min ago' : mins < 1440 ? Math.round(mins / 60) + ' h ago' : new Date(x).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' }); };
-  Promise.all([safe(sb.rpc('wa_admin_status')), safe(sb.from('wa_settings').select('enabled,client_enabled').eq('id', 1).maybeSingle()), safe(sb.rpc('notice_status')), safe(sb.rpc('auto_work_status')),
+  Promise.all([safe(sb.rpc('tg_admin_status')), safe(sb.from('tg_settings').select('id').limit(1)), safe(sb.rpc('notice_status')), safe(sb.rpc('auto_work_status')),
     safe(sb.rpc('chase_status')), safe(sb.rpc('mail_admin_status')), safe(sb.from('backups').select('taken_at,rows').order('taken_at', { ascending: false }).limit(1)), safe(sb.rpc('ai_admin_status'))])
   .then(([wa, ws, nw, aw, ch, ml, bk, ai]) => {
     const tile = (name, ok, line, href) => `<a class="sys-tile ${ok === true ? 'ok' : ok === false ? 'bad' : 'off'}" href="${href}"><span class="sys-dot"></span><b>${esc(name)}</b><span class="small">${line}</span></a>`;
     const n = nw.data || {}, a = aw.data || {}, c = ch.data || {}, mm = ml.data || {}, b = (bk.data || [])[0], ia = ai.data || {}, w = ws.data || {};
     const bkAge = b ? (Date.now() - new Date(b.taken_at)) / 36e5 : null;
     $('#sysGrid', body).innerHTML = [
-      tile('WhatsApp reminders', wa.error || ws.error || !w.enabled ? null : true, wa.error || ws.error ? 'not set up' : w.enabled ? 'on — staff 9:30 AM daily' : 'switched off', '#/settings?s=whatsapp'),
+      tile('Telegram bot', wa.error ? null : (wa.data || {}).enabled && (wa.data || {}).bot_username ? !(wa.data || {}).last_error : null, wa.error ? 'not installed' : !(wa.data || {}).bot_username ? 'not set up' : (wa.data || {}).enabled ? `@${esc(wa.data.bot_username)} · ${((wa.data.links || []).length)} linked${wa.data.last_error ? ' · problem: ' + esc(String(wa.data.last_error).slice(0, 60)) : ''}` : 'switched off', '#/settings?s=telegram'),
       tile('Notice watch', nw.error ? null : n.connected && n.enabled ? !n.last_error && !!n.last_check_at && (Date.now() - new Date(n.last_check_at)) < 3 * 36e5 : null, nw.error ? 'not installed' : !n.connected ? 'not set up' : n.last_error ? 'problem: ' + esc(n.last_error) : 'last check ' + when(n.last_check_at), '#/notices'),
       tile('Automatic GST work', aw.error ? null : a.gst_enabled ? true : null, aw.error ? 'not installed' : a.gst_enabled ? 'last run ' + when(a.last_run_at) + (a.last_made != null ? ` · ${a.last_made} made` : '') : 'switched off', '#/settings?s=gst'),
       tile('Data chasing', ch.error ? null : c.enabled ? !c.failed_7 : null, ch.error ? 'not installed' : c.enabled ? `on · ${c.sent_7 || 0} clients reminded in 7 days${c.failed_7 ? ` · ${c.failed_7} failed` : ''}${c.queued ? ` · ${c.queued} emails waiting` : ''}` : 'switched off', '#/settings?s=clients'),
