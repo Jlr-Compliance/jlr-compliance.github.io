@@ -2053,7 +2053,7 @@ const SET_SECTIONS = [
   { id: 'team', label: 'Staff & senior', words: 'team staff users login role senior verify whatsapp number' },
   { id: 'mailbox', label: 'Mailbox & emails', words: 'mail gmail mailbox script key intake notice watch senior approval signature greeting acknowledgement' },
   { id: 'whatsapp', label: 'WhatsApp', words: 'whatsapp meta template reminder token phone' },
-  { id: 'arattai', label: 'Arattai reminders', words: 'arattai ifttt chat team group reminder daily work' },
+  { id: 'telegram', label: 'Telegram bot', words: 'telegram bot botfather chat team group reminder daily work client status approve arattai' },
   { id: 'gst', label: 'GST automation', words: 'gst sandbox auto status filed arn automatic work' },
   { id: 'clients', label: 'Clients & reminders', words: 'status board link notices module data chasing data request reminder' },
   { id: 'ai', label: 'AI help', words: 'ai claude key bills assistant' },
@@ -2122,7 +2122,7 @@ VIEWS.settings = async v => {
 
   const main = $('#setMain');
   main.innerHTML = `<div class="set-title"><h2>${esc(sec.label)}</h2></div>`;
-  await ({ office: setOffice, team: setTeam, mailbox: setMailbox, whatsapp: b => renderWhatsApp(setBox(b)), arattai: setArattai, gst: setGstSec, clients: setClients, ai: b => renderAiSettings(setBox(b)), backup: setBackup, advanced: b => renderDemoSettings(setBox(b)) }[cur])(main);
+  await ({ office: setOffice, team: setTeam, mailbox: setMailbox, whatsapp: b => renderWhatsApp(setBox(b)), arattai: setArattai, telegram: setTelegram, gst: setGstSec, clients: setClients, ai: b => renderAiSettings(setBox(b)), backup: setBackup, advanced: b => renderDemoSettings(setBox(b)) }[cur])(main);
 };
 
 /* Office & billing */
@@ -2222,6 +2222,52 @@ async function setBackup(main) {
     if (code) $('#bkCpS', m.el).onclick = () => copySecret(code, 'Script copied');
   };
   renderBackups(setBox(main));
+}
+
+/* v48 Telegram bot: clients, staff and the senior in one bot (replaces the Arattai reminders) */
+async function setTelegram(main) {
+  const r = await safe(sb.rpc('tg_admin_status'));
+  if (r.error) { setBox(main, '<div class="card"><h3>Telegram bot</h3><p class="note small">Run <b>update-telegram.sql</b> in Supabase first, and deploy the <b>telegram-bot</b> function.</p></div>'); return; }
+  const s = r.data || {}, links = s.links || [], fnUrl = `${cfg.SUPABASE_URL}/functions/v1/telegram-bot`, bot = s.bot_username;
+  const light = (cls, t, sub) => `<div class="set-light ${cls}"><b>${t}</b><span class="small">${sub}</span></div>`;
+  const staffN = links.filter(l => l.kind === 'staff').length, clientN = links.filter(l => l.kind === 'client').length;
+  const box = setBox(main, `<p class="muted set-lead">One Telegram bot for the office. <b>Clients</b> see their work status, pending papers, acknowledgements and fees, and send papers as photo / PDF / Excel (saved in Client mail, work marked “data received”). <b>Staff</b> get their work list at 9:30 AM, look up any of their clients and mark work filed. The <b>senior</b> approves GSTR-1 / 3B workings with one tap. Office mails (data requests, filed acknowledgements, reminders) also reach linked people on Telegram. People link once by sharing their own mobile number — it must match the number saved in the tracker.</p>
+    <div class="set-lights">${light(!s.token_saved ? 'todo' : bot ? 'ok' : 'half', 'Bot', !s.token_saved ? 'Token not saved' : bot ? `@${esc(bot)}` : 'Token saved — click Connect')}
+      ${light(s.enabled ? 'ok' : 'half', 'Switched', s.enabled ? 'On' : 'Off')}
+      ${light(s.team_chat_id ? 'ok' : 'half', 'Team group', s.team_chat_id ? esc(s.team_title || 'Linked') : 'Not linked')}
+      ${light(staffN + clientN ? 'ok' : 'half', 'Linked people', `${staffN} staff · ${clientN} client${clientN === 1 ? '' : 's'}`)}</div>
+    ${s.last_error ? `<p class="note warn small">Last problem: ${esc(s.last_error)}</p>` : ''}
+    <div class="card set-step"><div class="set-step-h"><span class="set-num">1</span><h3>Make the bot (2 minutes)</h3></div>
+      <ol class="small steps"><li>In Telegram, open <a href="https://t.me/BotFather" target="_blank" rel="noopener">@BotFather</a> and send <code>/newbot</code>.</li>
+        <li>Name: <b>JLR Compliance</b>. Username: something ending in <b>bot</b>, e.g. <code>jlr_compliance_bot</code>.</li>
+        <li>BotFather replies with a <b>token</b> (looks like <code>123456789:AA…</code>). Paste it here — it is kept hidden in the database vault.</li></ol>
+      <div class="toolbar"><input type="password" id="tgTok" placeholder="${s.token_saved ? 'Token saved (hidden) — paste a new one to replace' : 'Paste the bot token from BotFather'}" autocomplete="off" style="flex:1;max-width:460px" aria-label="Bot token"><button class="btn primary" id="tgTokSave">Save token</button></div></div>
+    <div class="card set-step"><div class="set-step-h"><span class="set-num">2</span><h3>Connect</h3></div>
+      <p class="small">Connects the bot to the tracker (the <b>telegram-bot</b> function must be deployed in Supabase).</p>
+      <div class="toolbar"><button class="btn primary" id="tgSetup">${bot ? 'Connect again' : 'Connect bot'}</button>${bot ? `<a class="btn" href="https://t.me/${esc(bot)}" target="_blank" rel="noopener">Open @${esc(bot)}</a><button class="btn" id="tgCopy">Copy link for clients</button>` : ''}</div></div>
+    <div class="card set-step"><div class="set-step-h"><span class="set-num">3</span><h3>Link people</h3></div>
+      <ul class="small steps"><li><b>Staff:</b> open ${bot ? `<a href="https://t.me/${esc(bot)}" target="_blank" rel="noopener">t.me/${esc(bot)}</a>` : 'the bot'} → <b>Start</b> → <b>📱 Share my number</b>. The mobile in <b>Staff &amp; senior</b> must match.</li>
+        <li><b>Clients:</b> send them the link; they tap <b>Share my number</b>. It must match the client's mobile (or the group's mobile — then they see all the group's companies).</li>
+        <li><b>Team group:</b> add the bot to your office Telegram group and send <code>/linkgroup</code> in the group (Admin / manager, after linking yourself). The 9:30 AM team list goes there.</li></ul></div>
+    <div class="card set-step"><div class="set-step-h"><span class="set-num">4</span><h3>Switch on</h3></div>
+      <label class="check"><input type="checkbox" id="tgOn" ${s.enabled ? 'checked' : ''}> Bot switched on</label>
+      <label class="check"><input type="checkbox" id="tgDaily" ${s.daily_on !== false ? 'checked' : ''}> Work list at 9:30 AM, Monday–Saturday (each staff member + the team group)</label>
+      <label class="check"><input type="checkbox" id="tgMirror" ${s.mirror_on !== false ? 'checked' : ''}> Also send office mails on Telegram (data requests, filed acknowledgements + workings, reminders, senior approvals)</label>
+      <div class="toolbar" style="margin-top:10px"><button class="btn primary" id="tgSave">Save</button><button class="btn" id="tgTest">Send a test</button><button class="btn" id="tgNow">Send today's lists now</button>${s.team_chat_id ? '<button class="btn ghost" id="tgUngroup">Unlink team group</button>' : ''}</div>
+      <p class="muted small">${s.last_note ? esc(s.last_note) + ' · ' : ''}Today: ${s.today_in || 0} in · ${s.today_out || 0} out</p></div>
+    <div class="card"><h3>Linked on Telegram</h3>${links.length ? `<div class="table-wrap"><table><thead><tr><th>Who</th><th>Type</th><th>Mobile</th><th>Companies</th><th>Last seen</th><th></th></tr></thead><tbody>
+      ${links.map(l => `<tr><td>${esc(l.name || '')}</td><td>${l.kind === 'staff' ? 'Staff' : 'Client'}</td><td>${esc(l.phone || '')}</td><td class="wrap small">${esc((l.clients || []).join(', '))}</td><td class="small">${l.last_seen ? setWhen(l.last_seen) : '—'}</td>
+        <td><button class="link small danger-t" data-unl="${l.id}">Unlink</button></td></tr>`).join('')}</tbody></table></div>` : '<p class="muted small">Nobody yet.</p>'}</div>`);
+  const call = async (action, extra = {}) => { const { data, error } = await sb.functions.invoke('telegram-bot', { body: { action, ...extra } }); if (error || (data && data.error)) throw new Error((data && data.error) || (error && error.message) || 'The telegram-bot function did not answer — is it deployed?'); return data; };
+  const busy = async (btn, fn) => { btn.disabled = true; try { await fn(); } catch (e) { toast(friendly(e), true); } btn.disabled = false; };
+  $('#tgTokSave', box).onclick = e => busy(e.target, async () => { const t = $('#tgTok', box).value.trim(); if (!t) throw new Error('Paste the token first'); await must(sb.rpc('tg_admin_set_token', { p_token: t })); $('#tgTok', box).value = ''; toast('Token saved (hidden) — now click Connect bot'); route(); });
+  $('#tgSetup', box).onclick = e => busy(e.target, async () => { const d = await call('setup', { url: fnUrl }); await must(sb.rpc('tg_admin_save', { p: { function_url: fnUrl, bot_username: d.bot } })); toast(`Connected: @${d.bot}`); route(); });
+  if ($('#tgCopy', box)) $('#tgCopy', box).onclick = () => { navigator.clipboard.writeText(`Get your work status and send papers on Telegram: https://t.me/${bot} — tap Start, then "Share my number".`).then(() => toast('Copied')); };
+  $('#tgSave', box).onclick = e => busy(e.target, async () => { await must(sb.rpc('tg_admin_save', { p: { enabled: $('#tgOn', box).checked, daily_on: $('#tgDaily', box).checked, mirror_on: $('#tgMirror', box).checked, function_url: fnUrl } })); toast('Saved'); route(); });
+  $('#tgTest', box).onclick = e => busy(e.target, async () => { const d = await call('test'); toast(d.sent && d.sent.length ? 'Test sent to ' + d.sent.join(' and ') : 'Link yourself (or the team group) first'); });
+  $('#tgNow', box).onclick = e => { if (!confirm("Send today's work lists on Telegram now?")) return; busy(e.target, async () => { const d = await call('daily_now'); toast(`${d.sent || 0} message(s) sent`); route(); }); };
+  if ($('#tgUngroup', box)) $('#tgUngroup', box).onclick = e => busy(e.target, async () => { await must(sb.rpc('tg_admin_save', { p: { team_chat_id: '' } })); toast('Team group unlinked'); route(); });
+  $$('[data-unl]', box).forEach(b => b.onclick = () => { if (!confirm('Unlink this person from the Telegram bot? They can link again by sharing their number.')) return; busy(b, async () => { await must(sb.rpc('tg_admin_unlink', { p_id: b.dataset.unl })); route(); }); });
 }
 
 /* Arattai daily work reminders (through IFTTT webhooks) */
