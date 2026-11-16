@@ -3001,7 +3001,8 @@ function invoiceSettingsCard() {
   if (!P4()) return '';
   const f = (k, l, ph = '', type = 'text') => `<label>${l}<input name="${k}" type="${type}" value="${esc(settings[k] ?? '')}" placeholder="${esc(ph)}"></label>`;
   return `<div class="card" id="invSet"><h3>Invoice details</h3>
-    <p class="muted small">Printed on invoices. Set GST rate to 0 if the firm is not registered under GST.</p>
+    <div class="toolbar" style="justify-content:space-between;margin-bottom:6px"><p class="muted small" style="margin:0">Printed on invoices. Set GST rate to 0 if the firm is not registered under GST.</p>
+      <button class="btn sm" id="invZoho" title="Copy the office name, address, GSTIN, PAN, phone and email from your Zoho Invoice organisation">Fill from Zoho</button></div>
     <div class="form-grid">
       <label class="full">Office address<textarea name="firm_address" rows="2">${esc(settings.firm_address || '')}</textarea></label>
       ${f('firm_gstin', 'Firm GSTIN', '33XXXXX0000X1Z5')}${f('firm_pan', 'Firm PAN')}${f('firm_phone', 'Phone')}${f('firm_email', 'Email')}
@@ -3014,6 +3015,22 @@ function invoiceSettingsCard() {
 }
 function bindInvoiceSettings(v) {
   const b = $('#saveInv', v); if (!b) return;
+  const zb = $('#invZoho', v);
+  if (zb) zb.onclick = async () => {
+    const box = $('#invSet', v); zb.disabled = true;
+    try {
+      const o = await zohoCall('org_details');
+      const map = [['firm_address', o.address, 'Address'], ['firm_gstin', o.gstin, 'GSTIN'], ['firm_pan', o.pan, 'PAN'], ['firm_phone', o.phone, 'Phone'], ['firm_email', o.email, 'Email']];
+      const got = map.filter(([, val]) => val && String(val).trim());
+      if (!got.length) throw new Error('Zoho has no address / GSTIN / phone / email for your organisation yet — fill them in Zoho Invoice → Settings → Organisation profile, or type them here');
+      const ch = got.filter(([k, val]) => (fv(box, k) || '').trim() !== String(val).trim());
+      if (!ch.length) { toast('Already the same as Zoho ✓'); return; }
+      if (ch.some(([k]) => (fv(box, k) || '').trim()) && !confirm(`Replace these with the Zoho values?\n\n${ch.map(([k, val, l]) => `${l}: ${String(val).replace(/\n/g, ', ')}`).join('\n')}`)) return;
+      ch.forEach(([k, val]) => { const el = $(`[name=${k}]`, box); if (el) { el.value = val; el.classList.add('flash-ok'); } });
+      toast(`Filled ${ch.map(c => c[2]).join(', ')} from Zoho${o.name ? ` (${o.name})` : ''} — check and click Save invoice details`);
+    } catch (e) { toast(friendly(e), true); }
+    finally { zb.disabled = false; }
+  };
   b.onclick = async () => {
     const box = $('#invSet', v);
     const rec = {};
