@@ -5175,10 +5175,16 @@ VIEWS.gst = async v => {
       } else if (SN === 2) { content = '<div id="grOut"></div>'; checkLbl = 'GSTR-1 workings done'; }
       else if (SN === 3) content = '<div id="grOut"></div>' + revPanel('gstr1', 'verify');
       else if (SN === 4) {
-        const up = (row.reco || {}).g1up;
+        const up = (row.reco || {}).g1up, uq = await safe(sb.from('gst_uploads').select('status,info,message,created_at,created_by,uploaded_at,uploaded_by').eq('client_id', c.id).eq('period', period).eq('kind', 'gstr1').maybeSingle());
+        const uj = uq.error ? undefined : uq.data, UST = { ready: ['Waiting for the add-on — open the client on the GST portal, JLR → Upload', 'warn-t'], uploading: ['Uploading…', 'warn-t'], processed: ['Uploaded and processed on the portal ✓', 'ok-t'], pending: ['Uploaded — portal still processing', 'warn-t'], error: ['Portal reported errors', 'late'] };
         content = `<div class="${okRev('gstr1') ? 'gr-okline' : 'note warn small'}">${okRev('gstr1') ? `✓ Verified by ${esc(srName)}${revs.gstr1.decided_at ? ' on ' + dt(revs.gstr1.decided_at) : ''} — status: <b>Ready to file</b>` : 'Not verified yet — send GSTR-1 for verification in step 3. You can still download the JSON to check it on the portal.'}</div>
           <section class="gr-box"><h3>Upload to portal</h3><p class="muted small">Download the GSTR-1 JSON, then on the GST portal: Returns → GSTR-1 → <b>Prepare offline</b> → Upload. Wait for “processed”, check the portal summary against step 3, then tick.</p>
-            <div class="toolbar"><button class="btn ${okRev('gstr1') ? 'primary' : ''}" data-g1jsondl>Download GSTR-1 JSON</button>${tickRow('g1up', 'Uploaded to portal')}<span class="spacer"></span>${whoFiles('gstr1')}</div></section>`;
+            ${uj !== undefined ? `<div class="gr-up"><b>With the JLR GST helper</b> <span class="muted small">— no download needed</span><br>
+              ${uj ? `<span class="small ${UST[uj.status] ? UST[uj.status][1] : ''}">${UST[uj.status] ? UST[uj.status][0] : esc(uj.status)}${uj.message && uj.status !== 'processed' ? ' — ' + esc(uj.message) : ''}</span>
+                <div class="muted small">${esc(uj.info || '')} · sent ${dt(uj.created_at)} by ${esc(profName(uj.created_by) || '')}${uj.uploaded_at ? ` · uploaded ${new Date(uj.uploaded_at).toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' })} by ${esc(profName(uj.uploaded_by) || '')}` : ''}</div>` : '<span class="muted small">Send the JSON to the add-on, then on the GST portal (logged in as this client) open the JLR panel and click Upload. It only uploads — it does not file.</span>'}
+              <div class="toolbar" style="margin:6px 0 0"><button class="btn ${okRev('gstr1') && !uj ? 'primary' : ''}" data-g1send>${uj ? 'Send the JSON again (latest workings)' : 'Send JSON to JLR add-on'}</button>${uj ? '<button class="link small" data-qlogin>Log in to GST portal</button>' : ''}</div></div>` : ''}
+            <p class="muted small" style="margin:10px 0 4px">Or by hand:</p>
+            <div class="toolbar"><button class="btn" data-g1jsondl>Download GSTR-1 JSON</button>${tickRow('g1up', 'Uploaded to portal')}<span class="spacer"></span>${whoFiles('gstr1')}</div></section>`;
       } else content = `<div class="grcs">${g1fChip}</div>${revPanel('gstr1', 'file')}<div id="grOut" style="margin-top:12px"></div>`;
     } else {
       if (SN === 1) {
@@ -5789,6 +5795,18 @@ VIEWS.gst = async v => {
         if (!v.t && !v.n) throw new Error('Enter at least the number of invoices or the taxable value');
         await save({ reco: { ...(row.reco || {}), einv: { ...v, at: new Date().toISOString(), by: me.id } } }); toast('E-invoice totals saved'); } });
   }
+  // v59: put the GSTR-1 JSON (from the saved workings) where the JLR GST helper add-on picks it up for upload
+  async function g1SendToAddon() {
+    const g = row.g1; if (!g || !(g.sales || []).length) { toast('Save the GSTR-1 workings first (step 2)', true); return; }
+    const R = g1json.build({ sales: g.sales || [], amend: g.amend || [], adv: g.adv || [], docs: g.docs || [] }, c, row.period);
+    if (R.errors.length) { toast(`${R.errors.length} row${R.errors.length > 1 ? 's have' : ' has'} errors — fix them in step 2 first`, true); return; }
+    if (!(revs.gstr1 && ['approved', 'sent_client'].includes(revs.gstr1.state)) && !confirm('GSTR-1 is not verified by the senior yet. Send the JSON to the add-on anyway?')) return;
+    const J = R.json, n = k => (J[k] || []).reduce((s2, x) => s2 + ((x.inv || x.nt || [x]).length), 0);
+    const info = [['B2B', n('b2b')], ['B2CL', n('b2cl')], ['exports', n('exp')], ['B2CS rows', (J.b2cs || []).length], ['notes', n('cdnr') + (J.cdnur || []).length], ['HSN', ((J.hsn || {}).hsn_b2b || []).length + ((J.hsn || {}).hsn_b2c || []).length + ((J.hsn || {}).data || []).length]].filter(x => x[1]).map(([l, v]) => `${v} ${l}`).join(' · ');
+    const r = await safe(sb.from('gst_uploads').upsert({ client_id: c.id, period, kind: 'gstr1', json: J, info, status: 'ready', message: null, result: null, created_by: me.id, created_at: new Date().toISOString(), uploaded_by: null, uploaded_at: null }, { onConflict: 'client_id,period,kind' }));
+    if (r.error) { toast(/gst_uploads/.test(r.error.message || '') ? 'Run update-gstr1-upload.sql in Supabase first' : friendly(r.error), true); return; }
+    toast('JSON sent to the add-on — on the GST portal open the JLR panel and click Upload'); render();
+  }
   // v57: GSTR-1 JSON straight from the saved workings (step 4 · upload to portal)
   function g1JsonDownload() {
     const g = row.g1; if (!g || !(g.sales || []).length) { toast('Save the GSTR-1 workings first (step 2)', true); return; }
@@ -5808,6 +5826,7 @@ VIEWS.gst = async v => {
     if ('einv' in d) { einvDialog(); return; }
     if ('einvclr' in d) { if (!confirm('Remove the e-invoice totals?')) return; const reco = { ...(row.reco || {}) }; delete reco.einv; await save({ reco }).catch(err => toast(friendly(err), true)); return; }
     if ('g1jsondl' in d) { g1JsonDownload(); return; }
+    if ('g1send' in d) { b.disabled = true; try { await g1SendToAddon(); } finally { b.disabled = false; } return; }
     if ('g3pay' in d) { if (grPayX) fdPayModal(grPayX, monthLabel(grMonth), grMonth, () => render()); return; }
     if ('g3sheet' in d) { if (grPayX) fdPortalSheet(grPayX, monthLabel(grMonth)); return; }
     if ('itcm' in d) itcMethodDialog();
