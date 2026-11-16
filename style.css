@@ -1439,3 +1439,22 @@ input.otp{font-size:22px;letter-spacing:.35em;text-align:center;font-variant-num
 .st-yet-to-start{background:var(--grey-soft);color:var(--text,#334)}
 .st-sent-for-verification{background:var(--blue-soft);color:var(--brand)}
 .st-payment-pending{background:var(--red-soft);color:var(--red)}
+
+/* v57: GST review — two tabs, clickable steps, to-do inside each return */
+.grt.grt2{grid-template-columns:repeat(2,minmax(0,1fr))}
+@media (max-width:760px){.grt.grt2 .grt-b:first-child{grid-column:auto}}
+.rf-nav li{padding:0;background:none}
+.rf-nav li button{all:unset;box-sizing:border-box;cursor:pointer;display:flex;align-items:center;gap:6px;padding:5px 10px 5px 5px;border-radius:999px;background:var(--grey-soft,#eef1f6);color:inherit;border:1.5px solid transparent}
+.rf-nav li.done button{background:var(--green-soft)}.rf-nav li.cur button{background:var(--blue-soft)}.rf-nav li.bad button{background:var(--red-soft)}
+.rf-nav li button:hover{border-color:color-mix(in srgb,var(--brand) 45%,transparent)}
+.rf-nav li.sel button{border-color:var(--brand);box-shadow:0 0 0 2px color-mix(in srgb,var(--brand) 18%,transparent);color:var(--ink,inherit);font-weight:700}
+.rf-nav li button:focus-visible{outline:2px solid var(--brand);outline-offset:2px}
+.gr-todo{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0 0}
+.gr-todo-i{all:unset;box-sizing:border-box;cursor:pointer;display:flex;gap:8px;align-items:center;padding:6px 10px;border:1px solid var(--line);border-radius:10px;font-size:.82rem;max-width:100%}
+.gr-todo-i:first-child{background:var(--amber-soft);border-color:color-mix(in srgb,var(--amber) 30%,var(--line))}
+.gr-todo-i:hover{border-color:var(--brand)}.gr-todo-i:focus-visible{outline:2px solid var(--brand);outline-offset:2px}
+.gr-okline{background:var(--green-soft);color:var(--green);border-radius:10px;padding:8px 12px;margin:0 0 12px;font-size:.9rem}
+.gr-box{border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin:0 0 12px}
+.gr-box h3{margin:0 0 6px;font-size:1rem}
+.gr-2col{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+@media (max-width:760px){.gr-2col{grid-template-columns:1fr}}

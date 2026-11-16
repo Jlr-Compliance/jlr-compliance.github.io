@@ -955,12 +955,12 @@ VIEWS.filing = async v => {
   body.onclick = async e => {
     const b = e.target.closest('[data-a]'); if (!b) return;
     const x = rows[+b.closest('tr').dataset.i], a = b.dataset.a;
-    if (a === 'open' || (a === 'sheet' && x.k === 'gstr1')) { grClient = x.t.client_id; grMonth = ym; location.hash = '#/gst'; if (a === 'sheet') toast('GSTR-1 workspace → GSTR-1 entry → “GSTR-1 JSON” downloads the file for the portal'); return; }
+    if (a === 'open' || (a === 'sheet' && x.k === 'gstr1')) { grClient = x.t.client_id; grMonth = ym; grOv = false; grTab = ''; grLastStep = {}; grPos = { ret: x.k, s: a === 'sheet' ? 4 : x.k === 'gstr1' ? 3 : 4 }; location.hash = '#/gst'; if (a === 'sheet') toast('GSTR-1 step 4 → “Download GSTR-1 JSON” downloads the file for the portal'); return; }
     if (a === 'logins') return openLogins(x.c);
     if (a === 'otp') { const msg = `Dear ${x.c.name},\nWe are filing your ${x.t.return_name} for ${x.t.period} now. You will get an OTP from GSTN on your registered mobile / email — please send it to us as soon as it arrives.\nThank you,\n${firmName()}`;
       navigator.clipboard.writeText(msg).then(() => toast('Message copied — paste it to the client (Telegram / call)')).catch(() => window.prompt('Copy this message:', msg)); return; }
-    if (a === 'sheet') return portalSheet(x);
-    if (a === 'pay') return payModal(x);
+    if (a === 'sheet') return fdPortalSheet(x, label);
+    if (a === 'pay') return fdPayModal(x, label, ym, route);
     if (a === 'ack') return ackForTask({ ...x.t }, () => route());
     if (a === 'filed') {
       const gate = await payGateMsg(x.t).catch(() => null); if (gate) return toast(gate, true);
@@ -969,48 +969,49 @@ VIEWS.filing = async v => {
       catch (err) { toast(friendly(err), true); }
     }
   };
-  function payModal(x) {
-    const c0 = ((x.g || {}).summary || {}).cash || {}, p = x.pay || {}, due = (gstPayDue(x.c, ym) || {}).due || x.t.due_date || null;
-    const ch = String(p.challan || ''), cpin = (ch.match(/CPIN[:\s]*(\S+)/i) || [])[1] || (!/CIN/i.test(ch) ? ch : ''), cin = (ch.match(/\bCIN[:\s]*(\S+)/i) || [])[1] || '';
-    modal(`GSTR-3B ${label} payment — ${x.c.name}`, `<p class="small muted">Cash to pay as per the verified draft 3B: <b>${inr(x.cash)}</b> (IGST ${inr(c0.ig)} · CGST ${inr(c0.cg)} · SGST ${inr(c0.sg)}${num(c0.cs) ? ' · Cess ' + inr(c0.cs) : ''})</p>
-      <div class="form-grid"><label>Paid on<input type="date" name="on" value="${esc(p.paid_on || today())}"></label>
-        <label>Amount paid (₹)<input type="number" name="amt" value="${esc(p.paid_amount ?? x.cash)}"></label>
-        <label>CPIN<input name="cpin" value="${esc(cpin)}" placeholder="14-digit CPIN"></label><label>CIN (after payment)<input name="cin" value="${esc(cin)}" placeholder="e.g. HDFC26110000123"></label>
-        <label class="full">Remarks<input name="rm" value="${esc(p.remarks || '')}"></label></div>`, {
-      extra: p.paid_on ? '<button class="btn danger" data-unpay>Not paid</button>' : '',
-      onSave: async el => {
-        const amt = num(fv(el, 'amt')), cp = fv(el, 'cpin').trim(), ci = fv(el, 'cin').trim();
-        if (!cp && !ci) throw new Error('Enter the CPIN or the CIN of the challan');
-        if (amt + 1 < x.cash && !confirm(`Paid ${inr(amt)} is less than the ${inr(x.cash)} to pay. Save anyway?`)) return false;
-        await must(sb.from('tax_intimations').upsert({ client_id: x.c.id, kind: 'GST', period: label, due_date: due, amounts: { ig: Math.round(num(c0.ig)), cg: Math.round(num(c0.cg)), sg: Math.round(num(c0.sg)), cs: Math.round(num(c0.cs)) }, total: x.cash,
-          paid_on: fv(el, 'on') || today(), paid_amount: amt, challan: [cp && 'CPIN ' + cp, ci && 'CIN ' + ci].filter(Boolean).join(' · '), remarks: fv(el, 'rm') || null }, { onConflict: 'client_id,kind,period' }));
-        toast('Payment saved — the GSTR-3B can be filed now'); route();
-      } });
-    const un = $('[data-unpay]'); if (un) un.onclick = async () => { try { await must(sb.from('tax_intimations').update({ paid_on: null, paid_amount: null }).eq('id', p.id)); un.closest('.modal-back').remove(); route(); } catch (err) { toast(friendly(err), true); } };
-  }
-  function portalSheet(x) {
-    const T = ((x.g || {}).summary || {}).t3b;
-    if (!T || !Object.keys(T).length) { toast('Open this month in GST review once (it saves the 3B figures), then try again', true); return; }
-    const Z = { t: 0, ig: 0, cg: 0, sg: 0, cs: 0 }, R = k => T[k] || Z;
-    const cell = (v, nt) => nt ? '<td></td>' : `<td class="r"><button class="link copy-n" data-cp="${Math.round(v) || 0}" title="Copy">${(Math.round(v) || 0).toLocaleString('en-IN')}</button></td>`;
-    const line = (lbl, k, opt = {}) => { const v = R(k); return `<tr><td class="wrap">${lbl}</td>${cell(v.t, opt.noT)}${cell(v.ig, opt.noTax)}${opt.ig ? '<td></td><td></td>' : `${cell(v.cg, opt.noTax)}${cell(v.sg, opt.noTax)}`}${cell(v.cs, opt.noTax)}</tr>`; };
-    const head = t => `<tr class="fd-sec"><th colspan="6">${t}</th></tr>`;
-    modal(`Portal sheet — GSTR-3B ${label} — ${x.c.name}`, `<p class="small muted">Figures as per the verified draft 3B, rounded to rupees, in GST portal order. Click a figure to copy it. Check against the portal's auto-filled values before submitting.</p>
-      <div class="table-wrap"><table class="fd-sheet"><thead><tr><th>Table</th><th class="r">Taxable value</th><th class="r">IGST</th><th class="r">CGST</th><th class="r">SGST/UTGST</th><th class="r">Cess</th></tr></thead><tbody>
-        ${head('3.1 Outward and inward supplies liable to reverse charge')}
-        ${line('(a) Outward taxable supplies (other than zero / nil / exempt)', 'a')}${line('(b) Outward taxable supplies (zero rated)', 'b', { ig: true })}
-        ${line('(c) Other outward supplies (nil rated, exempted)', 'c', { noTax: true })}${line('(d) Inward supplies (liable to reverse charge)', 'd')}${line('(e) Non-GST outward supplies', 'e', { noTax: true })}
-        ${head('4 Eligible ITC')}
-        ${line('A(1) Import of goods', 'imp', { noT: true })}${line('A(3) Inward supplies liable to reverse charge', 'd', { noT: true })}${line('A(4) Inward supplies from ISD', 'isd', { noT: true })}${line('A(5) All other ITC', 'a5', { noT: true })}
-        ${line('B(1) Reversed — Rules 38, 42, 43 and Sec 17(5)', 'B1', { noT: true })}${line('B(2) Reversed — others', 'B2', { noT: true })}
-        ${line('C Net ITC available (A − B)', 'C', { noT: true })}${line('D(1) ITC reclaimed (reversed earlier)', 'D1', { noT: true })}${line('D(2) Ineligible ITC — Sec 16(4) and place of supply', 'D2', { noT: true })}
-        ${head('6.1 Payment of tax — cash')}
-        ${line('Tax to be paid in cash', 'cash', { noT: true })}
-      </tbody></table></div>
-      <p class="small muted">3.1.1 (e-commerce), 3.2 (inter-state supplies to unregistered / composition / UIN) and 5 (exempt inward) are not in the tracker — check them on the portal.${x.paid ? ` Payment recorded: ${esc(x.pay.challan || '')}.` : ''}</p>`, { wide: true });
-    $$('.copy-n').forEach(b => b.onclick = () => navigator.clipboard.writeText(b.dataset.cp).then(() => { toast('Copied ' + b.dataset.cp); b.classList.add('flash-ok'); }));
-  }
 };
+// v57: payment window and 3B portal sheet — used by the Filing desk and by GST review → GSTR-3B step 5
+function fdPayModal(x, label, ym, done) {
+  const c0 = ((x.g || {}).summary || {}).cash || {}, p = x.pay || {}, due = (gstPayDue(x.c, ym) || {}).due || x.t.due_date || null;
+  const ch = String(p.challan || ''), cpin = (ch.match(/CPIN[:\s]*(\S+)/i) || [])[1] || (!/CIN/i.test(ch) ? ch : ''), cin = (ch.match(/\bCIN[:\s]*(\S+)/i) || [])[1] || '';
+  modal(`GSTR-3B ${label} payment — ${x.c.name}`, `<p class="small muted">Cash to pay as per the verified draft 3B: <b>${inr(x.cash)}</b> (IGST ${inr(c0.ig)} · CGST ${inr(c0.cg)} · SGST ${inr(c0.sg)}${num(c0.cs) ? ' · Cess ' + inr(c0.cs) : ''})</p>
+    <div class="form-grid"><label>Paid on<input type="date" name="on" value="${esc(p.paid_on || today())}"></label>
+      <label>Amount paid (₹)<input type="number" name="amt" value="${esc(p.paid_amount ?? x.cash)}"></label>
+      <label>CPIN<input name="cpin" value="${esc(cpin)}" placeholder="14-digit CPIN"></label><label>CIN (after payment)<input name="cin" value="${esc(cin)}" placeholder="e.g. HDFC26110000123"></label>
+      <label class="full">Remarks<input name="rm" value="${esc(p.remarks || '')}"></label></div>`, {
+    extra: p.paid_on ? '<button class="btn danger" data-unpay>Not paid</button>' : '',
+    onSave: async el => {
+      const amt = num(fv(el, 'amt')), cp = fv(el, 'cpin').trim(), ci = fv(el, 'cin').trim();
+      if (!cp && !ci) throw new Error('Enter the CPIN or the CIN of the challan');
+      if (amt + 1 < x.cash && !confirm(`Paid ${inr(amt)} is less than the ${inr(x.cash)} to pay. Save anyway?`)) return false;
+      await must(sb.from('tax_intimations').upsert({ client_id: x.c.id, kind: 'GST', period: label, due_date: due, amounts: { ig: Math.round(num(c0.ig)), cg: Math.round(num(c0.cg)), sg: Math.round(num(c0.sg)), cs: Math.round(num(c0.cs)) }, total: x.cash,
+        paid_on: fv(el, 'on') || today(), paid_amount: amt, challan: [cp && 'CPIN ' + cp, ci && 'CIN ' + ci].filter(Boolean).join(' · '), remarks: fv(el, 'rm') || null }, { onConflict: 'client_id,kind,period' }));
+      toast('Payment saved — the GSTR-3B can be filed now'); done();
+    } });
+  const un = $('[data-unpay]'); if (un) un.onclick = async () => { try { await must(sb.from('tax_intimations').update({ paid_on: null, paid_amount: null }).eq('id', p.id)); un.closest('.modal-back').remove(); done(); } catch (err) { toast(friendly(err), true); } };
+}
+function fdPortalSheet(x, label) {
+  const T = ((x.g || {}).summary || {}).t3b;
+  if (!T || !Object.keys(T).length) { toast('Open this month in GST review once (it saves the 3B figures), then try again', true); return; }
+  const Z = { t: 0, ig: 0, cg: 0, sg: 0, cs: 0 }, R = k => T[k] || Z;
+  const cell = (v, nt) => nt ? '<td></td>' : `<td class="r"><button class="link copy-n" data-cp="${Math.round(v) || 0}" title="Copy">${(Math.round(v) || 0).toLocaleString('en-IN')}</button></td>`;
+  const line = (lbl, k, opt = {}) => { const v = R(k); return `<tr><td class="wrap">${lbl}</td>${cell(v.t, opt.noT)}${cell(v.ig, opt.noTax)}${opt.ig ? '<td></td><td></td>' : `${cell(v.cg, opt.noTax)}${cell(v.sg, opt.noTax)}`}${cell(v.cs, opt.noTax)}</tr>`; };
+  const head = t => `<tr class="fd-sec"><th colspan="6">${t}</th></tr>`;
+  modal(`Portal sheet — GSTR-3B ${label} — ${x.c.name}`, `<p class="small muted">Figures as per the verified draft 3B, rounded to rupees, in GST portal order. Click a figure to copy it. Check against the portal's auto-filled values before submitting.</p>
+    <div class="table-wrap"><table class="fd-sheet"><thead><tr><th>Table</th><th class="r">Taxable value</th><th class="r">IGST</th><th class="r">CGST</th><th class="r">SGST/UTGST</th><th class="r">Cess</th></tr></thead><tbody>
+      ${head('3.1 Outward and inward supplies liable to reverse charge')}
+      ${line('(a) Outward taxable supplies (other than zero / nil / exempt)', 'a')}${line('(b) Outward taxable supplies (zero rated)', 'b', { ig: true })}
+      ${line('(c) Other outward supplies (nil rated, exempted)', 'c', { noTax: true })}${line('(d) Inward supplies (liable to reverse charge)', 'd')}${line('(e) Non-GST outward supplies', 'e', { noTax: true })}
+      ${head('4 Eligible ITC')}
+      ${line('A(1) Import of goods', 'imp', { noT: true })}${line('A(3) Inward supplies liable to reverse charge', 'd', { noT: true })}${line('A(4) Inward supplies from ISD', 'isd', { noT: true })}${line('A(5) All other ITC', 'a5', { noT: true })}
+      ${line('B(1) Reversed — Rules 38, 42, 43 and Sec 17(5)', 'B1', { noT: true })}${line('B(2) Reversed — others', 'B2', { noT: true })}
+      ${line('C Net ITC available (A − B)', 'C', { noT: true })}${line('D(1) ITC reclaimed (reversed earlier)', 'D1', { noT: true })}${line('D(2) Ineligible ITC — Sec 16(4) and place of supply', 'D2', { noT: true })}
+      ${head('6.1 Payment of tax — cash')}
+      ${line('Tax to be paid in cash', 'cash', { noT: true })}
+    </tbody></table></div>
+    <p class="small muted">3.1.1 (e-commerce), 3.2 (inter-state supplies to unregistered / composition / UIN) and 5 (exempt inward) are not in the tracker — check them on the portal.${x.paid ? ` Payment recorded: ${esc(x.pay.challan || '')}.` : ''}</p>`, { wide: true });
+  $$('.copy-n').forEach(b => b.onclick = () => navigator.clipboard.writeText(b.dataset.cp).then(() => { toast('Copied ' + b.dataset.cp); b.classList.add('flash-ok'); }));
+}
 async function route() {
   if (!me) return;
   GAME.bar();
@@ -4898,7 +4899,7 @@ VIEWS.inbox = async v => {
         b.disabled = true; b.textContent = 'Opening…';
         const files = await Promise.all((all ? bf : [m.files[+b.dataset.rb]]).map(x => openMailFile(x.path, true)));
         pendingGstImport = { client: fcid, month: m.period.slice(0, 7), kind: 'bills', files, mailId: m.id };
-        grClient = fcid; grMonth = m.period.slice(0, 7); grTab = 'recon'; grOv = false;
+        grClient = fcid; grMonth = m.period.slice(0, 7); grTab = 'recon'; grOv = false; grPos = null;
         location.hash = '#/gst';
       }
       if (b.dataset.imp) {
@@ -4911,7 +4912,7 @@ VIEWS.inbox = async v => {
         const file = await openMailFile(f.path, true);
         const icid = mailFileClient(m, f);
         pendingGstImport = { client: icid, month: m.period.slice(0, 7), kind, file, mailId: m.id };
-        grClient = icid; grMonth = m.period.slice(0, 7); grTab = kind === 'sales' ? 'g1' : 'recon'; grOv = false;
+        grClient = icid; grMonth = m.period.slice(0, 7); grTab = kind === 'sales' ? 'g1' : 'recon'; grOv = false; grPos = null;
         location.hash = '#/gst';
       }
     } catch (err) { toast(friendly(err), true); b.disabled = false; }
@@ -4983,6 +4984,7 @@ const prevMonth = () => { const d = new Date(); d.setDate(1); d.setMonth(d.getMo
 const periodToMonth = p => { const m = String(p || '').match(/([A-Za-z]{3})[a-z]*[\s-]+(\d{4})/); if (!m) return ''; const i = MONTHS.findIndex(x => x.toLowerCase() === m[1].toLowerCase()); return i < 0 ? '' : `${m[2]}-${pad(i + 1)}`; };
 const gTax = o => GR.tax(o || {});
 const gst$ = n => inr(Math.round(n || 0));
+let grPos = null, grLastStep = {}, grPayX = null;   // v57: open return + step in GST review
 let grOv = true, gr3Last = 's2', grClient = '', grMonth = prevMonth(), grTab = 'g1', grRecFilter = 'books_only', grRecView = 'inv', grImsF = 'all';
 
 VIEWS.gst = async v => {
@@ -4992,7 +4994,7 @@ VIEWS.gst = async v => {
     <div id="grBody"><div class="loading">Loading…</div></div>`;
   const pickers = () => `<label>Client<select id="grC">${gClients.length ? opts(gClients, grClient, c => `${c.name} · ${c.gstin}`, c => c.id) : '<option value="">No GST clients</option>'}</select></label>
       <label>Month<input type="month" id="grM" value="${esc(grMonth)}"></label>`;
-  const bindPickers = el => { const a = $('#grC', el), b = $('#grM', el); if (a) a.onchange = e => { grClient = e.target.value; grRecFilter = ''; route(); }; if (b) b.onchange = e => { grMonth = e.target.value || prevMonth(); grRecFilter = ''; route(); }; };
+  const bindPickers = el => { const a = $('#grC', el), b = $('#grM', el); if (a) a.onchange = e => { grClient = e.target.value; grRecFilter = ''; grOv = true; grPos = null; grLastStep = {}; route(); }; if (b) b.onchange = e => { grMonth = e.target.value || prevMonth(); grRecFilter = ''; grOv = true; grPos = null; grLastStep = {}; route(); }; };
   const body = $('#grBody', v);
   if (!grClient) { body.innerHTML = '<div class="card"><p class="muted">Add a GSTIN to a client (Clients → Edit) to start.</p></div>'; return; }
   const c = clientById(grClient), period = grMonth + '-01';
@@ -5082,14 +5084,12 @@ VIEWS.gst = async v => {
       const si = L.findIndex(x => x.l === 'Sent for verification'); if (RS === 'changes') { L[si].bad = true; L[si].l = 'Changes needed'; L[si].d = false; L.forEach(x => { if (x !== L[si]) x.cur = false; }); L[si].cur = true; }
       return L; };
     FL.gstr1 = mk([['Data received', row.sales || row.g1], ['Workings done', ok('s1') || (row.g1 && (row.g1.sales || []).length)], ['Sent for verification', SENT.includes(a.RS)], ['Verified — ready to file', OKD.includes(a.RS)], ['Filed', a.filed]], a.RS);
-    FL.gstr3b = mk([['Data received', row.purchases || row.gstr2b], ['2B complete', G3gate.ok], ['Workings done', ok('s3')], ['Sent for verification', SENT.includes(b.RS)], ['Verified — ready to file', OKD.includes(b.RS)], ['Filed', b.filed]], b.RS);
+    FL.gstr3b = mk([['Data received', row.purchases || row.gstr2b], ['2B complete', G3gate.ok], ['Workings done', ok('s3')], ['Sent for verification', SENT.includes(b.RS)], ['Payment & ready to file', OKD.includes(b.RS)], ['Filed', b.filed]], b.RS);
   }
   const flowNow = k => { const L = FL[k], cur = L.find(x => x.cur); return cur ? [cur.bad ? 'Changes needed' : (cur.l === 'Filed' ? 'Ready to file' : 'Next: ' + cur.l), cur.bad ? 'bad' : cur.l === 'Filed' ? 'ok' : 'info'] : ['Filed ✓', 'ok']; };
   const flowHtml = (k, small) => `<ol class="rf ${small ? 'rf-sm' : ''}" aria-label="${REV.KIND[k].label} status">${FL[k].map((x, i) => `<li class="${x.d ? 'done' : ''} ${x.cur ? 'cur' : ''} ${x.bad ? 'bad' : ''}" ${x.cur ? 'aria-current="step"' : ''}><span class="rf-n">${x.d ? '✓' : x.bad ? '!' : i + 1}</span>${esc(x.l)}</li>`).join('')}</ol>`;
   const retTabs = on => { const t = k => { const [l, tone] = flowNow(k); return `<span class="grt-p ${tone}">${esc(l)}</span>`; };
-    return `<nav class="grt" aria-label="Returns"><button class="grt-b ${on === 'ov' ? 'on' : ''}" data-ov ${on === 'ov' ? 'aria-current="page"' : ''}><b>Overview</b><span class="grt-p">Both returns</span></button>
-      <button class="grt-b ${on === 'gstr1' ? 'on' : ''}" data-go="s1" ${on === 'gstr1' ? 'aria-current="page"' : ''}><b>GSTR-1</b>${t('gstr1')}</button>
-      <button class="grt-b ${on === 'gstr3b' ? 'on' : ''}" data-go="${gr3Last}" ${on === 'gstr3b' ? 'aria-current="page"' : ''}><b>GSTR-3B</b>${t('gstr3b')}</button></nav>`; };
+    return `<nav class="grt grt2" aria-label="Returns">${['gstr1', 'gstr3b'].map(k => `<button class="grt-b ${on === k ? 'on' : ''}" data-ret="${k}" ${on === k ? 'aria-current="page"' : ''}><b>${REV.KIND[k].label}</b>${t(k)}</button>`).join('')}</nav>`; };
   async function render() {
     if (!recoHist) { body.innerHTML = '<div class="loading">Loading…</div>'; await loadHist(); }
     const sm = gsum(row), M = meth(), st = itcState(sm), D3 = draft3b(row, sm, c, st.ready ? st.cl.claim : null), mLabel = (() => { const [y, m] = grMonth.split('-'); return `${MONTHS_FULL[+m - 1]} ${y}`; })();
@@ -5109,46 +5109,102 @@ VIEWS.gst = async v => {
       ${REV.KINDS.some(k => revs[k] && revs[k].state !== 'draft') ? REV.KINDS.filter(k => revs[k] && revs[k].state !== 'draft').map(k => `<span class="pill ${REV.STATE[revs[k].state][1]}">${REV.KIND[k].label}: ${REV.STATE[revs[k].state][0]}</span>`).join(' ') : row.status === 'Verified' ? `<span class="st st-filed">✓ Verified · ${esc(profName(row.verified_by) || '')}</span>` : '<span class="st st-pending-data">Draft</span>'}
       <span class="spacer"></span><button class="btn sm" data-portal-api>Fetch from GST portal</button><a class="btn sm" href="#/clientreport" data-crgo>Client report</a>
       ${isManager() ? (row.status === 'Verified' ? '<button class="btn sm" id="grUnver">Back to draft</button>' : '<button class="btn sm primary" id="grVer">✓ Mark as verified</button>') : ''}</div>`;
-    if (grOv) { body.innerHTML = head + retTabs('ov') + overviewHtml(sm, st, D3, stat, mLabel); bindPickers(body); return; }
-    const sNow = stepFor(grTab), chk = stepOf(sNow), RET = sNow === 's1' ? 'gstr1' : 'gstr3b';
-    if (RET === 'gstr3b') gr3Last = sNow;
-    const S3 = STEPS.slice(1), si = S3.findIndex(s => s[0] === sNow);
-    const inner = RET === 'gstr3b' ? `<nav class="grs grs3" aria-label="GSTR-3B steps">${S3.map(([k, l], i) => { const [t, tone] = stat[k];
-      return `<button class="grs-s ${k === sNow ? 'on' : ''} ${tone}" data-go="${k}" ${k === sNow ? 'aria-current="step"' : ''}><span class="grs-n">${tone === 'ok' ? '✓' : i + 1}</span><span><b>${i + 1} · ${k === 's4' ? 'Check' : l}</b><small>${esc(t)}</small></span></button>`; }).join('')}</nav>` : '';
-    const lock = RET === 'gstr3b' && !G3gate.ok && !SENT.includes((revs.gstr3b || {}).state) ? `<div class="rf-lock" role="note"><b>Send for verification is locked until 2B is complete.</b> You can still work on purchases and the draft 3B. ${G3gate.why.map(esc).join(' · ')}</div>` : '';
-    const bar = retTabs(RET) + `<section class="rf-w"><div class="rf-h"><h2>${RET === 'gstr1' ? 'GSTR-1 workspace' : 'GSTR-3B workspace'}</h2><span class="muted small">${RET === 'gstr1' ? 'Sales register, GSTR-1 entry, portal draft — verify, then file' : 'Purchases, 2B reco, ITC, draft 3B — verify after 2B, then file'}</span></div>${flowHtml(RET)}${lock}</section>` + inner;
-    const SUBS = { s1: [['g1', 'Our working (GSTR-1 entry)'], ['g1f', 'Filed — portal summary']],
-      s2: [['recon', M === '2b_confirm' ? 'Client confirms 2B' : '2B vs Books'], M !== '2b_confirm' && ['pur', 'Books (purchase register)'], ['b2b', 'GSTR-2B'], M !== '2b_confirm' && ['sup', `Supplier follow-up${st.sup.length ? ' · ' + st.sup.length : ''}`], ['ims', 'IMS actions']].filter(Boolean),
-      s3: [], s4: [['checks', 'GSTR-1 vs 3B checks'], ['trend', 'Last 6 months']] }[sNow];
+    // ===== v57: no Overview — two tabs (GSTR-1 · GSTR-3B), each one step at a time. Click a step in the progress line to open it. =====
+    const STEPDEF = {
+      gstr1: [{ key: 'g1d', subs: [] }, { key: 'g1', subs: [] }, { key: 'g1v', subs: [] }, { key: 'g1u', subs: [] }, { key: 'g1f', subs: [] }],
+      gstr3b: [{ key: 'pur', subs: [M !== '2b_confirm' && ['pur', 'Books (purchase register)'], ['b2b', 'GSTR-2B']].filter(Boolean) },
+        { key: 'recon', subs: [['recon', M === '2b_confirm' ? 'Client confirms 2B' : '2B vs Books'], M !== '2b_confirm' && ['sup', `Supplier follow-up${st.sup.length ? ' · ' + st.sup.length : ''}`], ['ims', 'IMS actions']].filter(Boolean) },
+        { key: 'draft', subs: [['draft', 'Draft GSTR-3B'], ['checks', 'GSTR-1 vs 3B checks'], ['trend', 'Last 6 months']] },
+        { key: 'g3v', subs: [] }, { key: 'g3p', subs: [] }, { key: 'g3f', subs: [] }] };
+    const curNo = k => { const i = FL[k].findIndex(x => x.cur); return i >= 0 ? i + 1 : FL[k].length; };
+    if (grOv || !grPos) {
+      if (grOv) { const t1 = taskOf('gstr1'); grPos = (t1 && t1.status === 'Filed') || (revs.gstr1 && revs.gstr1.state === 'sent_client') ? { ret: 'gstr3b', s: curNo('gstr3b') } : { ret: 'gstr1', s: curNo('gstr1') }; grTab = ''; }
+      else { const P0 = { g1d: ['gstr1', 1], g1: ['gstr1', 2], g1v: ['gstr1', 3], g1u: ['gstr1', 4], g1f: ['gstr1', 5], pur: ['gstr3b', 1], b2b: ['gstr3b', 1], recon: ['gstr3b', 2], sup: ['gstr3b', 2], ims: ['gstr3b', 2], draft: ['gstr3b', 3], checks: ['gstr3b', 3], trend: ['gstr3b', 3], g3v: ['gstr3b', 4], g3p: ['gstr3b', 5], g3f: ['gstr3b', 6] }[grTab] || ['gstr1', 1];
+        grPos = { ret: P0[0], s: P0[1] }; }
+      grOv = false;
+    }
+    const RET = grPos.ret, SN = Math.min(Math.max(grPos.s, 1), STEPDEF[RET].length), SD = STEPDEF[RET][SN - 1];
+    grLastStep[RET] = SN;
+    if (SD.subs.length ? !SD.subs.some(x => x[0] === grTab) : grTab !== SD.key) grTab = SD.subs.length ? SD.subs[0][0] : SD.key;
+    const flowNav = k => `<ol class="rf rf-nav" aria-label="${REV.KIND[k].label} steps">${FL[k].map((x, i) => { const on = k === RET && i + 1 === SN;
+      return `<li class="${x.d ? 'done' : ''} ${x.cur ? 'cur' : ''} ${x.bad ? 'bad' : ''} ${on ? 'sel' : ''}"><button type="button" data-rs="${k}:${i + 1}" ${on ? 'aria-current="step"' : ''}><span class="rf-n">${x.d ? '✓' : x.bad ? '!' : i + 1}</span>${esc(x.l)}</button></li>`; }).join('')}</ol>`;
+    const myTodo = todoOf(sm, st, stat).filter(t => t[1] === RET);
+    const lock = RET === 'gstr3b' && !G3gate.ok && !SENT.includes((revs.gstr3b || {}).state) && SN <= 4 ? `<div class="rf-lock" role="note"><b>Send for verification is locked until 2B is complete.</b> You can still work on purchases and the draft 3B. ${G3gate.why.map(esc).join(' · ')}</div>` : '';
+    const bar = retTabs(RET) + `<section class="rf-w"><div class="rf-h"><h2>${RET === 'gstr1' ? 'GSTR-1 workspace' : 'GSTR-3B workspace'}</h2><span class="muted small">Click a step to open it</span></div>${flowNav(RET)}${lock}
+      ${myTodo.length ? `<div class="gr-todo" aria-label="To do">${myTodo.slice(0, 4).map(t => `<button class="gr-todo-i" data-rs="${t[1]}:${t[2]}" ${t[3] ? `data-rf2="${t[3]}"` : ''}><span>${esc(t[0])}</span><span aria-hidden="true">›</span></button>`).join('')}</div>` : ''}</section>`;
     const myRules = grRules.filter(r => r.client_id === c.id && r.active !== false).length;
-    const chips = {
-      s1: chip('sales', 'Sales register', S, S ? `${S.rows.length} docs · tax ${gst$(gTax(sm.out))}` : '', `<button class="btn sm" data-up="sales">${S ? 'Replace' : 'Upload'}</button><button class="link small" data-tpl="sales">Template</button>`)
-        + chip('gstr1', 'GSTR-1 filed', G1f, G1f ? (G1f.source === 'working' ? 'copied from our working' : /^(api|portal)$/.test(G1f.source) ? 'from portal' : 'typed in') + ` · tax ${gst$(gTax(G1f))}` : '', `<button class="btn sm" data-portal-api="g1">Fetch</button>${S ? '<button class="btn sm" data-g1copy>Same as working</button>' : ''}<button class="link small" data-ent="gstr1">Type in</button>`),
-      s2: (M === '2b_confirm' ? '' : chip('purchases', 'Purchase register', P, P ? `${P.rows.length} bills · ITC ${gst$(gTax(sm.itcBooks))}` : '', `<button class="btn sm" data-up="purchases">${P ? 'Replace' : 'Upload'}</button><button class="btn sm" data-bills>Read bills</button><button class="link small" data-tpl="purchases">Template</button>`))
-        + chip('gstr2b', 'GSTR-2B', B, B ? `${B.rows.length} bills · ITC ${gst$(gTax(sm.itc2b))}` : '', `<button class="btn sm" data-up="gstr2b">${B ? 'Replace' : 'Upload'}</button><button class="link small" data-portal-api>Fetch from portal</button>`)
-        + `<div class="grc meta"><div class="grc-b"><small>ITC method</small><b>${ITCM[M][0]}</b></div><div class="grc-a"><button class="link small" data-itcm>Change</button></div></div>
-           <div class="grc meta"><div class="grc-b"><small>Client rules</small><b>${myRules}</b></div><div class="grc-a"><button class="link small" data-rules>Open</button></div></div>`,
-      s3: chip('gstr3b', 'GSTR-3B filed', G3, G3 ? `cash ${gst$(gTax(G3.cash))} · ITC ${gst$(gTax(G3.itc_net))}` : '', `<button class="btn sm" data-portal-api>Fetch</button><button class="link small" data-ent="gstr3b">Type in</button>`),
-      s4: '' }[sNow];
-    body.innerHTML = head + bar + `<section class="card grs-body">
-        ${chips ? `<div class="grcs">${chips}</div>` : ''}
-        ${SUBS.length ? `<div class="seg grs-sub" role="tablist">${SUBS.map(([k, l]) => `<button role="tab" aria-selected="${grTab === k}" class="${grTab === k ? 'on' : ''}" data-gt="${k}">${l}</button>`).join('')}</div>` : ''}
-        <div id="grOut"></div>
-        ${sNow === 's1' ? revPanel('gstr1') : ''}
-        ${RET === 'gstr3b' && sNow !== 's4' ? revPanel('gstr3b') : ''}
-        ${sNow === 's4' ? `<div class="gr-verify"><label class="full">Review notes<textarea id="grNotes" rows="3" placeholder="e.g. Reversed ITC on 2 invoices missing in 2B; client informed">${esc(row.notes || '')}</textarea></label>
-          <div class="toolbar" style="margin:8px 0 0"><button class="btn sm" id="grSaveNotes">Save notes</button><span class="spacer"></span>
-          ${isManager() && !(revs.gstr3b && ['sent', 'approved', 'sent_client'].includes(revs.gstr3b.state)) ? (row.status === 'Verified' ? '<button class="btn sm" id="grUnver">Back to draft</button>' : '<button class="btn sm" id="grVer" title="Without sending to the senior">Mark as verified here</button>') : ''}</div></div>
-          ${revPanel('gstr3b')}` : ''}
-      </section>
-      <div class="grs-nav">${RET === 'gstr1' ? '<button class="btn" data-ov>← Overview</button>' : si > 0 ? `<button class="btn" data-go="${S3[si - 1][0]}">← ${S3[si - 1][1]}</button>` : '<button class="btn" data-go="s1">← GSTR-1</button>'}
-        <span class="spacer"></span><label class="check small grs-chk"><input type="checkbox" data-step="${sNow}" ${chk && chk.ok ? 'checked' : ''}> ${sNow === 's1' ? 'GSTR-1 workings done' : sNow === 's3' ? 'GSTR-3B workings done' : 'Step checked'}${chk && chk.ok ? ` <span class="muted">· ${esc(profName(chk.by) || '')}</span>` : ''}</label>
-        ${RET === 'gstr1' ? '<button class="btn primary" data-go="s2">Next: GSTR-3B →</button>' : si < S3.length - 1 ? `<button class="btn primary" data-go="${S3[si + 1][0]}">Next: ${S3[si + 1][0] === 's4' ? 'Check' : S3[si + 1][1]} →</button>` : '<button class="btn primary" data-ov>Done — overview</button>'}</div>`;
+    const okRev = k => !!(revs[k] && ['approved', 'sent_client'].includes(revs[k].state));
+    const srName = (REV.senior() || {}).full_name || 'the senior', dt = d => d ? new Date(d).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' }) : '';
+    const tickRow = (key, label) => { const t = (row.reco || {})[key]; return `<label class="check small"><input type="checkbox" data-tick="${key}" ${t ? 'checked' : ''}> ${label}${t ? ` <span class="muted">· ${esc(profName(t.by) || '')} ${dt(t.at)}</span>` : ''}</label>`; };
+    const whoFiles = k => { const tk = taskOf(k); return tk && tk.status !== 'Filed' ? `<label class="small">Who files<select data-readyby="${tk.id}">${READY_BY.map(([v, l]) => `<option value="${v}" ${(tk.ready_by || 'us') === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>` : ''; };
+    const salesChip = chip('sales', 'Sales register', S, S ? `${S.rows.length} docs · tax ${gst$(gTax(sm.out))}` : '', `<button class="btn sm" data-up="sales">${S ? 'Replace' : 'Upload'}</button><button class="link small" data-tpl="sales">Template</button>`);
+    const g1fChip = chip('gstr1', 'GSTR-1 filed figures', G1f, G1f ? (G1f.source === 'working' ? 'copied from our working' : /^(api|portal)$/.test(G1f.source) ? 'from portal' : 'typed in') + ` · tax ${gst$(gTax(G1f))}` : '', `<button class="btn sm" data-portal-api="g1">Fetch</button>${S || row.g1 ? '<button class="btn sm" data-g1copy>Same as working</button>' : ''}<button class="link small" data-ent="gstr1">Type in</button>`);
+    const g3fChip = chip('gstr3b', 'GSTR-3B filed figures', G3, G3 ? `cash ${gst$(gTax(G3.cash))} · ITC ${gst$(gTax(G3.itc_net))}` : '', `<button class="btn sm" data-portal-api>Fetch</button><button class="link small" data-ent="gstr3b">Type in</button>`);
+    let content = '', checkLbl = '';
+    if (RET === 'gstr1') {
+      if (SN === 1) {
+        const ev = (row.reco || {}).einv, W1 = row.g1 && (row.g1.sales || []).length ? G1.summary(row.g1, c).tables : null;
+        const wB2B = W1 ? ['B2B', 'SEZ', 'EXP'].reduce((z, n) => { if (W1[n]) H5.forEach(k => z[k] = GR.r2(z[k] + (+W1[n][k] || 0))); return z; }, { t: 0, ig: 0, cg: 0, sg: 0, cs: 0 }) : null;
+        const cmpT = ev && wB2B ? GR.r2(wB2B.t - ev.t) : null, cmpX = ev && wB2B ? GR.r2(gTax(wB2B) - gTax(ev)) : null;
+        content = `<div class="grcs">${salesChip}
+          <div class="grc ${ev ? 'ok' : ''}"><span class="grc-i" aria-hidden="true">${ev ? '✓' : '○'}</span><div class="grc-b"><b>E-invoice (from GST portal)</b><small>${ev ? `${ev.n || 0} invoices · taxable ${gst$(ev.t)} · tax ${gst$(gTax(ev))}` : 'Totals only — not added'}</small></div>
+            <div class="grc-a"><button class="btn sm" data-einv>${ev ? 'Edit totals' : 'Enter totals'}</button>${ev ? '<button class="link small danger-t" data-einvclr>Remove</button>' : ''}</div></div></div>
+          ${ev ? (wB2B ? `<p class="small ${Math.abs(cmpT) > 1 || Math.abs(cmpX) > 1 ? 'late' : 'ok-t'}" style="margin:8px 0 0">${Math.abs(cmpT) > 1 || Math.abs(cmpX) > 1 ? `E-invoice vs our workings (B2B + SEZ + exports): taxable differs by ${gst$(cmpT)}, tax by ${gst$(cmpX)} — check before step 2.` : 'E-invoice totals match our workings (B2B + SEZ + exports) ✓'}</p>`
+            : '<p class="muted small" style="margin:8px 0 0">E-invoice totals are compared with the workings once the sales rows are saved.</p>') : ''}
+          <div id="grOut" style="margin-top:12px"></div>`;
+      } else if (SN === 2) { content = '<div id="grOut"></div>'; checkLbl = 'GSTR-1 workings done'; }
+      else if (SN === 3) content = '<div id="grOut"></div>' + revPanel('gstr1', 'verify');
+      else if (SN === 4) {
+        const up = (row.reco || {}).g1up;
+        content = `<div class="${okRev('gstr1') ? 'gr-okline' : 'note warn small'}">${okRev('gstr1') ? `✓ Verified by ${esc(srName)}${revs.gstr1.decided_at ? ' on ' + dt(revs.gstr1.decided_at) : ''} — status: <b>Ready to file</b>` : 'Not verified yet — send GSTR-1 for verification in step 3. You can still download the JSON to check it on the portal.'}</div>
+          <section class="gr-box"><h3>Upload to portal</h3><p class="muted small">Download the GSTR-1 JSON, then on the GST portal: Returns → GSTR-1 → <b>Prepare offline</b> → Upload. Wait for “processed”, check the portal summary against step 3, then tick.</p>
+            <div class="toolbar"><button class="btn ${okRev('gstr1') ? 'primary' : ''}" data-g1jsondl>Download GSTR-1 JSON</button>${tickRow('g1up', 'Uploaded to portal')}<span class="spacer"></span>${whoFiles('gstr1')}</div></section>`;
+      } else content = `<div class="grcs">${g1fChip}</div>${revPanel('gstr1', 'file')}<div id="grOut" style="margin-top:12px"></div>`;
+    } else {
+      if (SN === 1) {
+        const g1src = row.g1 && (row.g1.sales || []).length ? 'GSTR-1 workings' : S ? 'sales register' : '';
+        content = `<div class="grcs">${M === '2b_confirm' ? '' : chip('purchases', 'Purchase register', P, P ? `${P.rows.length} bills · ITC ${gst$(gTax(sm.itcBooks))}` : '', `<button class="btn sm" data-up="purchases">${P ? 'Replace' : 'Upload'}</button><button class="btn sm" data-bills>Read bills</button><button class="link small" data-tpl="purchases">Template</button>`)}
+          ${chip('gstr2b', 'GSTR-2B', B, B ? `${B.rows.length} bills · ITC ${gst$(gTax(sm.itc2b))}` : '', `<button class="btn sm" data-up="gstr2b">${B ? 'Replace' : 'Upload'}</button><button class="link small" data-portal-api>From JLR GST helper</button>`)}
+          <div class="grc meta ${g1src ? 'ok' : ''}"><div class="grc-b"><small>Sales (outward)</small><b>${g1src ? 'From ' + g1src : 'From GSTR-1'}</b><small>${g1src ? `taxable ${gst$(sm.out.t)} · tax ${gst$(gTax(sm.out))}` : 'Add GSTR-1 data first'}</small></div><div class="grc-a"><button class="link small" data-rs="gstr1:${g1src ? 2 : 1}">Open</button></div></div>
+          <div class="grc meta"><div class="grc-b"><small>ITC method</small><b>${ITCM[M][0]}</b></div><div class="grc-a"><button class="link small" data-itcm>Change</button></div></div>
+          <div class="grc meta"><div class="grc-b"><small>Client rules</small><b>${myRules}</b></div><div class="grc-a"><button class="link small" data-rules>Open</button></div></div></div>`;
+      } else if (SN === 2) { content = `<p class="${G3gate.ok ? 'gr-okline' : 'note warn small'}" style="margin:0 0 10px">${G3gate.ok ? '✓ 2B complete — GSTR-3B can go for verification' : '2B is not complete yet: ' + G3gate.why.map(esc).join(' · ')}</p>`; checkLbl = '2B reconciliation checked'; }
+      else if (SN === 3) checkLbl = 'GSTR-3B workings done';
+      else if (SN === 4) {
+        const T = t3bOf(D3), Z = { t: 0, ig: 0, cg: 0, sg: 0, cs: 0 }, R = k => T[k] || Z;
+        const tr = (l, x, noT) => `<tr><td>${l}</td><td class="r">${noT ? '' : gst$(x.t)}</td><td class="r">${gst$(x.ig)}</td><td class="r">${gst$(x.cg)}</td><td class="r">${gst$(x.sg)}</td><td class="r">${gst$(x.cs)}</td></tr>`;
+        content = `<h3 style="margin:0 0 6px">GSTR-3B — summary as per portal</h3><div class="table-wrap"><table class="gr-t"><thead><tr><th>Table</th><th class="r">Taxable</th><th class="r">IGST</th><th class="r">CGST</th><th class="r">SGST</th><th class="r">Cess</th></tr></thead><tbody>
+            ${tr('3.1(a) Outward taxable supplies', R('a'))}${R('b').t ? tr('3.1(b) Zero rated', R('b')) : ''}${R('d').t ? tr('3.1(d) Inward — reverse charge', R('d')) : ''}
+            ${tr('4(A) ITC available', ['imp', 'd', 'isd', 'a5'].reduce((z, k) => { H5.forEach(h => z[h] = GR.r2(z[h] + (+R(k)[h] || 0))); return z; }, { ...Z }), true)}
+            ${tr('4(B) ITC reversed', ['B1', 'B2'].reduce((z, k) => { H5.forEach(h => z[h] = GR.r2(z[h] + (+R(k)[h] || 0))); return z; }, { ...Z }), true)}
+            ${tr('4(C) Net ITC', R('C'), true)}<tr class="tot"><td><b>6.1 Tax to be paid in cash</b></td><td></td>${['ig', 'cg', 'sg', 'cs'].map(h => `<td class="r"><b>${gst$(R('cash')[h])}</b></td>`).join('')}</tr></tbody></table></div>
+          <p class="muted small">Full working in <button class="link" data-rs="gstr3b:3">step 3 · Draft GSTR-3B</button>.</p>
+          <div class="gr-verify"><label class="full">Review notes<textarea id="grNotes" rows="2" placeholder="e.g. Reversed ITC on 2 invoices missing in 2B; client informed">${esc(row.notes || '')}</textarea></label>
+            <div class="toolbar" style="margin:8px 0 0"><button class="btn sm" id="grSaveNotes">Save notes</button></div></div>${revPanel('gstr3b', 'verify')}`;
+      } else if (SN === 5) {
+        const tq = await safe(sb.from('tax_intimations').select('*').eq('client_id', c.id).eq('kind', 'GST').eq('period', monthLabel(grMonth)).maybeSingle());
+        const pay = tq.error ? null : tq.data, cash = gstCash({ ...(row.summary || {}) }) || D3.depositTotal, paid = !!(pay && pay.paid_on);
+        grPayX = { t: taskOf('gstr3b') || { return_name: 'GSTR-3B', period: monthLabel(grMonth), due_date: null }, c, g: { summary: { ...(row.summary || {}), t3b: (row.summary || {}).t3b || t3bOf(D3) } }, cash, pay, paid };
+        content = `<div class="${okRev('gstr3b') ? 'gr-okline' : 'note warn small'}">${okRev('gstr3b') ? `✓ Verified by ${esc(srName)}${revs.gstr3b.decided_at ? ' on ' + dt(revs.gstr3b.decided_at) : ''} — status: <b>${cash > 0 && !paid ? 'Payment pending' : 'Ready to file'}</b>` : 'Not verified yet — send GSTR-3B for verification in step 4 first.'}</div>
+          <div class="gr-2col"><section class="gr-box"><h3>Payment</h3>
+              ${cash > 0 ? `<p>Cash to deposit: <b>${gst$(cash)}</b></p><p class="small ${paid ? 'ok-t' : 'late'}">${paid ? `Paid on ${fmtDate(pay.paid_on)} · ${esc(pay.challan || '')}${pay.paid_amount ? ' · ' + gst$(pay.paid_amount) : ''}` : 'Not paid yet'}</p>
+                <div class="toolbar"><button class="btn ${paid ? '' : 'primary'}" data-g3pay>${paid ? 'Edit payment' : 'Enter challan (CPIN / CIN)'}</button></div>` : '<p class="ok-t">No cash to pay — the ITC covers the tax.</p>'}</section>
+            <section class="gr-box"><h3>On the portal</h3><p class="muted small">Enter the 3B figures on the portal (copy buttons per table) and offset the liability.</p>
+              <div class="toolbar"><button class="btn" data-g3sheet>Open portal sheet</button>${tickRow('g3up', 'Entered on portal')}</div></section></div>
+          <div class="toolbar">${whoFiles('gstr3b')}<span class="muted small">Once the challan is entered the status becomes Ready to file.</span></div>`;
+      } else content = `<div class="grcs">${g3fChip}</div>${revPanel('gstr3b', 'file')}`;
+      if (SD.subs.length) content += `<div class="seg grs-sub" role="tablist">${SD.subs.map(([k, l]) => `<button role="tab" aria-selected="${grTab === k}" class="${grTab === k ? 'on' : ''}" data-gt="${k}">${l}</button>`).join('')}</div><div id="grOut"></div>`;
+    }
+    const L = STEPDEF[RET].length, lab = i => FL[RET][i - 1] ? FL[RET][i - 1].l.replace(/ —.*/, '') : '';
+    body.innerHTML = head + bar + `<section class="card grs-body">${content}</section>
+      <div class="grs-nav">${SN > 1 ? `<button class="btn" data-rs="${RET}:${SN - 1}">← ${esc(lab(SN - 1))}</button>` : RET === 'gstr3b' ? `<button class="btn" data-rs="gstr1:${grLastStep.gstr1 || 1}">← GSTR-1</button>` : ''}
+        <span class="spacer"></span>${checkLbl ? (() => { const sk = RET === 'gstr1' ? 's1' : SN === 2 ? 's2' : 's3', ck = stepOf(sk); return `<label class="check small grs-chk"><input type="checkbox" data-step="${sk}" ${ck && ck.ok ? 'checked' : ''}> ${checkLbl}${ck && ck.ok ? ` <span class="muted">· ${esc(profName(ck.by) || '')}</span>` : ''}</label>`; })() : ''}
+        ${SN < L ? `<button class="btn primary" data-rs="${RET}:${SN + 1}">Next: ${esc(lab(SN + 1))} →</button>` : RET === 'gstr1' ? `<button class="btn primary" data-rs="gstr3b:${grLastStep.gstr3b || 1}">Go to GSTR-3B →</button>` : ''}</div>`;
     bindPickers(body);
     renderOut(sm, st);
   }
   // v36: one verification panel per return — GSTR-1 at the end of step 1, GSTR-3B in step 4
-  function revPanel(kind) {
+  function revPanel(kind, part = 'all') {
     const rev = revs[kind], K = REV.KIND[kind], sr = REV.senior(), RS = (rev && REV.STATE[rev.state] && rev.state) || 'draft', sn = esc(sr ? sr.full_name || sr.email : 'the senior');
     const sh = d => d ? new Date(d).toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' }) : '';
     const canDecide = (settings.senior_id && me.id === settings.senior_id) || isManager();
@@ -5174,8 +5230,18 @@ VIEWS.gst = async v => {
         <div class="toolbar">${ackBtn}${btn('client', 'Send acknowledgement &amp; workings to client', filed ? 'primary' : '')}${btn('wa', 'Telegram')}</div>`,
       sent_client: `<p class="ok-t"><b>${K.label} filed and sent to the client.</b></p><div class="toolbar">${btn('client', 'Send again to client')}${btn('wa', 'Telegram')}</div>`
     }[RS];
+    const remH = rem ? `<h4>Remarks</h4><ul class="rev-l">${rem}</ul>` : '', sentH = sent ? `<h4>Sent to the client</h4><ul class="rev-l">${sent}</ul>` : '';
+    if (part === 'verify' && ['approved', 'sent_client'].includes(RS))   // v57: verification step after approval — short note, filing is in the next steps
+      return `<section class="rev-p rev-${RS}" aria-label="${K.label} verification"><div class="rev-h"><h3>${K.label} — senior verification</h3><span class="pill ${REV.STATE[RS][1]}">${REV.STATE[RS][0]}</span></div>
+        <p class="ok-t"><b>Verified</b>${rev && rev.decided_at ? ' on ' + sh(rev.decided_at) : ''}${rev && rev.decided_via ? ` (${rev.decided_via === 'link' ? 'by link' : rev.decided_via === 'email' ? 'by email reply' : 'in the tracker'})` : ''}.</p>
+        <div class="toolbar"><button class="btn primary" data-rs="${kind}:${kind === 'gstr1' ? 4 : 5}">Next: ${kind === 'gstr1' ? 'upload to portal' : 'payment'} →</button></div>${remH}</section>`;
+    if (part === 'file')     // v57: Filed step — filed PDF (acknowledgement) + ARN, then one mail to the client with the workings and the filed PDF
+      return `<section class="rev-p rev-${RS}" aria-label="${K.label} filed"><div class="rev-h"><h3>${K.label} — filed PDF and client mail</h3>${filed ? '<span class="pill g">Filed</span>' : `<span class="pill ${REV.STATE[RS][1]}">${REV.STATE[RS][0]}</span>`}</div>
+        ${['approved', 'sent_client'].includes(RS) || filed ? '' : `<p class="note warn small">${K.label} is not verified by the senior yet.</p>`}
+        <p class="small">The <b>workings (Excel)</b> are attached automatically. Upload the <b>${K.label} filed PDF</b> from the portal (the acknowledgement) with the ARN — ${settings.auto_send_filed ? 'it then goes to the client with the workings by itself.' : 'then send both to the client.'}</p>
+        <div class="toolbar">${ackBtn}${btn('client', `Send to client — workings + filed PDF${kind === 'gstr3b' ? ' + challan' : ''}`, filed ? 'primary' : '')}${btn('wa', 'Telegram')}</div>${remH}${sentH}</section>`;
     return `<section class="rev-p rev-${RS}" aria-label="${K.label} verification"><div class="rev-h"><h3>${K.label} — senior verification</h3><span class="pill ${REV.STATE[RS][1]}">${REV.STATE[RS][0]}</span></div>${draftRow}${body}
-      ${rem ? `<h4>Remarks</h4><ul class="rev-l">${rem}</ul>` : ''}${sent ? `<h4>Sent to the client</h4><ul class="rev-l">${sent}</ul>` : ''}</section>`;
+      ${remH}${sentH}</section>`;
   }
   async function revAction(act, kind, btn) {
     const sm = gsum(row), st = itcState(sm), D3 = draft3b(row, sm, c, st.ready ? st.cl.claim : null), K = REV.KIND[kind], rev = revs[kind];
@@ -5214,51 +5280,30 @@ VIEWS.gst = async v => {
     finally { btn.disabled = false; btn.textContent = old; revs = await REV.load(c, period).catch(() => revs); }
     render();
   }
-  function overviewHtml(sm, st, D3, stat, mLabel) {
-    const S = row.sales, P = row.purchases, B = row.gstr2b, G3 = row.gstr3b, G1f = row.gstr1, M = meth();
-    const pill = ([t, tone]) => `<span class="gro-p ${tone}">${esc(t)}</span>`;
-    const num = (l, v, cls = '') => `<div><small>${l}</small><b class="${cls}">${v}</b></div>`;
-    const tick = (ok, l) => `${ok ? '✓' : '○'} ${l}`;
-    const g1t = G1f || sm.out, c3 = sm.checks.filter(x => x.ok).length;
-    const card = (k, title, nums, line, btn, tone) => `<article class="gro-c ${tone === 'warn' || tone === 'bad' ? 'hot' : ''}"><div class="gro-h"><h3>${title}</h3>${pill(stat[k])}</div><div class="gro-n">${nums}</div><div class="small muted">${line}</div>
-      <button class="btn sm ${tone === 'warn' || tone === 'bad' || tone === 'todo' ? 'primary' : ''}" data-go="${k}">${btn} →</button></article>`;
-    const todo = [];
-    if (!S && !G1f) todo.push(['s1', 'Add the sales register or the filed GSTR-1']);
-    else if (!G1f) todo.push(['s1', 'Add the filed GSTR-1 (fetch, same as working or type in)']);
-    if (stat.s1[1] === 'bad') todo.push(['s1', 'Filed GSTR-1 differs from our working']);
-    if (M !== '2b_confirm' && !P) todo.push(['s2', 'Add the purchase register']);
-    if (!B) todo.push(['s2', 'Add GSTR-2B (upload or fetch with OTP)']);
-    if (st.decideN) todo.push(['s2', `Decide ${st.decideN} bill${st.decideN > 1 ? 's' : ''} (amount, GSTIN or bill no differs)`, 'decide']);
-    if (st.openN && !st.toAsk.length) todo.push(['s2', `${st.openN} bill${st.openN > 1 ? 's' : ''} in 2B ${M === '2b_confirm' ? 'waiting for the client' : 'not in books — decide'}`, M === '2b_confirm' ? 'waiting' : 'notbooks']);
-    if (st.toAsk.length) todo.push(['s2', `Send ${st.toAsk.length} bill${st.toAsk.length > 1 ? 's' : ''} to the client`, M === '2b_confirm' ? 'waiting' : 'notbooks']);
-    if (st.sup.length) todo.push(['sup', `Chase ${st.sup.length} supplier${st.sup.length > 1 ? 's' : ''} (missing in 2B)`]);
-    if (st.lw.wait.length) todo.push(['s2', `${st.lw.wait.length} earlier bill${st.lw.wait.length > 1 ? 's' : ''} still waiting for the client`, 'earlier']);
-    if (!G3 && (S || G1f)) todo.push(['s3', 'Add the filed GSTR-3B after filing']);
-    if (sm.checks.some(x => !x.ok)) todo.push(['s4', 'Look at the GSTR-1 vs 3B checks']);
+  // v57: the to-do list, shown inside each return's tab: [text, return, step, reco filter]
+  function todoOf(sm, st, stat) {
+    const S = row.sales, P = row.purchases, B = row.gstr2b, G1f = row.gstr1, M = meth(), todo = [];
+    const t1 = taskOf('gstr1'), filed1 = (t1 && t1.status === 'Filed') || (revs.gstr1 && revs.gstr1.state === 'sent_client');
+    if (!S && !row.g1) todo.push(['Add the sales register, or upload the filled GSTR-1 template', 'gstr1', 1]);
+    if (filed1 && !G1f) todo.push(['Add the filed GSTR-1 figures (fetch, same as working or type in)', 'gstr1', 5]);
+    if (stat.s1[1] === 'bad') todo.push(['Filed GSTR-1 differs from our working', 'gstr1', 5]);
+    if (M !== '2b_confirm' && !P) todo.push(['Add the purchase register', 'gstr3b', 1]);
+    if (!B) todo.push(['Add GSTR-2B (upload, or send it with the JLR GST helper)', 'gstr3b', 1]);
+    if (st.decideN) todo.push([`Decide ${st.decideN} bill${st.decideN > 1 ? 's' : ''} (amount, GSTIN or bill no differs)`, 'gstr3b', 2, 'decide']);
+    if (st.openN && !st.toAsk.length) todo.push([`${st.openN} bill${st.openN > 1 ? 's' : ''} in 2B ${M === '2b_confirm' ? 'waiting for the client' : 'not in books — decide'}`, 'gstr3b', 2, M === '2b_confirm' ? 'waiting' : 'notbooks']);
+    if (st.toAsk.length) todo.push([`Send ${st.toAsk.length} bill${st.toAsk.length > 1 ? 's' : ''} to the client`, 'gstr3b', 2, M === '2b_confirm' ? 'waiting' : 'notbooks']);
+    if (st.sup.length) todo.push([`Chase ${st.sup.length} supplier${st.sup.length > 1 ? 's' : ''} (missing in 2B)`, 'gstr3b', 2]);
+    if (st.lw.wait.length) todo.push([`${st.lw.wait.length} earlier bill${st.lw.wait.length > 1 ? 's' : ''} still waiting for the client`, 'gstr3b', 2, 'earlier']);
+    if (sm.checks.some(x => !x.ok)) todo.push(['Look at the GSTR-1 vs 3B checks', 'gstr3b', 3]);
     const srN = (REV.senior() || {}).full_name || 'the senior', dd = d => new Date(d).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
-    [['gstr1', 's1', !!(S || row.g1)], ['gstr3b', 's4', !!((S || G1f) && G3gate.ok)]].forEach(([k, s, ready]) => {
+    [['gstr1', 3, !!(S || row.g1)], ['gstr3b', 4, !!((S || G1f || row.g1) && G3gate.ok)]].forEach(([k, s, ready]) => {
       const rv = revs[k], RS = rv ? rv.state : 'draft', L = REV.KIND[k].label;
-      if (RS === 'changes') todo.unshift([s, `Senior asked for changes on ${L}: ${((rv.remarks || []).slice(-1)[0] || {}).text || ''}`.slice(0, 130)]);
-      else if (RS === 'sent') todo.push([s, `${L} waiting for ${srN} to verify (sent ${dd(rv.sent_at)})`]);
-      else if (RS === 'approved') todo.unshift([s, `${L} approved — file on the portal, then upload the ${L} acknowledgement (sends to the client)`]);
-      else if (RS === 'draft' && ready) todo.push([s, `${L} workings ready — send for verification to ${srN}`]);
+      if (RS === 'changes') todo.unshift([`Senior asked for changes on ${L}: ${((rv.remarks || []).slice(-1)[0] || {}).text || ''}`.slice(0, 130), k, s]);
+      else if (RS === 'sent') todo.push([`${L} waiting for ${srN} to verify (sent ${dd(rv.sent_at)})`, k, s]);
+      else if (RS === 'approved') todo.unshift([k === 'gstr1' ? 'GSTR-1 verified — upload to the portal and file, then add the filed PDF' : 'GSTR-3B verified — pay, file, then add the filed PDF', k, k === 'gstr1' ? 4 : 5]);
+      else if (RS === 'draft' && ready) todo.push([`${L} workings ready — send for verification to ${srN}`, k, s]);
     });
-    if (!todo.length && row.status !== 'Verified') todo.push(['s4', 'Everything is in — review and mark as verified']);
-    const fl = (k, go) => `<button class="gro-f" data-go="${go}"><b>${REV.KIND[k].label}</b>${flowHtml(k, true)}</button>`;
-    return `<div class="gro-fs" aria-label="Return status">${fl('gstr1', 's1')}${fl('gstr3b', gr3Last)}</div><div class="gro">
-      <div class="gro-cards">
-        ${card('s1', 'GSTR-1', num('Taxable', gst$(g1t.t)) + num('Tax', gst$(gTax(g1t))), `${tick(S, `Sales register${S ? ` (${S.rows.length})` : ''}`)} · ${tick(G1f, 'Filed')}`, 'Open GSTR-1', stat.s1[1])}
-        ${card('s2', 'Purchases &amp; ITC', num('ITC in 2B', gst$(gTax(sm.itc2b))) + num(M === 'books' ? 'ITC as per books' : 'To claim', st.cl ? gst$(gTax(st.cl.claim)) : '—', 'g'),
-          `${M === '2b_confirm' ? '' : tick(P, `Books${P ? ` (${P.rows.length})` : ''}`) + ' · '}${tick(B, `GSTR-2B${B ? ` (${B.rows.length})` : ''}`)}${st.ready ? ` · ${(st.list.filter(x => x.st === 'books_only').length)} missing in 2B · ${st.list.filter(x => x.st === '2b_only' || x.st === 'confirm').length} not in books` : ''}`,
-          M === '2b_confirm' ? 'Open client confirmation' : 'Open 2B vs Books', stat.s2[1])}
-        ${card('s3', 'GSTR-3B', num('Net ITC', gst$(gTax(D3.C))) + num('Cash to deposit', gst$(D3.depositTotal)),
-          `${gTax(D3.B2) ? `Temporary reversal ${gst$(gTax(D3.B2))} · ` : ''}Credit carried ${gst$(gTax(D3.so.balance))} · ${G3 ? 'filed 3B added' : 'filed 3B not added'}`, 'Open Draft 3B', stat.s3[1])}
-        ${card('s4', 'Checks', sm.checks.length ? sm.checks.map(x => `<div class="gro-ck ${x.ok ? 'ok' : 'bad'}">${x.ok ? '✓' : '⚠'} ${esc(x.label.replace(/ \(GSTR-1 copied.*\)/, ''))}</div>`).join('') : '<div class="muted small">Add at least two of: sales, GSTR-1 filed, GSTR-3B filed.</div>',
-          sm.checks.length ? `${c3} of ${sm.checks.length} OK` : '', 'Open checks', stat.s4[1])}
-      </div>
-      <aside class="gro-todo card" aria-label="To do this month"><h3>To do — ${mLabel}</h3>
-        ${todo.map(([k, l, f]) => `<button class="gro-t" data-go="${k}" ${f ? `data-rf2="${f}"` : ''}><span>${esc(l)}</span><span aria-hidden="true">›</span></button>`).join('')}
-        <p class="muted small" style="margin:6px 0 0">Each card opens its working step. Uploads, rules and the ITC method are inside the steps.</p></aside></div>`;
+    return todo;
   }
   function itcMethodDialog() {
     const cur = meth();
@@ -5272,7 +5317,9 @@ VIEWS.gst = async v => {
       } });
   }
   function renderOut(sm, st) {
-    if (grTab === 'g1') { renderG1($('#grOut', body), { client: c, getRow: () => row, save }); return; }
+    const o0 = $('#grOut', body); if (!o0) return;
+    if (grTab === 'g1d' || grTab === 'g1') { renderG1(o0, { client: c, getRow: () => row, save, mode: grTab === 'g1d' ? 'data' : 'work' }); return; }
+    if (grTab === 'g1v') { renderG1Portal(o0); return; }
     if (grTab === 'sup' || grTab === 'ims') { grRecView = grTab; renderReco($('#grOut', body), sm, st); return; }
     const o = $('#grOut', body), row4 = (l, x, cls = '') => `<tr class="${cls}"><td>${l}</td><td class="r">${gst$(x.t)}</td><td class="r">${gst$(x.ig)}</td><td class="r">${gst$(x.cg)}</td><td class="r">${gst$(x.sg)}</td><td class="r">${gst$(x.cs)}</td></tr>`;
     const th = '<thead><tr><th></th><th class="r">Taxable</th><th class="r">IGST</th><th class="r">CGST</th><th class="r">SGST</th><th class="r">Cess</th></tr></thead>';
@@ -5311,6 +5358,25 @@ VIEWS.gst = async v => {
         <tr class="tot"><td><b>Total liability (net of notes)</b></td>${fTot ? cells(fTot) : '<td class="muted small" colspan="5">Not added</td>'}${W ? `<td class="r"><b>${gst$(gTax(wTot))}</b></td><td class="r ${diff(fTot, wTot) ? 'late' : ''}"><b>${fTot ? gst$(diff(fTot, wTot)) : ''}</b></td>` : ''}</tr>
       </tbody></table></div>
       <p class="muted small">${secs ? 'Section-wise figures as fetched from the GST portal.' : F ? 'Only totals were entered — fetch from the portal to see it table-wise.' : 'Fetch the filed GSTR-1 from the portal (client OTP), copy our working, or type the totals.'} “Our working” is the Sales register (GSTR-1 entry) tab.</p>`;
+  }
+  // v57: GSTR-1 step 3 — our workings in the portal's summary layout (what will be on the portal), for the senior
+  function renderG1Portal(o) {
+    const W = row.g1 && (row.g1.sales || []).length ? G1.summary(row.g1, c) : null;
+    if (!W) { const o2 = gsum(row).out;
+      o.innerHTML = `<h3 style="margin:0 0 6px">GSTR-1 — summary as per portal</h3>${row.sales ? `<p class="small">Only the sales register is added (no GSTR-1 entry): taxable <b>${gst$(o2.t)}</b> · IGST ${gst$(o2.ig)} · CGST ${gst$(o2.cg)} · SGST ${gst$(o2.sg)} · Cess ${gst$(o2.cs)}.</p>` : ''}
+        <p class="note warn small">Save the GSTR-1 workings in <button class="link" data-rs="gstr1:2">step 2</button> to see the table-wise portal summary.</p>`; return; }
+    const T = W.tables, ROWS = [['4A, 4B, 6B, 6C — B2B, SEZ, Deemed exports', ['B2B', 'SEZ']], ['5 — B2C (Large) invoices', ['B2CL']], ['6A — Exports', ['EXP']], ['7 — B2C (Others)', ['B2CS']],
+      ['9B — Credit / debit notes (registered)', ['CDNR'], -1], ['9B — Credit / debit notes (unregistered)', ['CDNUR'], -1], ['11A — Tax liability on advances', ['AT']], ['11B — Advances adjusted', ['AT_ADJ'], -1]];
+    const pick = names => { const z = { n: 0, t: 0, ig: 0, cg: 0, sg: 0, cs: 0 }; let any = false; names.forEach(n => { if (T[n]) { any = true; z.n += +T[n].n || 0; H5.forEach(k => z[k] = GR.r2(z[k] + (+T[n][k] || 0))); } }); return any ? z : null; };
+    const tot = { t: 0, ig: 0, cg: 0, sg: 0, cs: 0 }; let docs = 0;
+    const lines = ROWS.map(([l, names, sign]) => { const x = pick(names); if (!x) return ''; H5.forEach(k => tot[k] = GR.r2(tot[k] + (sign || 1) * x[k])); docs += x.n;
+      return `<tr><td>${l}${sign ? ' <span class="muted small">(less)</span>' : ''}</td><td class="r">${x.n || ''}</td>${cells(x)}</tr>`; }).join('');
+    const hsnN = Object.keys(W.hsn || {}).length, dN = (W.docs || []).filter(d => d.total).length;
+    o.innerHTML = `<div class="rc-head"><div><h3 style="margin:0">GSTR-1 — summary as per portal</h3><p class="muted small" style="margin:2px 0 0">From our saved workings${row.g1.at ? ' · ' + new Date(row.g1.at).toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' }) : ''} — same tables as the portal's GSTR-1 summary.</p></div></div>
+      <div class="table-wrap"><table class="gr-t"><thead><tr><th>Table</th><th class="r">Records</th><th class="r">Taxable</th><th class="r">IGST</th><th class="r">CGST</th><th class="r">SGST</th><th class="r">Cess</th></tr></thead><tbody>
+        ${lines || '<tr><td colspan="7" class="muted">No supplies</td></tr>'}
+        <tr class="tot"><td><b>Total liability (net of notes)</b></td><td class="r">${docs}</td>${cells(tot)}</tr></tbody></table></div>
+      <p class="muted small">12 HSN summary: ${hsnN} line${hsnN === 1 ? '' : 's'} · 13 Documents issued: ${dN} type${dN === 1 ? '' : 's'}${W.errors ? ` · <b class="late">${W.errors} row${W.errors > 1 ? 's' : ''} with errors — fix in step 2</b>` : ''}</p>`;
   }
   function renderBills(o, k, sm) {
     const d = row[k], title = k === 'purchases' ? 'Purchase register — as per books' : 'GSTR-2B — as per 2B';
@@ -5664,7 +5730,7 @@ VIEWS.gst = async v => {
     const cur = g1Drafts[key] || { sales: (g.sales || []).map(x => ({ ...x })), amend: (g.amend || []).map(x => ({ ...x })), adv: (g.adv || []).map(x => ({ ...x })), docs: (g.docs || []).map(x => ({ ...x })), dirty: false };
     if (cur.sales.some(r => Object.keys(r).length) && !confirm('Replace the sales rows already in GSTR-1 entry with these?')) return false;
     cur.sales = res.lines.map(x => ({ ...x })); cur.dirty = true; cur.up = res.lines.map(x => ({ no: x.no, name: x.name, nil: x.nil || '', exp: x.exp || '' })); g1Drafts[key] = cur;
-    grTab = 'g1'; grOv = false; g1Tab = 'sales'; render();
+    grTab = 'g1'; grOv = false; grPos = null; g1Tab = 'sales'; render();
     toast(`${C.length} lines loaded into GSTR-1 entry — check, then Save`); return true;
   }
   function enterFigures(kind) {
@@ -5691,13 +5757,38 @@ VIEWS.gst = async v => {
       X.writeFile(wb, `${kind}-register-template.xlsx`);
     }).catch(e => toast(friendly(e), true));
   }
-  body.addEventListener('change', e => { const x = e.target; if (x.matches('input[type=checkbox][data-step]')) setStep(x.dataset.step, x.checked ? 'ok' : 'clear'); });
+  body.addEventListener('change', async e => { const x = e.target; if (x.matches('input[type=checkbox][data-step]')) setStep(x.dataset.step, x.checked ? 'ok' : 'clear');
+    if (x.matches('input[type=checkbox][data-tick]')) { const reco = { ...(row.reco || {}) }; if (x.checked) reco[x.dataset.tick] = { by: me.id, at: new Date().toISOString() }; else delete reco[x.dataset.tick]; await save({ reco }).catch(err => toast(friendly(err), true)); }
+    if (x.matches('select[data-readyby]')) { const r = await safe(sb.from('tasks').update({ ready_by: x.value, updated_by: me.id }).eq('id', x.dataset.readyby)); if (r.error) toast(friendly(r.error), true); else { toast('Saved'); gtasks = await loadGT().catch(() => gtasks); } } });
+  // v57: e-invoice totals (from the GST portal) — entered by hand for now
+  function einvDialog() {
+    const e = (row.reco || {}).einv || {}, F = [['n', 'Number of invoices'], ['t', 'Taxable value'], ['ig', 'IGST'], ['cg', 'CGST'], ['sg', 'SGST'], ['cs', 'Cess']];
+    modal(`E-invoice totals — ${monthLabel(grMonth)}`, `<p class="small muted" style="margin-top:0">From the GST portal / e-invoice portal (IRNs generated in the month). Totals only — they are compared with the GSTR-1 workings (B2B + SEZ + exports).</p>
+      <div class="form-grid g3">${F.map(([k, l]) => `<label>${l}<input type="number" step="${k === 'n' ? 1 : 0.01}" name="${k}" value="${e[k] != null ? esc(e[k]) : ''}"></label>`).join('')}</div>`, {
+      onSave: async el => { const v = Object.fromEntries(F.map(([k]) => [k, num(fv(el, k))]));
+        if (!v.t && !v.n) throw new Error('Enter at least the number of invoices or the taxable value');
+        await save({ reco: { ...(row.reco || {}), einv: { ...v, at: new Date().toISOString(), by: me.id } } }); toast('E-invoice totals saved'); } });
+  }
+  // v57: GSTR-1 JSON straight from the saved workings (step 4 · upload to portal)
+  function g1JsonDownload() {
+    const g = row.g1; if (!g || !(g.sales || []).length) { toast('Save the GSTR-1 workings first (step 2)', true); return; }
+    const R = g1json.build({ sales: g.sales || [], amend: g.amend || [], adv: g.adv || [], docs: g.docs || [] }, c, row.period);
+    if (R.errors.length) { toast(`${R.errors.length} row${R.errors.length > 1 ? 's have' : ' has'} errors — fix them in step 2 first`, true); return; }
+    const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([JSON.stringify(R.json)], { type: 'application/json' }));
+    a.download = `GSTR1_${c.gstin}_${R.json.fp}.json`; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+    toast('GSTR-1 JSON downloaded — upload it on the portal (Prepare offline)');
+  }
   body.addEventListener('click', async e => {
     const b = e.target.closest('button'); if (!b) return;
     const d = b.dataset;
     if (d.gt) { grTab = d.gt; grOv = false; render(); }
-    if ('ov' in d) { grOv = true; render(); scrollTo({ top: 0 }); }
-    if (d.go) { grOv = false; grTab = d.go === 'sup' ? 'sup' : FIRST[d.go] || grTab; if (d.rf2) grRecFilter = d.rf2; render(); scrollTo({ top: 0 }); }
+    if (d.ret) { grOv = false; grPos = { ret: d.ret, s: grLastStep[d.ret] || (FL[d.ret].findIndex(x => x.cur) + 1) || 1 }; grTab = ''; render(); scrollTo({ top: 0 }); return; }
+    if (d.rs) { const [k, n] = d.rs.split(':'); grOv = false; grPos = { ret: k, s: +n }; grTab = ''; if (d.rf2) { grRecFilter = d.rf2; grTab = 'recon'; } render(); scrollTo({ top: 0 }); return; }
+    if ('einv' in d) { einvDialog(); return; }
+    if ('einvclr' in d) { if (!confirm('Remove the e-invoice totals?')) return; const reco = { ...(row.reco || {}) }; delete reco.einv; await save({ reco }).catch(err => toast(friendly(err), true)); return; }
+    if ('g1jsondl' in d) { g1JsonDownload(); return; }
+    if ('g3pay' in d) { if (grPayX) fdPayModal(grPayX, monthLabel(grMonth), grMonth, () => render()); return; }
+    if ('g3sheet' in d) { if (grPayX) fdPortalSheet(grPayX, monthLabel(grMonth)); return; }
     if ('itcm' in d) itcMethodDialog();
     if (d.step && d.sv) setStep(d.step, d.sv);
     if ('rules' in d) rulesDialog(c, () => render());
@@ -5715,7 +5806,7 @@ VIEWS.gst = async v => {
     }
     if (d.rev) { revAction(d.rev, d.rk || 'gstr3b', b); return; }
     if (b.id === 'grSaveNotes') { await save({ notes: $('#grNotes', body).value.trim() || null }).catch(err => toast(friendly(err), true)); toast('Notes saved'); }
-    if (b.id === 'grVer') { if (!gsum(row).counts.sales && !row.gstr2b) return toast('Add the data first', true); await save({ status: 'Verified', notes: $('#grNotes', body).value.trim() || null }).catch(err => toast(friendly(err), true)); toast('Marked as verified'); }
+    if (b.id === 'grVer') { if (!gsum(row).counts.sales && !row.gstr2b) return toast('Add the data first', true); await save({ status: 'Verified', notes: (($('#grNotes', body) || {}).value || row.notes || '').trim() || null }).catch(err => toast(friendly(err), true)); toast('Marked as verified'); }
     if (b.id === 'grUnver') { await save({ status: 'Draft' }).catch(err => toast(friendly(err), true)); }
   });
   render();
@@ -6237,7 +6328,7 @@ function learnSales(c, D) {
   }
   if (sug && !grRules.some(r => r.client_id === c.id && r.field === sug.field && r.op === sug.op && U(r.val) === U(sug.val))) offerRule(c, sug, 'sales', action);
 }
-function renderG1(o, { client: c, getRow, save }) {
+function renderG1(o, { client: c, getRow, save, mode = 'work' }) {   // v57: mode 'data' = step 1 (templates only), 'work' = step 2 (the sheet)
   const row = getRow(), key = c.id + '|' + row.period;
   if (!g1Drafts[key]) { const g = row.g1 || {}; g1Drafts[key] = { sales: (g.sales || []).map(x => ({ ...x })), amend: (g.amend || []).map(x => ({ ...x })), adv: (g.adv || []).map(x => ({ ...x })), docs: (g.docs || []).map(x => ({ ...x })), dirty: false }; }
   const D = g1Drafts[key];
@@ -6246,10 +6337,13 @@ function renderG1(o, { client: c, getRow, save }) {
   const calc = () => ({ sales: G1.calcSales(D.sales, own, c.gstin), amend: G1.calcAmend(D.amend, own), adv: G1.calcAdv(D.adv, own) });
   const fmt = x => x == null ? '' : Number(x).toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 2 });
   const sm = () => G1.summary(D, c);
-  o.innerHTML = `<div class="g1-bar"><div class="seg">${[['sales', 'Sales'], ['amend', 'Amendments'], ['adv', 'Advances'], ['docs', 'Documents'], ['sum', 'Summary']]
-      .map(([k, l]) => `<button data-g1t="${k}" class="${g1Tab === k ? 'on' : ''}">${l}${k !== 'sum' && k !== 'docs' ? ` <small data-g1n="${k}"></small>` : ''}</button>`).join('')}</div>
+  if (mode === 'data' && COLS[g1Tab] == null && g1Tab !== 'docs') g1Tab = 'sales';
+  o.innerHTML = mode === 'data' ? `<div class="g1-bar"><b>GSTR-1 entry</b><span class="spacer"></span><span class="small" data-g1st></span>
+      <button class="btn sm" data-g1dl>Blank template</button><button class="btn sm" data-g1up>Upload filled template</button><button class="btn sm primary" data-g1save>Save</button></div><div data-g1body></div>`
+    : `<div class="g1-bar"><div class="seg">${[['sales', 'Sales'], ['amend', 'Amendments'], ['adv', 'Advances'], ['docs', 'Documents'], ['hsn', 'HSN'], ['sum', 'Summary']]
+      .map(([k, l]) => `<button data-g1t="${k}" class="${g1Tab === k ? 'on' : ''}">${l}${COLS[k] ? ` <small data-g1n="${k}"></small>` : ''}</button>`).join('')}</div>
       <span class="spacer"></span><span class="small" data-g1st></span>
-      <button class="btn sm" data-g1dl>Blank template</button><button class="btn sm" data-g1up>Upload filled template</button><button class="btn sm" data-g1xl>Download Excel</button><button class="btn sm" data-g1json title="JSON for GST portal → GSTR-1 → Prepare offline → Upload">GSTR-1 JSON</button><button class="btn sm" data-g1wb title="Your GST Workings master template, filled for the whole financial year">GST workings (master)</button>
+      <button class="btn sm" data-g1xl>Download Excel</button><button class="btn sm" data-g1json title="JSON for GST portal → GSTR-1 → Prepare offline → Upload">GSTR-1 JSON</button><button class="btn sm" data-g1wb title="Your GST Workings master template, filled for the whole financial year">GST workings (master)</button>
       <button class="btn sm primary" data-g1save>Save</button></div>
     <div data-g1body></div>`;
   const body = $('[data-g1body]', o), st = $('[data-g1st]', o);
@@ -6368,7 +6462,18 @@ function renderG1(o, { client: c, getRow, save }) {
       <h4>6. Documents issued (Table 13)</h4><div class="table-wrap"><table class="gr-t"><thead><tr><th>Nature of document</th><th>From</th><th>To</th><th class="r">Total</th><th class="r">Cancelled</th><th class="r">Net</th></tr></thead><tbody>
         ${s.docs.filter(d => d.total).map(d => `<tr><td>${esc(d.nat)}</td><td>${esc(d.from)}</td><td>${esc(d.to)}</td><td class="r">${d.total}</td><td class="r">${d.cancelled || 0}</td><td class="r">${d.net}</td></tr>`).join('') || '<tr><td colspan="6" class="muted">—</td></tr>'}</tbody></table></div>`;
   }
-  const draw = () => { if (COLS[g1Tab]) drawGrid(g1Tab); else if (g1Tab === 'docs') drawDocs(); else drawSummary(); status(); };
+  function drawHsn() {
+    const s = sm();
+    body.innerHTML = `<p class="muted small">Table 12 — fills itself from the sales rows (HSN / SAC, rate, unit, quantity). B2B and B2C are shown separately, as the portal asks.</p>
+      <div class="table-wrap"><table class="gr-t"><thead><tr><th>B2B / B2C</th><th>HSN / SAC</th><th class="r">Rate</th><th>UQC</th><th class="r">Qty</th><th class="r">Taxable</th><th class="r">IGST</th><th class="r">CGST</th><th class="r">SGST</th><th class="r">Cess</th></tr></thead><tbody>
+        ${Object.entries(s.hsn).sort().map(([k, x]) => { const [tb, h, r, u] = k.split('|'); return `<tr><td>${tb}</td><td>${esc(h)}</td><td class="r">${r}%</td><td>${esc(u)}</td><td class="r">${fmt(x.q)}</td><td class="r">${fmt(x.t)}</td><td class="r">${fmt(x.ig)}</td><td class="r">${fmt(x.cg)}</td><td class="r">${fmt(x.sg)}</td><td class="r">${fmt(x.cs)}</td></tr>`; }).join('') || '<tr><td colspan="10" class="muted">No sales rows yet</td></tr>'}</tbody></table></div>`;
+  }
+  function drawData() {
+    const n = k => D[k].filter(r => Object.keys(r).length).length, s = sm();
+    body.innerHTML = `<p class="small" style="margin:6px 0 0">${n('sales') ? `<b>${n('sales')}</b> sales row${n('sales') > 1 ? 's' : ''}${n('amend') ? ` · ${n('amend')} amendment${n('amend') > 1 ? 's' : ''}` : ''}${n('adv') ? ` · ${n('adv')} advance${n('adv') > 1 ? 's' : ''}` : ''}${s.errors ? ` · <b class="late">${s.errors} with errors</b>` : ''} — check and correct them in <button class="link" data-rs="gstr1:2">step 2 · Workings</button>.`
+      : 'Fill the blank template (or your own data in its columns) and upload it here — or type the invoices straight into <button class="link" data-rs="gstr1:2">step 2 · Workings</button>.'}</p>`;
+  }
+  const draw = () => { if (mode === 'data') drawData(); else if (COLS[g1Tab]) drawGrid(g1Tab); else if (g1Tab === 'docs') drawDocs(); else if (g1Tab === 'hsn') drawHsn(); else drawSummary(); status(); };
 
   // ----- toolbar -----
   o.addEventListener('click', async e => {
