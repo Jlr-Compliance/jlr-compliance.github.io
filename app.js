@@ -4140,6 +4140,25 @@ function copySecret(text, msg = 'Copied') {
   function fallback() { const t = document.createElement('textarea'); t.value = text; t.style.cssText = 'position:fixed;opacity:0'; document.body.appendChild(t); t.select(); try { document.execCommand('copy'); done(); } catch (e) { toast('Could not copy', true); } t.remove(); }
 }
 
+/* v58 quick login: one-time ticket (2 min, once, this staff member) → GST portal login page → the JLR GST helper add-on
+   fills username + password and shows the captcha in a popup; the staff member types only the captcha */
+async function gstQuickLogin(clientId, loginId) {
+  const w = window.open('about:blank', '_blank');     // open now, before any await, so the browser does not block it
+  try {
+    let id = loginId;
+    if (!id) {
+      const r = await safe(sb.from('client_logins').select('id,portal,login_id,secret_id').eq('client_id', clientId));
+      const L = (r.data || []).filter(x => /^gst$/i.test(x.portal) && x.secret_id);
+      if (!L.length) throw new Error('No GST portal login with a password is saved for this client — add it under 🔑 Logins');
+      id = L[0].id;
+    }
+    const { data, error } = await sb.rpc('gsth_login_ticket', { p_login: id });
+    if (error) throw new Error(/gsth_login_ticket/.test(error.message || '') ? 'Quick login is not set up yet — run update-quick-login.sql in Supabase' : friendly(error));
+    const url = 'https://services.gst.gov.in/services/login#jlrt=' + data;
+    if (w) { try { w.opener = null; } catch { /* ignore */ } w.location.href = url; } else window.open(url, '_blank');
+    toast('GST portal opened — type the captcha in the JLR popup (needs the JLR GST helper add-on)');
+  } catch (e) { if (w) w.close(); toast(friendly(e), true); }
+}
 async function openLogins(c) {
   if (!c) return;
   const m = modal(`Portal logins · ${c.name}`, `<div data-lg><div class="loading">Loading…</div></div>`, { wide: true,
@@ -4153,7 +4172,7 @@ async function openLogins(c) {
     const old = d => d && daysFrom(d) > 180;
     box.innerHTML = `<p class="muted small" style="margin-top:0">🔒 Passwords are encrypted and hidden. Every <b>Show</b> or <b>Copy</b> is recorded with your name and time.</p>` +
       (rows.length ? `<div class="lg-list">${rows.map(l => { const url = portalUrlFor(l.portal, l.url); return `<div class="lg-card" data-id="${l.id}">
-        <div class="lg-top"><span class="lg-portal">${portalIcon(l.portal)} ${esc(l.portal)}</span>${url ? `<a class="btn sm" href="${esc(url)}" target="_blank" rel="noopener noreferrer">Open portal ↗</a>` : ''}</div>
+        <div class="lg-top"><span class="lg-portal">${portalIcon(l.portal)} ${esc(l.portal)}</span><span class="spacer"></span>${/^gst$/i.test(l.portal) && l.secret_id ? `<button type="button" class="btn sm primary" data-qlog="${l.id}" title="Opens the GST portal with this login filled in — you type only the captcha (JLR GST helper add-on)">Log in — type captcha only</button>` : ''}${url ? `<a class="btn sm" href="${esc(url)}" target="_blank" rel="noopener noreferrer">Open portal ↗</a>` : ''}</div>
         <div class="lg-row"><span class="muted small">Login ID</span><code>${esc(l.login_id)}</code><button type="button" class="btn sm ghost" data-cpid="${l.id}">Copy</button></div>
         <div class="lg-row"><span class="muted small">Password</span><code data-pw="${l.id}">${l.secret_id ? '••••••••••' : '<span class="muted">not saved</span>'}</code>
           ${l.secret_id ? `<button type="button" class="btn sm ghost" data-show="${l.id}">Show</button><button type="button" class="btn sm ghost" data-cppw="${l.id}">Copy</button>` : ''}</div>
@@ -4167,6 +4186,7 @@ async function openLogins(c) {
   box.addEventListener('click', async e => {
     const b = e.target.closest('button'); if (!b) return;
     const d = b.dataset;
+    if (d.qlog) { gstQuickLogin(c.id, d.qlog); return; }
     if (d.cpid) copySecret(rows.find(r => r.id === d.cpid).login_id, 'Login ID copied');
     if (d.show) {
       const el = $(`[data-pw="${d.show}"]`, box);
@@ -5068,7 +5088,7 @@ VIEWS.gst = async v => {
   // v38: GSTR-3B goes for verification only when 2B is complete (2B in, reco ready, nothing left to decide)
   function gate3(sm, st) {
     const M = meth(), why = [], [y, m] = grMonth.split('-').map(Number), nx = new Date(y, m, 14);
-    if (!row.gstr2b) why.push(`GSTR-2B is not added yet — it comes on ${nx.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })} (upload, or send it with the JLR GST helper)`);
+    if (!row.gstr2b) why.push(`GSTR-2B is not added yet — ${nx <= new Date() ? 'on the portal since' : 'it comes on'} ${nx.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })} (upload, or send it with the JLR GST helper)`);
     else if (M !== '2b_confirm' && !row.purchases) why.push('The purchase register is not added');
     else if (!st.ready) why.push('2B vs books is not ready');
     if (st.ready && st.decideN) why.push(`${st.decideN} bill${st.decideN > 1 ? 's' : ''} still to decide in 2B vs books`);
@@ -5107,7 +5127,7 @@ VIEWS.gst = async v => {
     const head = `<div class="grh"><div class="grh-pick"><label>Client<select id="grC">${gClients.length ? opts(gClients, grClient, x => `${x.name} · ${x.gstin}`, x => x.id) : '<option value="">No GST clients</option>'}</select></label>
         <label>Month<input type="month" id="grM" value="${esc(grMonth)}"></label></div>
       ${REV.KINDS.some(k => revs[k] && revs[k].state !== 'draft') ? REV.KINDS.filter(k => revs[k] && revs[k].state !== 'draft').map(k => `<span class="pill ${REV.STATE[revs[k].state][1]}">${REV.KIND[k].label}: ${REV.STATE[revs[k].state][0]}</span>`).join(' ') : row.status === 'Verified' ? `<span class="st st-filed">✓ Verified · ${esc(profName(row.verified_by) || '')}</span>` : '<span class="st st-pending-data">Draft</span>'}
-      <span class="spacer"></span><button class="btn sm" data-portal-api>Fetch from GST portal</button><a class="btn sm" href="#/clientreport" data-crgo>Client report</a>
+      <span class="spacer"></span><button class="btn sm" data-qlogin title="Opens the GST portal with the saved login filled in — you type only the captcha">Log in to GST portal</button><button class="btn sm" data-portal-api>Fetch from GST portal</button><a class="btn sm" href="#/clientreport" data-crgo>Client report</a>
       ${isManager() ? (row.status === 'Verified' ? '<button class="btn sm" id="grUnver">Back to draft</button>' : '<button class="btn sm primary" id="grVer">✓ Mark as verified</button>') : ''}</div>`;
     // ===== v57: no Overview — two tabs (GSTR-1 · GSTR-3B), each one step at a time. Click a step in the progress line to open it. =====
     const STEPDEF = {
@@ -5784,6 +5804,7 @@ VIEWS.gst = async v => {
     if (d.gt) { grTab = d.gt; grOv = false; render(); }
     if (d.ret) { grOv = false; grPos = { ret: d.ret, s: grLastStep[d.ret] || (FL[d.ret].findIndex(x => x.cur) + 1) || 1 }; grTab = ''; render(); scrollTo({ top: 0 }); return; }
     if (d.rs) { const [k, n] = d.rs.split(':'); grOv = false; grPos = { ret: k, s: +n }; grTab = ''; if (d.rf2) { grRecFilter = d.rf2; grTab = 'recon'; } render(); scrollTo({ top: 0 }); return; }
+    if ('qlogin' in d) { gstQuickLogin(c.id); return; }
     if ('einv' in d) { einvDialog(); return; }
     if ('einvclr' in d) { if (!confirm('Remove the e-invoice totals?')) return; const reco = { ...(row.reco || {}) }; delete reco.einv; await save({ reco }).catch(err => toast(friendly(err), true)); return; }
     if ('g1jsondl' in d) { g1JsonDownload(); return; }
