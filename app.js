@@ -2997,6 +2997,9 @@ function printInvoice(i) {
   w.document.open(); w.document.write(html); w.document.close();
 }
 
+// SAC codes for a CA office's services (the office's own list, 16 Nov 2026)
+const SAC_CODES = [['998221', 'Financial auditing services'], ['998224', 'Compliance services'], ['998222', 'Accounting & bookkeeping services'],
+  ['998223', 'Payroll services'], ['998231', 'Corporate tax consulting & preparation'], ['998232', 'Individual tax preparation & planning']];
 function invoiceSettingsCard() {
   if (!P4()) return '';
   const f = (k, l, ph = '', type = 'text') => `<label>${l}<input name="${k}" type="${type}" value="${esc(settings[k] ?? '')}" placeholder="${esc(ph)}"></label>`;
@@ -3007,7 +3010,10 @@ function invoiceSettingsCard() {
       <label class="full">Office address<textarea name="firm_address" rows="2">${esc(settings.firm_address || '')}</textarea></label>
       ${f('firm_gstin', 'Firm GSTIN', '33XXXXX0000X1Z5')}${f('firm_pan', 'Firm PAN')}${f('firm_phone', 'Phone')}${f('firm_email', 'Email')}
       ${f('invoice_prefix', 'Invoice prefix', 'JLR')}${f('next_invoice_no', 'Next invoice number', '1', 'number')}
-      ${f('gst_rate', 'GST rate %', '18', 'number')}${f('sac_code', 'SAC code', 'e.g. 998221')}
+      ${f('gst_rate', 'GST rate %', '18', 'number')}${(() => { const cur = settings.sac_code || '', known = SAC_CODES.some(([c]) => c === cur);
+        return `<label>SAC code (service on invoices)<select name="sac_pick">${SAC_CODES.map(([c, l]) => `<option value="${c}" ${c === cur ? 'selected' : ''}>${c} — ${esc(l)}</option>`).join('')}
+          <option value="" ${!cur ? 'selected' : ''}>— Not set —</option><option value="other" ${cur && !known ? 'selected' : ''}>Other (type below)…</option></select>
+          <input name="sac_code" value="${esc(cur)}" placeholder="6-digit SAC" inputmode="numeric" maxlength="8" style="margin-top:6px;${cur && !known ? '' : 'display:none'}" aria-label="Other SAC code"></label>`; })()}
       <label class="full">Bank details (for invoices & payment reminders)<textarea name="bank_details" rows="3" placeholder="Bank, A/c no., IFSC, UPI ID">${esc(settings.bank_details || '')}</textarea></label>
       ${'upi_id' in settings ? `<label>UPI ID (clients can pay from the portal)<input name="upi_id" value="${esc(settings.upi_id || '')}" placeholder="e.g. jlrco@okhdfcbank"></label>` : ''}
     </div><div class="toolbar" style="margin-top:12px"><button class="btn primary" id="saveInv">Save invoice details</button>
@@ -3015,6 +3021,8 @@ function invoiceSettingsCard() {
 }
 function bindInvoiceSettings(v) {
   const b = $('#saveInv', v); if (!b) return;
+  const sp = $('[name=sac_pick]', v), si = $('[name=sac_code]', v);
+  if (sp && si) sp.onchange = () => { if (sp.value === 'other') { si.style.display = ''; si.value = ''; si.focus(); } else { si.style.display = 'none'; si.value = sp.value; } };
   const zb = $('#invZoho', v);
   if (zb) zb.onclick = async () => {
     const box = $('#invSet', v); zb.disabled = true;
@@ -3038,6 +3046,7 @@ function bindInvoiceSettings(v) {
     rec.invoice_prefix = rec.invoice_prefix || 'JLR';
     if ($('[name=upi_id]', box)) { rec.upi_id = fv(box, 'upi_id').trim() || null; if (rec.upi_id && !/^[\w.\-]{2,}@[a-zA-Z]{2,}$/.test(rec.upi_id)) return toast('UPI ID looks wrong (e.g. name@okhdfcbank)', true); }
     if (rec.firm_gstin) rec.firm_gstin = rec.firm_gstin.toUpperCase();
+    if (rec.sac_code && !/^\d{4,8}$/.test(rec.sac_code.trim())) return toast('SAC code should be digits only, e.g. 998224', true);
     rec.next_invoice_no = Math.max(1, parseInt(fv(box, 'next_invoice_no'), 10) || 1);
     rec.gst_rate = num(fv(box, 'gst_rate'));
     try { await must(sb.from('settings').update(rec).eq('id', 1)); Object.assign(settings, rec); toast('Invoice details saved'); route(); }
