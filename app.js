@@ -3315,7 +3315,7 @@ async function loadZohoCfg() {
   return zohoCfg;
 }
 const zohoOn = () => !!(zohoCfg && zohoCfg.enabled && zohoCfg.org_id);
-const zohoLink = i => zohoCfg && i.zoho_invoice_id ? `https://invoice.zoho.in/app/${encodeURIComponent(zohoCfg.org_id)}#/invoices/${encodeURIComponent(i.zoho_invoice_id)}` : '';
+const zohoLink = i => zohoCfg && i.zoho_invoice_id ? `https://invoice.zoho.com/app/${encodeURIComponent(zohoCfg.org_id)}#/invoices/${encodeURIComponent(i.zoho_invoice_id)}` : '';
 async function zohoCall(action, payload = {}) {
   const { data } = await sb.auth.getSession();
   const tok = data && data.session && data.session.access_token;
@@ -3353,7 +3353,7 @@ async function renderZohoSettings(box) {
     return;
   }
   const steps = `<ol class="small zsteps">
-      <li>Open <a href="https://api-console.zoho.in" target="_blank" rel="noopener">api-console.zoho.in</a> and sign in with your Zoho Invoice account.</li>
+      <li>Open <a href="https://api-console.zoho.com" target="_blank" rel="noopener">api-console.zoho.com</a> and sign in with your Zoho Invoice account.</li>
       <li>Click <b>Add Client</b> → <b>Self Client</b> → <b>Create</b> → OK.</li>
       <li>On the <b>Client Secret</b> tab, copy the <b>Client ID</b> and <b>Client Secret</b> into the boxes below.</li>
       <li>On the <b>Generate Code</b> tab, type the scope <code>ZohoInvoice.fullaccess.all</code>, choose <b>10 minutes</b>, description <i>JLR tracker</i>, click <b>Create</b> (pick your organisation if asked) and copy the code.</li>
