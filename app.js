@@ -5210,12 +5210,19 @@ VIEWS.gst = async v => {
       } else if (SN === 5) {
         const tq = await safe(sb.from('tax_intimations').select('*').eq('client_id', c.id).eq('kind', 'GST').eq('period', monthLabel(grMonth)).maybeSingle());
         const pay = tq.error ? null : tq.data, cash = gstCash({ ...(row.summary || {}) }) || D3.depositTotal, paid = !!(pay && pay.paid_on);
+        const u3 = await safe(sb.from('gst_uploads').select('status,info,message,created_at,created_by,uploaded_at,uploaded_by').eq('client_id', c.id).eq('period', period).eq('kind', 'gstr3b').maybeSingle()), uj3 = u3.error ? undefined : u3.data;
+        const UST3 = { ready: ['Waiting for the add-on — open the client on the GST portal, JLR → Upload GSTR-3B', 'warn-t'], uploading: ['Uploading…', 'warn-t'], processed: ['Uploaded and processed on the portal', 'ok-t'], pending: ['Uploaded — portal still processing', 'warn-t'], error: ['Portal reported errors', 'late'] };
         grPayX = { t: taskOf('gstr3b') || { return_name: 'GSTR-3B', period: monthLabel(grMonth), due_date: null }, c, g: { summary: { ...(row.summary || {}), t3b: (row.summary || {}).t3b || t3bOf(D3) } }, cash, pay, paid };
         content = `<div class="${okRev('gstr3b') ? 'gr-okline' : 'note warn small'}">${okRev('gstr3b') ? `✓ Verified by ${esc(srName)}${revs.gstr3b.decided_at ? ' on ' + dt(revs.gstr3b.decided_at) : ''} — status: <b>${cash > 0 && !paid ? 'Payment pending' : 'Ready to file'}</b>` : 'Not verified yet — send GSTR-3B for verification in step 4 first.'}</div>
           <div class="gr-2col"><section class="gr-box"><h3>Payment</h3>
               ${cash > 0 ? `<p>Cash to deposit: <b>${gst$(cash)}</b></p><p class="small ${paid ? 'ok-t' : 'late'}">${paid ? `Paid on ${fmtDate(pay.paid_on)} · ${esc(pay.challan || '')}${pay.paid_amount ? ' · ' + gst$(pay.paid_amount) : ''}` : 'Not paid yet'}</p>
                 <div class="toolbar"><button class="btn ${paid ? '' : 'primary'}" data-g3pay>${paid ? 'Edit payment' : 'Enter challan (CPIN / CIN)'}</button></div>` : '<p class="ok-t">No cash to pay — the ITC covers the tax.</p>'}</section>
-            <section class="gr-box"><h3>On the portal</h3><p class="muted small">Enter the 3B figures on the portal (copy buttons per table) and offset the liability.</p>
+            <section class="gr-box"><h3>On the portal</h3>
+              ${uj3 !== undefined ? `<div class="gr-up" style="margin:0 0 8px"><b>Fill 3B with the JLR GST helper</b><br>
+                ${uj3 ? `<span class="small ${UST3[uj3.status] ? UST3[uj3.status][1] : ''}">${UST3[uj3.status] ? UST3[uj3.status][0] : esc(uj3.status)}${uj3.message ? ' — ' + esc(uj3.message) : ''}</span><div class="muted small">${esc(uj3.info || '')} · sent ${dt(uj3.created_at)}${uj3.uploaded_at ? ' · uploaded ' + dt(uj3.uploaded_at) + ' by ' + esc(profName(uj3.uploaded_by) || '') : ''}</div>`
+                  : '<span class="muted small">Tables 3.1 and 4 go from the verified draft; 3.2, 5 and interest stay as the portal has them. Then offset and file on the portal yourself.</span>'}
+                <div class="toolbar" style="margin:6px 0 0"><button class="btn ${okRev('gstr3b') && !uj3 ? 'primary' : ''}" data-g3send>${uj3 ? 'Send again (latest draft)' : 'Send 3B to JLR add-on'}</button>${uj3 ? '<button class="link small" data-qlogin>Log in to GST portal</button>' : ''}</div></div>` : ''}
+              <p class="muted small">Or by hand: enter the 3B figures on the portal (copy buttons per table).</p>
               <div class="toolbar"><button class="btn" data-g3sheet>Open portal sheet</button>${tickRow('g3up', 'Entered on portal')}</div></section></div>
           <div class="toolbar">${whoFiles('gstr3b')}<span class="muted small">Once the challan is entered the status becomes Ready to file.</span></div>`;
       } else content = `<div class="grcs">${g3fChip}</div>${revPanel('gstr3b', 'file')}`;
@@ -5795,6 +5802,17 @@ VIEWS.gst = async v => {
         if (!v.t && !v.n) throw new Error('Enter at least the number of invoices or the taxable value');
         await save({ reco: { ...(row.reco || {}), einv: { ...v, at: new Date().toISOString(), by: me.id } } }); toast('E-invoice totals saved'); } });
   }
+  // v60: the verified draft 3B figures (tables 3.1 and 4) for the add-on, which fills them into the portal's 3B
+  async function g3SendToAddon() {
+    const sm2 = gsum(row), st2 = itcState(sm2), D = draft3b(row, sm2, c, st2.ready ? st2.cl.claim : null), F = t3bOf(D);
+    if (!F.a && !F.C) { toast('No GSTR-3B figures yet — finish step 3 first', true); return; }
+    if (!(revs.gstr3b && ['approved', 'sent_client'].includes(revs.gstr3b.state)) && !confirm('GSTR-3B is not verified by the senior yet. Send the figures to the add-on anyway?')) return;
+    const tx = x => x ? (x.ig || 0) + (x.cg || 0) + (x.sg || 0) + (x.cs || 0) : 0;
+    const info = `3.1(a) taxable ${gst$((F.a || {}).t || 0)} · tax ${gst$(tx(F.a))} · net ITC ${gst$(tx(F.C))} · cash ${gst$(tx(F.cash))}`;
+    const r = await safe(sb.from('gst_uploads').upsert({ client_id: c.id, period, kind: 'gstr3b', json: { figs: F, gstin: c.gstin, fp: grMonth.slice(5, 7) + grMonth.slice(0, 4) }, info, status: 'ready', message: null, result: null, created_by: me.id, created_at: new Date().toISOString(), uploaded_by: null, uploaded_at: null }, { onConflict: 'client_id,period,kind' }));
+    if (r.error) { toast(/gst_uploads|check constraint/.test(r.error.message || '') ? 'Run update-gstr3b-upload.sql in Supabase first' : friendly(r.error), true); return; }
+    toast('3B sent to the add-on — on the GST portal open the JLR panel and click Upload GSTR-3B'); render();
+  }
   // v59: put the GSTR-1 JSON (from the saved workings) where the JLR GST helper add-on picks it up for upload
   async function g1SendToAddon() {
     const g = row.g1; if (!g || !(g.sales || []).length) { toast('Save the GSTR-1 workings first (step 2)', true); return; }
@@ -5826,6 +5844,7 @@ VIEWS.gst = async v => {
     if ('einv' in d) { einvDialog(); return; }
     if ('einvclr' in d) { if (!confirm('Remove the e-invoice totals?')) return; const reco = { ...(row.reco || {}) }; delete reco.einv; await save({ reco }).catch(err => toast(friendly(err), true)); return; }
     if ('g1jsondl' in d) { g1JsonDownload(); return; }
+    if ('g3send' in d) { b.disabled = true; try { await g3SendToAddon(); } finally { b.disabled = false; } return; }
     if ('g1send' in d) { b.disabled = true; try { await g1SendToAddon(); } finally { b.disabled = false; } return; }
     if ('g3pay' in d) { if (grPayX) fdPayModal(grPayX, monthLabel(grMonth), grMonth, () => render()); return; }
     if ('g3sheet' in d) { if (grPayX) fdPortalSheet(grPayX, monthLabel(grMonth)); return; }
