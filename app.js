@@ -12,14 +12,51 @@ const root = $('#app');
 const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 const MONTHS_FULL = ['January','February','March','April','May','June','July','August','September','October','November','December'];
 const DAYS = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
-const STATUSES = ['Pending data','In progress','Ready to file','Filed','Not applicable'];
+const STATUSES = ['Yet to start', 'Pending data', 'In progress', 'Sent for verification', 'Payment pending', 'Ready to file', 'Filed', 'Not applicable'];
+// v54: "Ready to file" says who files; "Payment pending" only for GSTR-3B
+const READY_BY = [['us', 'need to file'], ['wait', 'waiting from client'], ['client', 'client filing']];
+const is3B = t => /^GSTR-?3B/i.test((t && t.return_name) || '');
+const isGstRet = t => /^GSTR-?(1([^0-9A-Z]|$)|3B)/i.test((t && t.return_name) || '');
+function statusOpts(t) {
+  const cur = t.status === 'Ready to file' ? 'Ready to file|' + (t.ready_by || 'us') : t.status;
+  return STATUSES.filter(x => x !== 'Payment pending' || is3B(t) || t.status === x).map(x => x === 'Ready to file'
+    ? READY_BY.map(([k, l]) => `<option value="Ready to file|${k}" ${cur === 'Ready to file|' + k ? 'selected' : ''}>Ready to file — ${l}</option>`).join('')
+    : `<option value="${esc(x)}" ${cur === x ? 'selected' : ''}>${esc(x)}</option>`).join('');
+}
+const statusPatch = v => { const [st, rb] = String(v || '').split('|'); return st === 'Ready to file' ? { status: st, ready_by: rb || 'us' } : { status: st }; };
+const readyLbl = t => t && t.status === 'Ready to file' && t.ready_by && t.ready_by !== 'us' ? ` · ${(READY_BY.find(x => x[0] === t.ready_by) || [, ''])[1]}` : '';
 const WORK_TYPES = ['GST','TDS','ROC/MCA','Other'];          // Income Tax removed (old items still open & show under Other)
 const typesWith = cur => (cur && !WORK_TYPES.includes(cur) ? [...WORK_TYPES, cur] : WORK_TYPES);
 const MAIN_TYPES = ['GST', 'TDS', 'ROC/MCA'];
 const inTab = (r, k) => !k || (k === 'Other' ? !MAIN_TYPES.includes(r.work_type) : r.work_type === k);
 const WT_TABS = [['', 'All'], ['GST', 'GST'], ['TDS', 'TDS'], ['ROC/MCA', 'MCA'], ['Other', 'Other']];
 const waNum = p => { const d = (p || '').replace(/[^0-9]/g, ''); return d.length === 10 ? '91' + d : d; };
-const waShare = (text, phone) => `https://wa.me/${phone ? waNum(phone) : ''}?text=${encodeURIComponent(text)}`;
+// v54: Telegram instead of Telegram. A linked client gets the message from the office bot; otherwise Telegram opens to pick the chat.
+const waShare = (text, phone) => `https://t.me/share/url?url=${encodeURIComponent(text)}${phone ? '&jlrph=' + encodeURIComponent(String(phone).replace(/\D/g, '').slice(-10)) : ''}`;
+let tgLinked = null;
+// send through the office bot when the mobile is linked, else open Telegram (w = a window opened earlier, for the pop-up rule)
+async function tgSendOrOpen(text, phone, w = null) {
+  const ph = String(phone || '').replace(/\D/g, '').slice(-10);
+  if (ph && tgLinked && tgLinked.has(ph)) {
+    try { const { data, error } = await sb.functions.invoke('telegram-bot', { body: { action: 'send', phone: ph, text } });
+      if (!error && data && data.sent) { if (w) w.close(); toast(`Sent on Telegram${data.to ? ' to ' + data.to : ''} ✓`); return true; } } catch (_) { /* fall back to opening Telegram */ }
+  }
+  const url = waShare(text, phone); if (w) w.location.href = url; else window.open(url, '_blank', 'noopener');
+  return false;
+}
+async function loadTgLinked() { const r = await safe(sb.rpc('tg_linked_phones')); tgLinked = new Set(r.error ? [] : r.data || []); return tgLinked; }
+document.addEventListener('click', e => {
+  const a = e.target.closest && e.target.closest('a[href^="https://t.me/share/url"]');
+  if (!a || e.defaultPrevented) return;
+  const u = new URL(a.href), ph = u.searchParams.get('jlrph'), text = u.searchParams.get('url') || '';
+  if (!ph || !tgLinked || !tgLinked.has(ph)) { if (ph) toast('This client has not linked the office bot yet — pick their chat in Telegram'); return; }
+  e.preventDefault();
+  sb.functions.invoke('telegram-bot', { body: { action: 'send', phone: ph, text } }).then(({ data, error }) => {
+    if (error || !data || data.error) throw new Error((data && data.error) || (error && error.message) || 'Telegram bot did not answer');
+    if (data.sent) toast(`Sent on Telegram${data.to ? ' to ' + data.to : ''} ✓`);
+    else { toast('Not linked any more — opening Telegram'); window.open(a.href, '_blank', 'noopener'); }
+  }).catch(err => toast(friendly(err), true));
+});
 const GST_SCHEMES = ['Monthly','QRMP','Composition','Not registered'];
 const PERIOD_RULES = {
   prev_month: 'Previous month', prev_quarter: 'Previous quarter', prev_half: 'Previous half-year',
@@ -77,7 +114,7 @@ const WORK_ITEMS = {
   'Other': ['Accounting / bookkeeping', 'Bank reconciliation', 'Payroll', 'PF return (ECR)', 'ESI return', 'Professional tax', 'Statutory audit',
     'Internal audit', 'Stock audit', 'Udyam registration', 'Shop & establishment licence', 'Trade licence', 'Project report / CMA', 'Net worth certificate', 'Other']
 };
-const DATA_SOURCES = ['Email', 'WhatsApp', 'Google Drive', 'In person', 'Tally / software', 'Other'];
+const DATA_SOURCES = ['Email', 'Telegram', 'Google Drive', 'In person', 'Tally / software', 'Other'];
 function workItemDatalists() {
   if (document.getElementById('dl-GST')) return;
   const box = document.createElement('div');
@@ -580,6 +617,7 @@ async function boot() {
 }
 
 async function loadRefs() {
+  if (!tgLinked) loadTgLinked().catch(() => {});
   const [p, c, s, t, r, gr] = await Promise.all([          // all in one round trip
     must(sb.from('profiles').select('*').order('full_name')),
     must(sb.from('clients').select('*').order('name')),
@@ -875,7 +913,7 @@ VIEWS.filing = async v => {
   $('#fdM', v).onchange = e => { fdMonth = e.target.value || prevMonth(); route(); };
   const body = $('#fdBody', v);
   const [tq, rq, gq, pq] = await Promise.all([
-    safe(sb.from('tasks').select('id,client_id,return_name,period,status,due_date,assigned_to,arn,filed_on').eq('period', label).limit(5000)),
+    safe(sb.from('tasks').select('*').eq('period', label).limit(5000)),
     safe(sb.from('gst_reviews').select('client_id,kind,state,sent_at').eq('period', per).limit(5000)),
     safe(sb.from('gst_months').select('client_id,status,summary').eq('period', per).limit(5000)),
     safe(sb.from('tax_intimations').select('*').eq('kind', 'GST').eq('period', label).limit(5000))]);
@@ -900,7 +938,7 @@ VIEWS.filing = async v => {
       ${list.map(x => { const i = rows.indexOf(x);
         return `<tr data-i="${i}" class="${x.late ? 'overdue' : ''}"><td class="small">${x.t.due_date ? fmtDate(x.t.due_date) : '—'}${x.late ? '<div class="late">overdue</div>' : x.today ? '<div class="warn-t">today</div>' : ''}</td>
           <td class="wrap"><b>${esc(x.c.name)}</b><div class="muted small">${esc(x.c.gstin || '')}</div></td>
-          <td>${esc(x.t.return_name)}<div class="muted small">${esc(x.t.period)}</div></td>
+          <td>${esc(x.t.return_name)}<div class="muted small">${esc(x.t.period)}${x.stage === 'ready' && x.t.ready_by && x.t.ready_by !== 'us' ? ` · <b>${esc((READY_BY.find(r => r[0] === x.t.ready_by) || [, ''])[1])}</b>` : ''}</div></td>
           <td><span class="pill ${['approved', 'sent_client'].includes(x.RS) ? 'g' : x.RS === 'changes' ? 'r' : x.RS === 'sent' ? 'b' : ''}">${RSL[x.RS] || x.RS}</span></td>
           <td class="r">${x.k === 'gstr3b' ? (x.cash > 0 ? `${inr(x.cash)}<div class="small ${x.paid ? 'ok-t' : 'late'}">${x.paid ? `paid ${fmtDate(x.pay.paid_on)}${x.pay.challan ? ' · ' + esc(x.pay.challan) : ''}` : 'not paid'}</div>` : '<span class="muted small">nil — ITC covers it</span>') : '<span class="muted small">—</span>'}</td>
           <td class="small">${esc(who(x.t.assigned_to))}</td>
@@ -920,7 +958,7 @@ VIEWS.filing = async v => {
     if (a === 'open' || (a === 'sheet' && x.k === 'gstr1')) { grClient = x.t.client_id; grMonth = ym; location.hash = '#/gst'; if (a === 'sheet') toast('GSTR-1 workspace → GSTR-1 entry → “GSTR-1 JSON” downloads the file for the portal'); return; }
     if (a === 'logins') return openLogins(x.c);
     if (a === 'otp') { const msg = `Dear ${x.c.name},\nWe are filing your ${x.t.return_name} for ${x.t.period} now. You will get an OTP from GSTN on your registered mobile / email — please send it to us as soon as it arrives.\nThank you,\n${firmName()}`;
-      navigator.clipboard.writeText(msg).then(() => toast('Message copied — paste it to the client (Telegram / WhatsApp / call)')).catch(() => window.prompt('Copy this message:', msg)); return; }
+      navigator.clipboard.writeText(msg).then(() => toast('Message copied — paste it to the client (Telegram / call)')).catch(() => window.prompt('Copy this message:', msg)); return; }
     if (a === 'sheet') return portalSheet(x);
     if (a === 'pay') return payModal(x);
     if (a === 'ack') return ackForTask({ ...x.t }, () => route());
@@ -997,7 +1035,7 @@ function dataCell(r, can) {
   if (r.status !== 'Pending data') return fuLine(r);
   const c = clientById(r.client_id);
   const g = gmailSearchUrl(c);
-  const wl = can && c && c.phone ? `<a class="small" href="${esc(waShare(docsRequestMsg(c, r), c.phone))}" target="_blank" rel="noopener" title="Ask client on WhatsApp">WhatsApp</a>` : '';
+  const wl = can && c && c.phone ? `<a class="small" href="${esc(waShare(docsRequestMsg(c, r), c.phone))}" target="_blank" rel="noopener" title="Ask client on Telegram">Telegram</a>` : '';
   return `${fuLine(r)}<div class="row-acts">${can ? `<button class="link small" data-got="${r.id}">Got data</button>` : ''}${can && 'fu_count' in r ? `<button class="link small" data-fu="${r.id}">Follow-up</button>` : ''}${g ? `<a class="small" href="${esc(g)}" target="_blank" rel="noopener">Check mail</a>` : ''}${wl}</div>`;
 }
 function taskTable(rows, { showArn = true, showAssigned = true } = {}) {
@@ -1007,7 +1045,7 @@ function taskTable(rows, { showArn = true, showAssigned = true } = {}) {
     const can = isManager() || r.assigned_to === me.id;
     const late = r.due_date && r.due_date < t && isOpen(r.status);
     const statusCell = can
-      ? `<select class="st st-${slug(r.status)}" data-status="${r.id}" aria-label="Status">${opts(STATUSES, r.status)}</select>`
+      ? `<select class="st st-${slug(r.status)}" data-status="${r.id}" aria-label="Status">${statusOpts(r)}</select>`
       : statusBadge(r.status);
     const assignedCell = isManager()
       ? `<select data-assign="${r.id}" aria-label="Assigned to">${staffOpts(r.assigned_to || '')}</select>`
@@ -1031,8 +1069,13 @@ function bindTaskTable(el, rows, refresh) {
     const sid = e.target.dataset.status, aid = e.target.dataset.assign;
     if (!sid && !aid) return;
     const id = sid || aid;
-    const patch = sid ? { status: e.target.value } : { assigned_to: e.target.value || null };
-    if (sid && e.target.value === 'Filed') {
+    const patch = sid ? statusPatch(e.target.value) : { assigned_to: e.target.value || null };
+    if (sid && patch.status === 'Sent for verification') {          // GST returns are sent from GST review (it mails the senior)
+      const t0 = rows.find(r => r.id === id);
+      if (t0 && isGstRet(t0)) { e.target.value = t0.status === 'Ready to file' ? 'Ready to file|' + (t0.ready_by || 'us') : t0.status; grClient = t0.client_id; grMonth = periodToMonth(t0.period); location.hash = '#/gst';
+        toast('Send it from the verification panel — the status changes to “Sent for verification” by itself'); return; }
+    }
+    if (sid && patch.status === 'Filed') {
       const gate = await payGateMsg(rows.find(r => r.id === id)).catch(() => null);
       if (gate) { toast(gate, true); const r0 = rows.find(r => r.id === id); e.target.value = r0 ? r0.status : e.target.value; return; }
       const arn = window.prompt('Filed! Enter the ARN / acknowledgement number (optional):', '');
@@ -1043,8 +1086,8 @@ function bindTaskTable(el, rows, refresh) {
       await must(sb.from('tasks').update(patch).eq('id', id));
       toast('Saved');
       const row = rows.find(r => r.id === id); if (row) Object.assign(row, patch);
-      if (sid) e.target.className = `st st-${slug(e.target.value)}`;
-      if (sid && e.target.value === 'Filed') refresh();
+      if (sid) e.target.className = `st st-${slug(patch.status)}`;
+      if (sid && patch.status === 'Filed') refresh();
     } catch (err) { toast(friendly(err), true); refresh(); }
     finally { e.target.disabled = false; }
   });
@@ -1097,7 +1140,7 @@ function editTask(task, refresh) {
     <label>Period<input name="period" value="${esc(task.period || '')}" placeholder="e.g. Oct 2026" ${dis}></label>
     <label>Due date<input name="due_date" type="date" value="${esc(task.due_date || '')}" ${dis}></label>
     <label>Assigned to<select name="assigned_to" ${dis}>${staffOpts(task.assigned_to || '')}</select></label>
-    <label>Status<select name="status" ${ro}>${opts(STATUSES, task.status)}</select></label>
+    <label>Status<select name="status" ${ro}>${statusOpts(task)}</select></label>
     <label>ARN / Ack. no.<input name="arn" value="${esc(task.arn || '')}" ${ro}></label>
     ${admin && P4() ? `<label>Fee (₹)<input name="fee" type="number" min="0" value="${esc(task.fee ?? '')}" placeholder="${isNew ? 'from Fee list' : ''}"></label>` : ''}
     <label>Filed on<input name="filed_on" type="date" value="${esc(task.filed_on || '')}" ${ro}></label>
@@ -1115,7 +1158,7 @@ function editTask(task, refresh) {
   const m = modal(isNew ? 'Add work' : 'Work details', body, {
     extra,
     onSave: can ? async el => {
-      const rec = { status: fv(el, 'status'), arn: fv(el, 'arn') || null, filed_on: fv(el, 'filed_on') || null, remarks: fv(el, 'remarks') || null,
+      const rec = { ...statusPatch(fv(el, 'status')), arn: fv(el, 'arn') || null, filed_on: fv(el, 'filed_on') || null, remarks: fv(el, 'remarks') || null,
         data_received_on: fv(el, 'data_received_on') || null, data_source: fv(el, 'data_source') || null };
       if (admin) Object.assign(rec, {
         client_id: fv(el, 'client_id'), work_type: fv(el, 'work_type'), return_name: fv(el, 'return_name'),
@@ -1513,11 +1556,11 @@ function shareCard() {
   const on = settings.board_enabled && settings.board_token;
   return `<section class="card share-card" style="margin-top:16px">
     <div class="share-head"><div><h3 style="margin:0">Share work status</h3>
-      <p class="muted small" style="margin:4px 0 0">Common link: anyone with it can see all work (no login, read-only). For a single client, use <a href="#/clients">Clients → WhatsApp</a>.</p></div>
+      <p class="muted small" style="margin:4px 0 0">Common link: anyone with it can see all work (no login, read-only). For a single client, use <a href="#/clients">Clients → Telegram</a>.</p></div>
       <span class="badge ${on ? 'ok' : ''}">${on ? 'Link is ON' : 'Link is OFF'}</span></div>
     ${on ? `<div class="linkbox"><input readonly value="${esc(boardUrl(settings.board_token))}" aria-label="Common status link">
       <button class="btn sm" data-sh="copy">Copy</button>
-      <a class="btn sm primary" href="${esc(waShare(boardMsg()))}" target="_blank" rel="noopener">Send on WhatsApp</a>
+      <a class="btn sm primary" href="${esc(waShare(boardMsg()))}" target="_blank" rel="noopener">Send on Telegram</a>
       <a class="btn sm" href="mailto:?subject=${encodeURIComponent(firmName() + ' - work status')}&body=${encodeURIComponent(boardMsg())}">Email</a>
       <a class="btn sm ghost" href="${esc(boardUrl(settings.board_token))}" target="_blank" rel="noopener">Open</a></div>`
       : isAdmin() ? `<button class="btn primary" data-sh="on">Switch on the common link</button>` : '<p class="muted small">Ask the admin to switch on the common link (Settings).</p>'}
@@ -1703,9 +1746,9 @@ const dashFull = async v => {      // the full dashboard (Admin → System tab)
   $$('[data-tpgo]', v).forEach(x => x.onclick = () => { tpTab = 'GST'; tpMonth = prevMonth(); });
   const wa = $('[data-wa-send]', v);
   if (wa) wa.onclick = async () => {
-    if (!confirm("Send today's pending-work reminders to staff on WhatsApp now?")) return;
+    if (!confirm("Send today's pending-work reminders to staff on Telegram now?")) return;
     wa.disabled = true;
-    try { const { data } = await must(sb.rpc('wa_admin_run', { p_kind: 'daily' })); toast(data ? `${data} reminder(s) sent` : 'Nothing sent — check Settings → WhatsApp reminders', !data); }
+    try { const { data } = await must(sb.rpc('wa_admin_run', { p_kind: 'daily' })); toast(data ? `${data} reminder(s) sent` : 'Nothing sent — check Settings → Telegram reminders', !data); }
     catch (e) { toast(friendly(e), true); } finally { wa.disabled = false; }
   };
   if (isManager() || isPartner()) HEALTH.load().then(all => {          // v24: clients needing attention
@@ -1908,7 +1951,7 @@ VIEWS.clients = async v => {
         <td class="small">${esc(c.gstin || '—')}</td><td class="small">${esc(c.pan || '—')}<div class="muted">${esc(c.tan || '')}</div></td>
         <td>${esc(c.gst_scheme)}</td><td class="wrap">${(c.services || []).map(wtBadge).join(' ')}</td>
         <td>${esc(profName(c.default_staff) || '—')}</td>
-        <td class="row-btns"><button class="btn sm" data-copy="${c.id}">Copy link</button><a class="btn sm" href="${esc(waShare(clientMsg(c), c.phone))}" target="_blank" rel="noopener" title="Send on WhatsApp">WhatsApp</a><a class="btn sm ghost" href="${esc(statusUrl(c.status_token))}" target="_blank" rel="noopener">Open</a></td>
+        <td class="row-btns"><button class="btn sm" data-copy="${c.id}">Copy link</button><a class="btn sm" href="${esc(waShare(clientMsg(c), c.phone))}" target="_blank" rel="noopener" title="Send on Telegram">Telegram</a><a class="btn sm ghost" href="${esc(statusUrl(c.status_token))}" target="_blank" rel="noopener">Open</a></td>
         </tr>`).join('')}
       </tbody></table></div>` : `<div class="table-wrap"><div class="empty">${clients.length ? 'No match.' : 'No clients yet. Add one, or import your list from a CSV file.'}</div></div>`;
   };
@@ -2024,7 +2067,7 @@ function editGroup(g, done) {
   const m = modal('Edit group', `<div class="form-grid">
     <label class="full">Group name<input name="name" value="${esc(g.name)}" required></label>
     <label class="full">Group email(s) — the owner / accountant who sends data for all companies<input name="emails" value="${esc(g.emails || '')}" placeholder="vijay@example.com, accounts@vijaygroup.in" inputmode="email"></label>
-    <label>Mobile / WhatsApp<input name="phone" value="${esc(g.phone || '')}" inputmode="tel" placeholder="10-digit mobile"></label>
+    <label>Mobile / Telegram<input name="phone" value="${esc(g.phone || '')}" inputmode="tel" placeholder="10-digit mobile"></label>
     <label>Contact person<input name="contact_person" value="${esc(g.contact_person || '')}"></label>
     <label class="full">Notes<textarea name="notes" rows="2">${esc(g.notes || '')}</textarea></label>
     <div class="full small muted">Companies in this group (${mem.length}): ${mem.length ? mem.map(c => esc(cLabel(c))).join(', ') : 'none — choose this group in each company\'s Edit client window'}</div></div>`, {
@@ -2054,7 +2097,7 @@ function editClient(c) {
     <label>Client / business name ${REQ}<input name="name" value="${esc(c.name || '')}" required></label>
     <label>PAN ${REQ}<input name="pan" value="${esc(c.pan || '')}" maxlength="10" style="text-transform:uppercase" required></label>
     <label>GSTIN ${REQ}<input name="gstin" value="${esc(c.gstin || '')}" maxlength="15" style="text-transform:uppercase"></label>
-    <label>Phone / WhatsApp ${REQ}<input name="phone" value="${esc(c.phone || '')}" placeholder="10-digit mobile" inputmode="tel" required></label>
+    <label>Phone / Telegram ${REQ}<input name="phone" value="${esc(c.phone || '')}" placeholder="10-digit mobile" inputmode="tel" required></label>
     <label>Email ${REQ}<input name="email" value="${esc(c.email || '')}" placeholder="accounts@client.com, owner@client.com" inputmode="email" required></label>
     <label>GST scheme<select name="gst_scheme">${opts(GST_SCHEMES, c.gst_scheme)}</select></label>
     <label>TAN<input name="tan" value="${esc(c.tan || '')}" maxlength="10" style="text-transform:uppercase"></label>
@@ -2077,7 +2120,7 @@ function editClient(c) {
     ${!isNew ? '<div class="full"><button type="button" class="btn sm" data-govlg>🔑 GST / TDS / MCA portal logins</button> <span class="muted small">Encrypted · every view is logged</span></div>' : ''}
     ${!isNew && isManager() ? '<div class="full portal-box" data-portal></div>' : ''}
     ${!isNew ? `<div class="full"><div class="small muted" style="font-weight:500">Client status link (share with this client only)</div>
-      <div class="linkbox"><input readonly value="${esc(statusUrl(c.status_token))}"><button type="button" class="btn sm" data-cp>Copy</button><a class="btn sm" href="${esc(waShare(clientMsg(c), c.phone))}" target="_blank" rel="noopener">WhatsApp</a><button type="button" class="btn sm" data-regen>New link</button></div></div>` : ''}
+      <div class="linkbox"><input readonly value="${esc(statusUrl(c.status_token))}"><button type="button" class="btn sm" data-cp>Copy</button><a class="btn sm" href="${esc(waShare(clientMsg(c), c.phone))}" target="_blank" rel="noopener">Telegram</a><button type="button" class="btn sm" data-regen>New link</button></div></div>` : ''}
   </div>`;
   const m = modal(isNew ? 'Add client' : 'Edit client', body, {
     wide: true,
@@ -2679,20 +2722,20 @@ async function renderGst(box) {
   loadLog();
 }
 
-/* ---------- WhatsApp reminders (admin, Settings page) ---------- */
-async function renderWhatsApp(box) {
-  box.innerHTML = '<div class="card"><h3>WhatsApp reminders</h3><div class="loading">Loading…</div></div>';
+/* ---------- Telegram reminders (admin, Settings page) ---------- */
+async function renderTelegram(box) {
+  box.innerHTML = '<div class="card"><h3>Telegram reminders</h3><div class="loading">Loading…</div></div>';
   const [ws, st] = await Promise.all([sb.from('wa_settings').select('*').eq('id', 1).maybeSingle(), sb.rpc('wa_admin_status')]);
   if (ws.error) {
-    box.innerHTML = `<div class="card"><h3>WhatsApp reminders</h3><p class="muted">Not set up yet — run <b>phase2-whatsapp.sql</b> in Supabase first.</p></div>`;
+    box.innerHTML = `<div class="card"><h3>Telegram reminders</h3><p class="muted">Not set up yet — run <b>phase2-whatsapp.sql</b> in Supabase first.</p></div>`;
     return;
   }
   const w = ws.data || {}, status = st.data || {};
   const jobs = (status.jobs || []).map(j => j.name).join(', ') || 'none';
   const meHasPhone = !!(profiles.find(p => p.id === me.id) || {}).phone;
-  box.innerHTML = `<div class="card"><h3>WhatsApp reminders</h3>
+  box.innerHTML = `<div class="card"><h3>Telegram reminders</h3>
     <p class="muted small">Daily at 9:30 AM (Mon–Sat): each staff member gets their overdue / due-in-3-days / waiting list.
-      1st of every month at 9:30 AM: everyone gets that month's due dates. Only people with a WhatsApp number in <a href="#/team">Team</a> get messages.</p>
+      1st of every month at 9:30 AM: everyone gets that month's due dates. Only people with a Telegram number in <a href="#/team">Team</a> get messages.</p>
     <div class="form-grid">
       <label class="check full"><input type="checkbox" name="enabled" ${w.enabled ? 'checked' : ''}> <b>Automatic reminders switched on</b></label>
       <label>Phone number ID (from Meta)<input name="phone_number_id" value="${esc(w.phone_number_id || '')}" placeholder="e.g. 123456789012345"></label>
@@ -2709,7 +2752,7 @@ async function renderWhatsApp(box) {
     <p class="muted small">Stored encrypted in Supabase Vault. It can be replaced but never viewed again.</p>
     <hr style="border:0;border-top:1px solid var(--line);margin:16px 0">
     <div class="toolbar">
-      <button class="btn" data-wa="test" ${meHasPhone ? '' : 'disabled title="Add your WhatsApp number in Team first"'}>Send test to me</button>
+      <button class="btn" data-wa="test" ${meHasPhone ? '' : 'disabled title="Add your Telegram number in Team first"'}>Send test to me</button>
       <button class="btn" data-wa="daily">Send today's reminders now</button>
       <button class="btn" data-wa="monthly">Send this month's due dates now</button>
       <span class="spacer"></span><button class="btn sm ghost" data-wa="refresh">Refresh log</button></div>
@@ -2756,22 +2799,22 @@ async function renderWhatsApp(box) {
         if (!rec.phone_number_id) rec.phone_number_id = null;
         if (rec.enabled && (!rec.phone_number_id || !status.token_saved)) toast('Saved, but reminders need the phone number ID and access token to work', true);
         await must(sb.from('wa_settings').update(rec).eq('id', 1));
-        toast('WhatsApp settings saved');
+        toast('Telegram settings saved');
       }
       if (act === 'token') {
         const t = val('token').value.trim();
         if (!t) { toast('Paste the token first', true); return; }
         await must(sb.rpc('wa_admin_set_token', { p_token: t }));
-        val('token').value = ''; toast('Token saved securely'); renderWhatsApp(box); return;
+        val('token').value = ''; toast('Token saved securely'); renderTelegram(box); return;
       }
       if (act === 'test') {
         const { data } = await must(sb.rpc('wa_admin_test'));
-        toast(data ? 'Test message sent — check WhatsApp in a few seconds' : 'Not sent: save the phone number ID and token first', !data);
+        toast(data ? 'Test message sent — check Telegram in a few seconds' : 'Not sent: save the phone number ID and token first', !data);
       }
       if (act === 'daily' || act === 'monthly' || act === 'client') {
         if (!confirm({ daily: "Send today's pending-work reminders to staff now?", monthly: "Send this month's due-date list to everyone now?", client: 'Send document reminders now to clients whose work is waiting for data?' }[act])) return;
         const { data } = await must(sb.rpc('wa_admin_run', { p_kind: act }));
-        toast(data ? `${data} message(s) sent` : 'Nothing sent (no one with pending work / a WhatsApp number, or setup incomplete)', !data);
+        toast(data ? `${data} message(s) sent` : 'Nothing sent (no one with pending work / a Telegram number, or setup incomplete)', !data);
       }
       setTimeout(loadLog, 2500);
       await loadLog();
@@ -2782,7 +2825,7 @@ async function renderWhatsApp(box) {
 }
 
 /* =====================================================================
-   PHASE 4 — Billing · Client documents · Notices · Reports · Client WhatsApp
+   PHASE 4 — Billing · Client documents · Notices · Reports · Client Telegram
    ===================================================================== */
 const P4 = () => 'invoice_prefix' in settings;
 const safe = q => Promise.resolve(q).catch(e => ({ error: e }));           // update-phase4.sql has been run
@@ -2801,7 +2844,7 @@ function amountWords(n) {
 }
 const isOpenNotice = s => s === 'Open' || s === 'Reply drafted' || s === 'Hearing';
 
-/* ---------- WhatsApp text helpers (manual send, works without Meta templates) ---------- */
+/* ---------- Telegram text helpers (manual send, works without Meta templates) ---------- */
 const docsRequestMsg = (c, t, missing) => `Dear ${c.contact_person || c.name},\nFor ${t.return_name} - ${t.period}${t.due_date ? ' (due ' + fmtDate(t.due_date) + ')' : ''}, we are waiting for:\n${(missing && missing.length ? missing : ['your documents / data']).map(x => '- ' + x).join('\n')}\nPlease share at the earliest so we can file on time.\nStatus: ${statusUrl(c.status_token)}\n- ${firmName()}`;
 
 /* =====================================================================
@@ -3053,7 +3096,7 @@ async function renderDue(box, due) {
         ${fuOn ? `<td class="small">${l ? `${FU_ICON[l.mode] || ''} ${fmtDate(l.on_date).slice(0, 6)} · ${esc(l.mode)}${cnt[cid] > 1 ? ` <span class="muted">(${cnt[cid]}×)</span>` : ''}
             ${l.note ? `<div class="muted">${esc(l.note)}</div>` : ''}${l.promised_on ? `<div>Promised: <b>${fmtDate(l.promised_on)}</b></div>` : ''}
             ${l.next_on ? `<div class="${l.next_on <= t ? 'late' : 'muted'}">Next: ${fmtDate(l.next_on)}</div>` : ''}` : '<span class="muted">None yet</span>'}</td>` : ''}
-        <td class="row-btns"><a class="btn sm" href="${esc(waShare(payMsg(c, bal, nos), c.phone))}" target="_blank" rel="noopener">WhatsApp</a>
+        <td class="row-btns"><a class="btn sm" href="${esc(waShare(payMsg(c, bal, nos), c.phone))}" target="_blank" rel="noopener">Telegram</a>
           ${mail ? `<a class="btn sm" href="${esc(mail)}">Email</a>` : ''}
           ${fuOn ? `<button class="btn sm primary" data-pfu="${cid}">Log follow-up</button>` : ''}</td></tr>`; }).join('')}
     </tbody></table>` : '<div class="empty">Nothing in this view.</div>'}</div>
@@ -3436,7 +3479,7 @@ async function docsSection(task, can, host, onChange) {
     const got = docs.filter(d => d.received).length, missing = docs.filter(d => !d.received).map(d => d.name);
     host.innerHTML = `<div class="docs-box"><div class="docs-head"><h4 style="margin:0">Documents from client</h4>
         <span class="muted small">${docs.length ? `${got} of ${docs.length} received${got === docs.length ? ' ✓' : ''}` : 'none listed'}</span><span class="spacer"></span>
-        ${missing.length && c.phone ? `<a class="btn sm" href="${esc(waShare(docsRequestMsg(c, task, missing), c.phone))}" target="_blank" rel="noopener">Ask on WhatsApp</a>` : ''}
+        ${missing.length && c.phone ? `<a class="btn sm" href="${esc(waShare(docsRequestMsg(c, task, missing), c.phone))}" target="_blank" rel="noopener">Ask on Telegram</a>` : ''}
         ${missing.length && clientEmails(c).length ? `<a class="btn sm ghost" href="mailto:${esc(clientEmails(c).join(','))}?subject=${encodeURIComponent('Documents needed: ' + task.return_name + ' ' + task.period)}&body=${encodeURIComponent(docsRequestMsg(c, task, missing))}">Email</a>` : ''}</div>
       <div class="docs-list">${docs.map(d => `<label class="doc ${d.received ? 'got' : ''}"><input type="checkbox" data-doc="${d.id}" ${d.received ? 'checked' : ''} ${can ? '' : 'disabled'}><span>${esc(d.name)}</span>${d.received_on ? `<em>${fmtDate(d.received_on).slice(0, 6)}</em>` : ''}${can ? `<button type="button" class="link small" data-docx="${d.id}" aria-label="Remove">✕</button>` : ''}</label>`).join('')}</div>
       ${can ? `<div class="toolbar" style="margin:8px 0 0"><input data-docnew placeholder="Add a document…" style="flex:1;min-width:200px"><button class="btn sm" data-docadd>+ Add</button></div>` : ''}
@@ -3711,7 +3754,7 @@ function shareUpdates(pub) {
   const emails = profiles.filter(p => p.active && p.email).map(p => p.email).join(',');
   modal('Share updates with the team', `<p class="muted small" style="margin-top:0">${recent.length} update${recent.length > 1 ? 's' : ''} from the last month.</p>
     <textarea rows="10" style="width:100%" readonly>${esc(text)}</textarea>
-    <div class="toolbar" style="margin-top:10px"><a class="btn primary" href="${esc(waShare(text))}" target="_blank" rel="noopener">Send on WhatsApp (pick group)</a>
+    <div class="toolbar" style="margin-top:10px"><a class="btn primary" href="${esc(waShare(text))}" target="_blank" rel="noopener">Send on Telegram</a>
       <a class="btn" href="mailto:${esc(emails)}?subject=${encodeURIComponent(firmName() + ' - Law updates')}&body=${encodeURIComponent(text)}">Email the team</a></div>`);
 }
 
@@ -3736,7 +3779,7 @@ const portalMsg = (c, link) => `Dear ${c.contact_person || c.name},\nYou can now
 function showPortalLink(c, email, link) {
   modal('Send the login link to the client', `<p class="small" style="margin-top:0">Login: <b>${esc(email)}</b>. Send this message to the client — the link lets them set a password. If it expires, use “New link”.</p>
     <textarea rows="9" style="width:100%" readonly>${esc(portalMsg(c, link))}</textarea>
-    <div class="toolbar" style="margin-top:10px">${c.phone ? `<a class="btn primary" href="${esc(waShare(portalMsg(c, link), c.phone))}" target="_blank" rel="noopener">Send on WhatsApp</a>` : ''}
+    <div class="toolbar" style="margin-top:10px">${c.phone ? `<a class="btn primary" href="${esc(waShare(portalMsg(c, link), c.phone))}" target="_blank" rel="noopener">Send on Telegram</a>` : ''}
       <a class="btn" href="mailto:${esc(email)}?subject=${encodeURIComponent(firmName() + ' - client portal login')}&body=${encodeURIComponent(portalMsg(c, link))}">Email</a>
       <button class="btn" data-cpy>Copy message</button></div>`).el.querySelector('[data-cpy]').onclick = () => copy(portalMsg(c, link));
 }
@@ -3789,8 +3832,8 @@ async function renderClientFiles(box, task) {
 /* =====================================================================
    FOLLOW-UPS (client data + payments)
    ===================================================================== */
-const FU_MODES = ['Phone call', 'Email', 'WhatsApp', 'Visit / meeting', 'Other'];
-const FU_ICON = { 'Phone call': '📞', 'Email': '✉️', 'WhatsApp': '💬', 'Visit / meeting': '🤝', 'Other': '•' };
+const FU_MODES = ['Phone call', 'Email', 'Telegram', 'Visit / meeting', 'Other'];
+const FU_ICON = { 'Phone call': '📞', 'Email': '✉️', 'Telegram': '💬', 'Visit / meeting': '🤝', 'Other': '•' };
 const daysFrom = (a, b = today()) => Math.round((new Date(b + 'T00:00:00') - new Date(a + 'T00:00:00')) / 864e5);
 const fuLine = r => {
   if (!r.fu_count) return '';
@@ -3819,7 +3862,7 @@ async function logFollowup({ kind = 'task', task, client_id, bal = 0, invNos = [
     : `<b>${esc(c.name || '')}</b> · balance <b>${inr(bal)}</b> · ${esc(invNos.join(', '))}`;
   const body = `<p class="muted small" style="margin-top:0">${head}</p>
     <div class="toolbar" style="margin:0 0 12px">${c.phone ? `<a class="btn sm" href="tel:${esc(c.phone)}">📞 Call ${esc(c.phone)}</a>` : ''}
-      ${wa ? `<a class="btn sm" href="${esc(wa)}" target="_blank" rel="noopener">💬 WhatsApp message</a>` : ''}
+      ${wa ? `<a class="btn sm" href="${esc(wa)}" target="_blank" rel="noopener">💬 Telegram message</a>` : ''}
       ${mail ? `<a class="btn sm" href="${esc(mail)}">✉️ Email</a>` : ''}
       ${!c.phone && !mail ? '<span class="muted small">No phone or email saved for this client.</span>' : ''}</div>
     <div class="form-grid">
@@ -3895,7 +3938,7 @@ VIEWS.workload = async v => {
       ${F ? `<td class="r">${s.fu}</td>` : ''}
       <td class="row-btns"><a class="btn sm" href="#/work" data-wls="${s.id || 'none'}">Open list</a></td></tr>`).join('')}
     </tbody></table></div>
-    <p class="muted small">Open work and overdue are as of today. “On time” = filed on or before the due date, for work due in the selected month. Follow-ups = calls / mails / WhatsApp logged in that month.</p>`;
+    <p class="muted small">Open work and overdue are as of today. “On time” = filed on or before the due date, for work due in the selected month. Follow-ups = calls / mails / Telegram logged in that month.</p>`;
   $('#wlM').onchange = e => { wlMonth = e.target.value || today().slice(0, 7); route(); };
   $$('[data-wls]', v).forEach(a => a.onclick = () => { wf = { ...WF_DEFAULT, staff: a.dataset.wls }; });
   countUp(v);
@@ -5117,8 +5160,8 @@ VIEWS.gst = async v => {
       changes: `<p class="late"><b>The senior asked for changes.</b> Update the workings, then send again.</p><div class="toolbar">${btn('send', 'Send again for verification', 'primary')}</div>`,
       approved: `<p class="ok-t"><b>Approved</b> ${rev && rev.decided_at ? 'on ' + sh(rev.decided_at) : ''}${rev && rev.decided_via ? ` (${rev.decided_via === 'link' ? 'by link' : rev.decided_via === 'email' ? 'by email reply' : 'in the tracker'})` : ''}. File ${K.label} on the portal, then upload the ${K.label} acknowledgement.</p>
         <p class="small muted">${settings.auto_send_filed ? `Automatic: when the ${K.label} acknowledgement is uploaded, it goes to the client with the workings.` : 'Automatic sending is off (Settings). Use the button after filing.'}</p>
-        <div class="toolbar">${ackBtn}${btn('client', 'Send acknowledgement &amp; workings to client', filed ? 'primary' : '')}${btn('wa', 'WhatsApp')}</div>`,
-      sent_client: `<p class="ok-t"><b>${K.label} filed and sent to the client.</b></p><div class="toolbar">${btn('client', 'Send again to client')}${btn('wa', 'WhatsApp')}</div>`
+        <div class="toolbar">${ackBtn}${btn('client', 'Send acknowledgement &amp; workings to client', filed ? 'primary' : '')}${btn('wa', 'Telegram')}</div>`,
+      sent_client: `<p class="ok-t"><b>${K.label} filed and sent to the client.</b></p><div class="toolbar">${btn('client', 'Send again to client')}${btn('wa', 'Telegram')}</div>`
     }[RS];
     return `<section class="rev-p rev-${RS}" aria-label="${K.label} verification"><div class="rev-h"><h3>${K.label} — senior verification</h3><span class="pill ${REV.STATE[RS][1]}">${REV.STATE[RS][0]}</span></div>${draftRow}${body}
       ${rem ? `<h4>Remarks</h4><ul class="rev-l">${rem}</ul>` : ''}${sent ? `<h4>Sent to the client</h4><ul class="rev-l">${sent}</ul>` : ''}</section>`;
@@ -5127,7 +5170,7 @@ VIEWS.gst = async v => {
     const sm = gsum(row), st = itcState(sm), D3 = draft3b(row, sm, c, st.ready ? st.cl.claim : null), K = REV.KIND[kind], rev = revs[kind];
     if (act === 'wa') {
       const txt = `Dear ${c.contact_person || c.name}, your ${K.label} for ${REV.mon(period)} is filed. The acknowledgement and workings have been emailed to you, and you can also download them from your client portal: ${new URL('portal.html', location.href).href} — ${settings.firm_name || cfg.FIRM_NAME || ''}`;
-      window.open(waShare(txt, c.phone), '_blank', 'noopener'); return;
+      tgSendOrOpen(txt, c.phone); return;
     }
     if (act === 'ack') { const tk = taskOf(kind); if (tk) ackForTask(tk, async () => { gtasks = await loadGT().catch(() => gtasks); revs = await REV.load(c, period).catch(() => revs); render(); }); return; }
     if (act === 'send' && kind === 'gstr3b' && !G3gate.ok) { toast(`GSTR-3B can go for verification only after 2B is complete — ${G3gate.why.join('; ')}`, true); return; }
@@ -5430,11 +5473,11 @@ VIEWS.gst = async v => {
     }
 
     if (grRecView === 'sup') {
-      rb.innerHTML = sup.length ? `<p class="muted small" style="margin-top:0">Suppliers whose documents are missing from 2B (this month and earlier months), or who must amend an amount. Open the message, check it, and send it from your own WhatsApp or email.</p>
+      rb.innerHTML = sup.length ? `<p class="muted small" style="margin-top:0">Suppliers whose documents are missing from 2B (this month and earlier months), or who must amend an amount. Open the message, check it, and send it from your own Telegram or email.</p>
         <div class="rc-sups">${sup.map((s, n) => { const f = fu[s.g]; return `<div class="rc-sup"><div class="rc-sup-h"><div><b>${esc(s.n || 'Supplier')}</b><div class="muted small">${esc(s.g)} · ${s.docs.length} document${s.docs.length > 1 ? 's' : ''} · GST ${gst$(s.tax)}</div></div><span class="spacer"></span>
           ${f ? `<span class="pill g small">Followed up ${sh(f.at)}${f.n > 1 ? ` · ${f.n} times` : ''}</span>` : '<span class="pill a small">Not followed up</span>'}</div>
           <ul class="rc-docs">${s.docs.map(d => `<li>${esc(d.i)} · ${dt(d.d)} · GST ${gst$(gTax(d))}${d.why === 'differs' ? ' · <span class="late">amount differs</span>' : d.from && d.from !== period ? ` · <span class="muted">since ${RECO.monthName(d.from)}</span>` : ''}</li>`).join('')}</ul>
-          <div class="toolbar" style="margin:8px 0 0"><button class="btn sm" data-sm="${n}">View message</button><a class="btn sm" target="_blank" rel="noopener" href="${waShare(RECO.message(s, c, period))}">WhatsApp</a>
+          <div class="toolbar" style="margin:8px 0 0"><button class="btn sm" data-sm="${n}">View message</button><a class="btn sm" target="_blank" rel="noopener" href="${waShare(RECO.message(s, c, period))}">Telegram</a>
           <a class="btn sm" href="mailto:?subject=${encodeURIComponent(`GST invoices not in GSTR-2B – ${c.name}`)}&body=${encodeURIComponent(RECO.message(s, c, period))}">Email</a>
           <span class="spacer"></span><button class="btn sm primary" data-fu="${esc(s.g)}">✓ Mark followed up</button></div></div>`; }).join('')}</div>`
         : `<div class="empty">${M === '2b_confirm' ? 'No supplier follow-up for this method — there is no purchase register to compare.' : 'No supplier follow-up needed — everything in books is in 2B.'}</div>`;
@@ -5483,9 +5526,9 @@ VIEWS.gst = async v => {
       const portal = new URL('portal.html', location.href).href, mL = RECO.monthName(period);
       const lines = items.map((it, i) => `${i + 1}. ${it.x.n || it.x.g} – ${it.x.cn ? 'Credit note' : 'Bill'} ${it.x.i}${it.x.d ? ' dated ' + it.x.d.split('-').reverse().join('-') : ''} – GST ${gst$(gTax(it.x))}`);
       const txt = `Dear ${c.contact_person || c.name},\n\nThe following purchase bills are in your GSTR-2B for ${mL}${M === '2b_confirm' ? '' : ' but not in your purchase register'}. Please tell us which ones we should take input tax credit for:\n\n${lines.join('\n')}\n\nFor each bill, reply: Take credit / Don't take now / Not my purchase.\nYou can also mark them on your client portal: ${portal}\n\nThank you,\n${settings.firm_name || cfg.FIRM_NAME || ''}`;
-      const m = modal(`Send ${items.length} bill${items.length > 1 ? 's' : ''} to ${c.name}`, `<p class="muted small" style="margin-top:0">The bills are shown on the client's portal under “Bills to confirm”, where the client marks each one. Their answers come back here. You can also send the message below on WhatsApp or email.</p>
+      const m = modal(`Send ${items.length} bill${items.length > 1 ? 's' : ''} to ${c.name}`, `<p class="muted small" style="margin-top:0">The bills are shown on the client's portal under “Bills to confirm”, where the client marks each one. Their answers come back here. You can also send the message below on Telegram or email.</p>
         <textarea rows="14" style="width:100%" id="askMsg">${esc(txt)}</textarea>
-        <div class="toolbar" style="margin-top:8px"><a class="btn sm" id="askWa" target="_blank" rel="noopener" href="${waShare(txt, c.phone)}">WhatsApp</a><a class="btn sm" href="mailto:${esc(c.email || '')}?subject=${encodeURIComponent(`Purchase bills to confirm – ${mL}`)}&body=${encodeURIComponent(txt)}">Email</a><button class="btn sm" id="askCopy">Copy</button></div>`,
+        <div class="toolbar" style="margin-top:8px"><a class="btn sm" id="askWa" target="_blank" rel="noopener" href="${waShare(txt, c.phone)}">Telegram</a><a class="btn sm" href="mailto:${esc(c.email || '')}?subject=${encodeURIComponent(`Purchase bills to confirm – ${mL}`)}&body=${encodeURIComponent(txt)}">Email</a><button class="btn sm" id="askCopy">Copy</button></div>`,
         { wide: true, saveText: 'Show on client portal', onSave: async () => {
           const at = new Date().toISOString();
           const ok = await saveReco(r => { r.ask = r.ask || {}; r.ask.at = at; r.ask.by = me.id; r.ask.items = { ...(r.ask.items || {}),
@@ -6631,7 +6674,7 @@ VIEWS.renewals = async v => {
       <button class="mini amber" data-w="7"><span>Due in 7 days</span><b>${n7}</b></button>
       <button class="mini blue" data-w="30"><span>Due in 30 days</span><b>${n30}</b></button>
       <button class="mini green" data-w="remind"><span>Client reminders to send</span><b>${nRem}</b></button></div>
-    <p class="muted small" style="margin:-4px 2px 12px">Reminders fall due 30, 15 and 7 days before expiry (and once after it expires). Sending one on WhatsApp or email ticks it off.</p>
+    <p class="muted small" style="margin:-4px 2px 12px">Reminders fall due 30, 15 and 7 days before expiry (and once after it expires). Sending one on Telegram or email ticks it off.</p>
     <div class="toolbar"><select id="rnW" aria-label="Show">
         <option value="due">Expired or due in 90 days</option><option value="remind">Reminder due now</option><option value="30">Due in 30 days</option><option value="7">Due in 7 days</option><option value="expired">Expired</option>
         <option value="live">All active</option><option value="all">All, including closed</option></select>
@@ -6663,7 +6706,7 @@ VIEWS.renewals = async v => {
           <td class="${cls}">${x.expires_on ? fmtDate(x.expires_on) : '<span class="muted">No expiry</span>'}${d != null && rnLive(x) ? `<div class="small">${d < 0 ? `${-d} day${d === -1 ? '' : 's'} ago` : d === 0 ? 'today' : `${d} day${d === 1 ? '' : 's'} left`}</div>` : ''}</td>
           <td class="nowrap">${dots}</td><td>${esc(profName(x.assigned_to) || '—')}</td>
           <td><span class="st st-${slug(x.status === 'Active' ? 'In progress' : x.status === 'Renewal in progress' ? 'Ready to file' : 'Not applicable')}">${esc(x.status)}</span></td>
-          <td class="row-btns">${rnLive(x) && x.expires_on ? `<a class="btn sm ${s.due ? 'primary' : ''}" data-rs="wa" data-id="${x.id}" href="#" target="_blank" rel="noopener">WhatsApp</a><a class="btn sm" data-rs="mail" data-id="${x.id}" href="#">Email</a>` : ''}
+          <td class="row-btns">${rnLive(x) && x.expires_on ? `<a class="btn sm ${s.due ? 'primary' : ''}" data-rs="wa" data-id="${x.id}" href="#" target="_blank" rel="noopener">Telegram</a><a class="btn sm" data-rs="mail" data-id="${x.id}" href="#">Email</a>` : ''}
             ${rnLive(x) ? `<button class="btn sm" data-rr="${x.id}">Renewed</button>` : ''}<button class="btn sm ghost" data-re="${x.id}">Edit</button></td></tr>`; }).join('')}
       </tbody></table></div>` : `<div class="table-wrap"><div class="empty">${all.length ? 'Nothing in this view. Try "All active".' : 'No renewals yet. Add one, or import your list from Excel (download the template first).'}</div></div>`;
   };
@@ -6687,8 +6730,8 @@ VIEWS.renewals = async v => {
       const msg = rnMsg(x, c);
       if (a.dataset.rs === 'wa') a.href = waShare(msg, c.phone);
       else { const to = firstEmail(c); if (!to) { e.preventDefault(); toast('No email saved for this client (Clients → Edit)', true); return; } a.href = mailUrl(c.email, `${x.kind} renewal – ${c.name}`, msg); }
-      if (a.dataset.rs === 'wa' && !c.phone) toast('No phone saved for this client — pick the contact in WhatsApp');
-      rnMarkSent(x, a.dataset.rs === 'wa' ? 'WhatsApp' : 'Email').then(render);
+      if (a.dataset.rs === 'wa' && !c.phone) toast('No phone saved for this client — pick the contact in Telegram');
+      rnMarkSent(x, a.dataset.rs === 'wa' ? 'Telegram' : 'Email').then(render);
     }
     if (rr) renewedDone(all.find(y => y.id === rr));
     if (re) editRenewal(all.find(y => y.id === re));
@@ -6951,7 +6994,7 @@ VIEWS.taxpay = async v => {
             <td class="r"><b data-tot>${inr(totalOf(r.a))}</b></td><td class="${late ? 'late' : ''}">${fmtDate(r.due)}</td>
             <td class="small">${x.sent_on ? `${fmtDate(x.sent_on)}<div class="muted">${esc(x.sent_via || '')}${x.sent_count > 1 ? ' · ' + x.sent_count + '×' : ''}</div>` : '<span class="muted">—</span>'}</td>
             <td class="small">${x.paid_on ? `<span class="st st-filed">Paid ${fmtDate(x.paid_on)}</span>${x.challan ? `<div class="muted">${esc(x.challan)}</div>` : ''}` : '<span class="muted">—</span>'}</td>
-            <td class="row-btns"><a class="btn sm ${x.sent_on ? '' : 'primary'}" data-send="wa" href="#" target="_blank" rel="noopener">WhatsApp</a><a class="btn sm" data-send="mail" href="#">Email</a><button class="btn sm ghost" data-paid>${x.paid_on ? 'Edit paid' : 'Mark paid'}</button></td></tr>`; }).join('')}
+            <td class="row-btns"><a class="btn sm ${x.sent_on ? '' : 'primary'}" data-send="wa" href="#" target="_blank" rel="noopener">Telegram</a><a class="btn sm" data-send="mail" href="#">Email</a><button class="btn sm ghost" data-paid>${x.paid_on ? 'Edit paid' : 'Mark paid'}</button></td></tr>`; }).join('')}
         </tbody></table></div>` : `<div class="table-wrap"><div class="empty">${rows.length ? 'Nothing to show.' : tpTab === 'GST' ? 'No GST clients with a payment due for this month (needs GSTIN and the GST service ticked).' : tpTab === 'TDS' ? 'No TDS clients — tick the TDS service or add a TAN on the client.' : 'No clients with a PAN.'}</div></div>`}`;
   };
   render();
@@ -6969,9 +7012,9 @@ VIEWS.taxpay = async v => {
     const r = readRow(tr), c = r.c;
     if (a) {
       const msg = taxMsg(tpTab, c, ctx(r)), wa = a.dataset.send === 'wa';
-      if (wa) { a.href = waShare(msg, c.phone); if (!c.phone) toast('No phone saved for this client — pick the contact in WhatsApp'); }
+      if (wa) { a.href = waShare(msg, c.phone); if (!c.phone) toast('No phone saved for this client — pick the contact in Telegram'); }
       else { if (!firstEmail(c)) { e.preventDefault(); toast('No email saved for this client (Clients → Edit)', true); return; } a.href = mailUrl(c.email, `${tpTab === 'GST' ? 'GST' : tpTab === 'TDS' ? 'TDS' : 'Advance tax'} payment – ${period} – ${c.name}`, msg); }
-      save(r, { sent_on: today(), sent_via: wa ? 'WhatsApp' : 'Email', sent_by: me.id, sent_count: ((r.x && r.x.sent_count) || 0) + 1 }).then(render).catch(err => toast(friendly(err), true));
+      save(r, { sent_on: today(), sent_via: wa ? 'Telegram' : 'Email', sent_by: me.id, sent_count: ((r.x && r.x.sent_count) || 0) + 1 }).then(render).catch(err => toast(friendly(err), true));
     }
     if (p) {
       const x = r.x || {};
@@ -7053,7 +7096,7 @@ async function openOnboarding(c, after = () => route()) {
   const body = `<div class="ob-head"><div><b>${esc(c.name)}</b> <span class="muted small">· started ${fmtDate(ob.started_on)}</span></div><span class="spacer"></span><span class="badge ${ob.status === 'Completed' ? 'ok' : ''}" data-obp></span></div>
     ${OB_GROUPS.map(g => `<h4 class="ob-g">${esc(g)}</h4>${items.map((it, i) => [it, i]).filter(([it]) => (it.grp || 'Set-up') === g || (g === 'Set-up' && !OB_GROUPS.includes(it.grp))).map(([it, i]) => itemRow(it, i)).join('')}
       ${g === 'KYC documents' ? `<div class="toolbar" style="margin:6px 0 0"><input data-obadd placeholder="Add another document (e.g. MOA / AOA, LLP agreement)"><button type="button" class="btn sm" data-obaddb>Add</button><span class="spacer"></span>
-        <a class="btn sm" href="#" data-obask="wa" target="_blank" rel="noopener">Ask client on WhatsApp</a><a class="btn sm" href="#" data-obask="mail">Email</a></div>` : ''}
+        <a class="btn sm" href="#" data-obask="wa" target="_blank" rel="noopener">Ask client on Telegram</a><a class="btn sm" href="#" data-obask="mail">Email</a></div>` : ''}
       ${g === 'Engagement' ? `<div class="ob-eng"><div class="form-grid"><label>Letter date<input type="date" data-l="date" value="${esc(letter.date || today())}"></label>
           <label>Signed copy received on<input type="date" data-l="signed_on" value="${esc(letter.signed_on || '')}"></label></div>
         <div class="small muted" style="margin:10px 0 4px;font-weight:600">Fee agreement</div>
@@ -7341,7 +7384,7 @@ VIEWS.clientreport = async v => {
   const rep = new Map((r.data || []).map(x => [x.client_id, x]));
   const list = myClients();
   v.innerHTML = `<div class="page-head"><h2>Monthly client report</h2><span class="spacer"></span><label class="small muted" for="crM">Month</label><input type="month" id="crM" value="${esc(crMonth)}"></div>
-    <p class="muted small" style="margin-top:-6px">Returns filed with ARN, tax paid, ITC, pending items and purchase invoices missing in GSTR-2B — for each client. <b>Publish</b> puts it in the client portal; WhatsApp / Email send the summary.</p>
+    <p class="muted small" style="margin-top:-6px">Returns filed with ARN, tax paid, ITC, pending items and purchase invoices missing in GSTR-2B — for each client. <b>Publish</b> puts it in the client portal; Telegram / Email send the summary.</p>
     <div class="bento-stats card stats4" style="margin-bottom:14px"><div class="mini blue"><span>Clients</span><b>${list.length}</b></div>
       <div class="mini green"><span>Published to portal</span><b>${list.filter(c => (rep.get(c.id) || {}).published).length}</b></div>
       <div class="mini amber"><span>Not sent yet</span><b>${list.filter(c => !(rep.get(c.id) || {}).sent_on).length}</b></div>
@@ -7353,7 +7396,7 @@ VIEWS.clientreport = async v => {
       return `<tr data-c="${c.id}"><td><b>${esc(c.name)}</b><div class="muted small">${esc(c.gstin || c.pan || '')}</div></td><td class="wrap">${(c.services || []).map(wtBadge).join(' ')}</td>
         <td class="small">${x.published ? `<span class="st st-filed">Published ${fmtDate((x.published_at || '').slice(0, 10))}</span>` : '<span class="muted">—</span>'}</td>
         <td class="small">${x.sent_on ? `${fmtDate(x.sent_on)}<div class="muted">${esc(x.sent_via || '')}</div>` : '<span class="muted">—</span>'}</td>
-        <td class="row-btns"><button class="btn sm" data-cr="view">Report / PDF</button><button class="btn sm ${x.sent_on ? '' : 'primary'}" data-cr="wa">WhatsApp</button><button class="btn sm" data-cr="mail">Email</button>
+        <td class="row-btns"><button class="btn sm" data-cr="view">Report / PDF</button><button class="btn sm ${x.sent_on ? '' : 'primary'}" data-cr="wa">Telegram</button><button class="btn sm" data-cr="mail">Email</button>
           ${isManager() ? `<button class="btn sm ghost" data-cr="${x.published ? 'unpub' : 'pub'}">${x.published ? 'Unpublish' : 'Publish to portal'}</button>` : ''}</td></tr>`; }).join('')}</tbody></table></div>`
       : '<div class="table-wrap"><div class="empty">No clients.</div></div>';
   };
@@ -7376,7 +7419,7 @@ VIEWS.clientreport = async v => {
     try {
       const R = await buildClientReport(c, crMonth);
       if (act === 'view') { w.document.open(); w.document.write(clientReportHtml(R)); w.document.close(); await store(c, R, {}); }
-      if (act === 'wa') { if (!c.phone) toast('No phone saved for this client — pick the contact in WhatsApp'); w.location.href = waShare(clientReportMsg(R, c, !!x.published), c.phone); await store(c, R, { sent_on: today(), sent_via: 'WhatsApp' }); }
+      if (act === 'wa') { if (!c.phone) toast('No phone saved for this client — pick the contact in Telegram'); tgSendOrOpen(clientReportMsg(R, c, !!x.published), c.phone, w); await store(c, R, { sent_on: today(), sent_via: 'Telegram' }); }
       if (act === 'mail') { location.href = mailUrl(c.email, `Compliance report – ${R.label} – ${c.name}`, clientReportMsg(R, c, !!x.published)); await store(c, R, { sent_on: today(), sent_via: 'Email' }); }
       if (act === 'pub') { await store(c, R, { published: true, published_at: new Date().toISOString(), published_by: me.id }); toast(`Published — ${c.name} can see it in the client portal`); }
       if (act === 'unpub') { await must(sb.from('client_reports').update({ published: false }).eq('client_id', c.id).eq('period', crMonth + '-01')); rep.set(c.id, { ...x, published: false }); draw(); toast('Removed from the client portal'); }
@@ -8920,7 +8963,7 @@ function tdsCerts(body, ctx) {
       ${L.length ? `<div class="table-wrap"><table><thead><tr><th><input type="checkbox" id="cAll" aria-label="Select all"></th><th>Deductee</th><th>PAN</th><th class="r">Amount</th><th class="r">TDS</th><th>Issued on</th><th>Sent by</th></tr></thead><tbody>
         ${L.map((p, i) => { const x = certs[p.k]; return `<tr data-i="${i}"><td><input type="checkbox" data-pick="${i}" aria-label="Select"></td><td class="wrap"><b>${esc(p.name)}</b></td><td>${esc(p.pan || 'no PAN')}</td><td class="r">${inr(p.amt)}</td><td class="r">${inr(p.tds)}</td>
           <td>${x ? `<span class="st st-filed">${fmtDate(x.on)}</span>` : `<span class="${late ? 'late' : 'muted'}">Not issued</span>`}</td><td class="small">${x ? esc(x.via || '') : ''}</td></tr>`; }).join('')}</tbody></table></div>
-        <div class="toolbar" style="margin-top:10px"><label class="small">Issued on <input type="date" id="cOn" value="${today()}"></label><select id="cVia">${opts(['Email', 'WhatsApp', 'By hand', 'Courier'], 'Email')}</select>
+        <div class="toolbar" style="margin-top:10px"><label class="small">Issued on <input type="date" id="cOn" value="${today()}"></label><select id="cVia">${opts(['Email', 'Telegram', 'By hand', 'Courier'], 'Email')}</select>
           <button class="btn primary" id="cMark">Mark selected issued</button><button class="btn ghost" id="cUn">Clear selected</button><span class="spacer"></span><button class="btn sm" id="cCsv">Export CSV</button></div>` : '<p class="muted">No deductees with TDS in this period.</p>'}</div>`;
   $$('[data-q]', body).forEach(b => b.onclick = () => { tdsQ = +b.dataset.q; route(); });
   $$('[data-f]', body).forEach(b => b.onclick = () => { tdsForm = b.dataset.f; route(); });
@@ -9899,7 +9942,7 @@ const HELP = {
       'Fees and invoices are in **Payments & billing → Billing & fees** (Managers): fee list, invoices, payments received and outstanding.',
       [['Billing & fees', 'billing']]],
     [['tax payment', 'intimation', 'advance tax', 'pay tax', 'how much to pay'],
-      '**Payments & billing → Tax payment intimation** sends clients the GST / TDS / advance tax amount to pay and the due date, by WhatsApp or email.',
+      '**Payments & billing → Tax payment intimation** sends clients the GST / TDS / advance tax amount to pay and the due date, by Telegram or email.',
       [['Tax payment intimation', 'taxpay']]],
     [['report', 'monthly report', 'performance', 'on time'],
       '**Clients → Monthly client reports** makes a status report to send to each client. Partners see office performance in **Office → Reports**.',
@@ -10141,7 +10184,7 @@ VIEWS.health = async v => {
       ${sec('Unpaid fees', [...I.fee90, ...I.fee30].map(i => `<li>Invoice ${esc(i.inv_no || '')} of ${fmtDate(i.inv_date)} — ${inr(num(i.total) - num(i.paid))} due</li>`))}
       ${I.ignored.length ? `<p class="small">${I.ignored.length} automatic data reminders sent in the last 30 days without the data arriving.</p>` : ''}
       ${!x.reasons.length ? '<p class="muted">Nothing pending — all work on time, no open notices or unpaid fees.</p>' : ''}`,
-      { extra: `<a class="btn" href="#/work" data-hw>Open work</a>${x.c.phone ? `<a class="btn" href="${esc(waShare('Dear ' + (x.c.contact_person || x.c.name) + ',\n', x.c.phone))}" target="_blank" rel="noopener">WhatsApp</a>` : ''}` });
+      { extra: `<a class="btn" href="#/work" data-hw>Open work</a>${x.c.phone ? `<a class="btn" href="${esc(waShare('Dear ' + (x.c.contact_person || x.c.name) + ',\n', x.c.phone))}" target="_blank" rel="noopener">Telegram</a>` : ''}` });
     $('[data-hw]', m.el).onclick = () => { wf = { ...WF_DEFAULT, client: id, status: 'open' }; m.close(); };
   };
 };
@@ -10497,7 +10540,7 @@ async function dashMine(body) {
     <div class="card"><h3>Overdue (${overdue.length})</h3><div data-t="late"></div></div>
     <div class="card"><h3>Due today (${todayL.length})</h3><div data-t="today"></div></div>
     <div class="card"><h3>Due in the next 7 days (${week.length})</h3><div data-t="week"></div></div>
-    <div class="card"><h3>Waiting for client data (${waiting.length})</h3><p class="muted small" style="margin-top:-4px">Use Follow-up to call or WhatsApp the client and note when they promised the data.</p><div data-t="wait"></div></div>
+    <div class="card"><h3>Waiting for client data (${waiting.length})</h3><p class="muted small" style="margin-top:-4px">Use Follow-up to call or Telegram the client and note when they promised the data.</p><div data-t="wait"></div></div>
     ${!settings.notices_off && (nLateM || nSoonM || nHearM) ? `<div class="od-fees">${noticeChip(nLateM, nSoonM, nHearM)}</div>` : ''}`;
   const refresh = () => route();
   [['late', overdue], ['today', todayL], ['week', week], ['wait', waiting]].forEach(([k, list]) => {
@@ -10816,7 +10859,7 @@ VIEWS.docs = async v => {
             <div class="muted small">${x.ts.map(t => `${esc(t.return_name)} ${esc(t.period || '')} <span class="st st-${slug(t.status)}">${esc(t.status)}</span>`).join(' · ')}</div></div><span class="spacer"></span>
             ${x.items.length ? `<span class="small"><b>${got}</b> of ${x.items.length} received</span><div class="hbar"><i class="${pct === 100 ? 'green' : pct >= 50 ? 'amber' : 'red'}" style="width:${pct}%"></i></div>` : '<span class="small muted">No list</span>'}</div>
           <div class="md-docs">${x.items.length ? x.items.map(i => `<button type="button" class="md-doc ${i.got ? 'got' : ''}" data-mdn="${esc(i.n)}" ${can ? '' : 'disabled'} aria-pressed="${i.got}">${i.got ? '✓' : '○'} ${esc(i.n)}</button>`).join('') : '<span class="muted small">No document list for this work — add one in the work item’s Checklist.</span>'}</div>
-          ${x.missing.length && can ? `<div class="md-foot">${x.c.phone ? `<a class="btn sm" target="_blank" rel="noopener" href="${esc(waShare(mdMsg(x.c, x.ts, x.missing), x.c.phone))}">Ask on WhatsApp</a>` : ''}
+          ${x.missing.length && can ? `<div class="md-foot">${x.c.phone ? `<a class="btn sm" target="_blank" rel="noopener" href="${esc(waShare(mdMsg(x.c, x.ts, x.missing), x.c.phone))}">Ask on Telegram</a>` : ''}
             ${clientEmails(x.c).length ? `<a class="btn sm ghost" href="mailto:${esc(clientEmails(x.c).join(','))}?subject=${encodeURIComponent('Documents needed: ' + x.ts.map(t => t.return_name + ' ' + t.period).join(', '))}&body=${encodeURIComponent(mdMsg(x.c, x.ts, x.missing))}">Email</a>` : ''}
             <button class="btn sm ghost" data-mdall>Mark all received</button></div>` : ''}</div>`;
       }).join('') : `<div class="table-wrap"><div class="empty">${mdf.missing ? 'Every client has sent everything for this month 🎉' : 'No work due this month.'}</div></div>`);

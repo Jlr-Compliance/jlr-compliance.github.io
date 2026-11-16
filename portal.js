@@ -106,7 +106,7 @@
     const docNames = Object.keys(byDoc).sort((a, b) => { const da = Math.min(...byDoc[a].map(x => x.t.due_date || '9')), db = Math.min(...byDoc[b].map(x => x.t.due_date || '9')); return String(da).localeCompare(String(db)) || a.localeCompare(b); });
     needDocs = byDoc;
     const needBox = need.length ? `<section class="card need-box"><h3 style="margin:0 0 4px">What we need from you</h3>
-      <p class="muted small" style="margin:0 0 10px">Upload each document once — we use it for every return that needs it. You can also send them on WhatsApp or email.</p>
+      <p class="muted small" style="margin:0 0 10px">Upload each document once — we use it for every return that needs it. You can also send them to our Telegram bot or by email.</p>
       ${docNames.map(n => { const xs = byDoc[n], first = xs.map(x => x.t.due_date).filter(Boolean).sort()[0], late = first && first < today;
         return `<div class="need-item ${late ? 'late-item' : ''}"><div><b>${esc(n)}</b>
           <div class="small ${late ? 'late' : 'muted'}">For ${xs.map(x => esc(x.t.return_name + ' · ' + x.t.period)).join(', ')} · ${late ? 'was due ' : 'due '}${fmt(first)}</div></div>

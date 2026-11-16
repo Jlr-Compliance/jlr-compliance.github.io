@@ -1434,3 +1434,8 @@ input.otp{font-size:22px;letter-spacing:.35em;text-align:center;font-variant-num
 .fd-sheet td,.fd-sheet th{padding:5px 8px}.fd-sec th{background:var(--grey-soft,#eef1f6);text-align:left;font-size:.8rem}
 .copy-n{font-variant-numeric:tabular-nums}
 @media (max-width:760px){.fd-tiles{grid-template-columns:1fr 1fr}}
+
+/* v54 new work statuses */
+.st-yet-to-start{background:var(--grey-soft);color:var(--text,#334)}
+.st-sent-for-verification{background:var(--blue-soft);color:var(--brand)}
+.st-payment-pending{background:var(--red-soft);color:var(--red)}
