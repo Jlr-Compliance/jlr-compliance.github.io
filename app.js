@@ -676,7 +676,7 @@ const navIcon = k => `<svg aria-hidden="true" width="18" height="18" viewBox="0 
 function navGroups() {
   const G = [
     ['Overview', [['dashboard', 'Dashboard'], ['calendar', 'Due-date calendar'], ['work', isManager() ? 'All work' : 'My work']]],
-    ['GST', [['work-gst', isManager() ? 'GST work' : 'My GST work', 'gstw'], ['gst', 'GST review', 'gst'], ['filing', 'Filing desk', 'filing']]],
+    ['GST', [['work-gst', isManager() ? 'GST work' : 'My GST work', 'gstw'], ['gst', 'GST review', 'gst'], ['filing', 'Filing desk', 'filing'], ['gstin', 'GSTIN check', 'gst']]],
     ['TDS', [['work-tds', isManager() ? 'TDS / TCS work' : 'My TDS work', 'tds'], ['tds', 'TDS working', 'tdsw']]],
     ['MCA', [['work-mca', isManager() ? 'MCA / ROC work' : 'My MCA work', 'mca'], ['mca', 'Companies & LLPs', 'companies']]],
     !settings.notices_off && ['Notices', [['notices', 'All notices', 'notices'], ['notices-gst', 'GST notices', 'notices'], ['notices-tds', 'TDS notices', 'notices'], ['notices-mca', 'MCA notices', 'notices']]],
@@ -1928,9 +1928,11 @@ VIEWS.clients = async v => {
   await loadRefs();
   const obR = await safe(sb.from('onboarding').select('client_id,status,items').limit(5000));
   const obMap = Object.fromEntries((obR.error ? [] : obR.data || []).map(o => [o.client_id, o]));
+  const gcR = await safe(sb.from('gstin_checks').select('gstin,status,legal_name,checked_at').limit(5000));
+  const gcMap = Object.fromEntries((gcR.error ? [] : gcR.data || []).map(x => [x.gstin, x]));
   v.innerHTML = `<div class="page-head"><h2>Clients</h2><span class="muted">${clients.filter(c => c.active).length} active</span><span class="spacer"></span>
       ${isAdmin() ? '<button class="btn ghost" id="lgLog">Login access log</button>' : ''}<button class="btn" id="tplBtn">CSV template</button><button class="btn" id="impBtn">Import CSV</button>
-      ${groupsOn && isManager() ? '<button class="btn" id="grpBtn">Groups</button>' : ''}<button class="btn primary" id="addC">+ Add client</button><input type="file" id="impFile" accept=".csv,text/csv" hidden></div>
+      ${groupsOn && isManager() ? '<button class="btn" id="grpBtn">Groups</button>' : ''}<a class="btn" href="#/gstin?from=clients" title="Check all client GSTINs — GST API or GST portal">Check GSTINs</a><button class="btn primary" id="addC">+ Add client</button><input type="file" id="impFile" accept=".csv,text/csv" hidden></div>
     <div id="cMiss"></div>
     <div class="toolbar"><input type="search" id="cq" placeholder="Search code / name / GSTIN / PAN" value="${esc(clientQ)}">
       ${groupsOn && groups.length ? `<select id="cGrp"><option value="">All groups</option>${groups.map(g => `<option value="${g.id}" ${clientGrp === g.id ? 'selected' : ''}>${esc(g.name)}</option>`).join('')}<option value="none" ${clientGrp === 'none' ? 'selected' : ''}>Not in a group</option></select>` : ''}
@@ -1948,7 +1950,7 @@ VIEWS.clients = async v => {
       ${list.map(c => `<tr>
         <td>${c.client_code ? `<span class="ccode">${esc(c.client_code)}</span>` : '<span class="late small">—</span>'}</td>
         <td class="wrap"><button class="link c-name" data-ed="${c.id}" title="Edit client"><b>${esc(c.name)}</b></button>${c.active ? '' : ' <span class="badge">inactive</span>'}${c.group_id && groupName(c.group_id) ? ` <span class="pill b small" title="Group">${esc(groupName(c.group_id))}</span>` : ''}<div class="muted small">${esc([c.contact_person, c.phone].filter(Boolean).join(' · '))}</div><div class="c-acts"><button class="btn sm" data-ed="${c.id}">✏️ Edit</button><button class="btn sm" data-lgc="${c.id}" title="GST / TDS / MCA portal logins">🔑 Logins</button><button class="btn sm" data-obc="${c.id}" title="KYC, engagement letter, fees, recurring work">${obMap[c.id] ? (obMap[c.id].status === 'Completed' ? '✓ Onboarded' : `Onboarding ${obProgress(obMap[c.id]).done}/${obProgress(obMap[c.id]).total}`) : 'Onboard'}</button></div></td>
-        <td class="small">${esc(c.gstin || '—')}</td><td class="small">${esc(c.pan || '—')}<div class="muted">${esc(c.tan || '')}</div></td>
+        <td class="small">${esc(c.gstin || '—')}${c.gstin ? gstinCheckBadge(gcMap[c.gstin], c.gstin) : ''}</td><td class="small">${esc(c.pan || '—')}<div class="muted">${esc(c.tan || '')}</div></td>
         <td>${esc(c.gst_scheme)}</td><td class="wrap">${(c.services || []).map(wtBadge).join(' ')}</td>
         <td>${esc(profName(c.default_staff) || '—')}</td>
         <td class="row-btns"><button class="btn sm" data-copy="${c.id}">Copy link</button><a class="btn sm" href="${esc(waShare(clientMsg(c), c.phone))}" target="_blank" rel="noopener" title="Send on Telegram">Telegram</a><a class="btn sm ghost" href="${esc(statusUrl(c.status_token))}" target="_blank" rel="noopener">Open</a></td>
@@ -2323,6 +2325,15 @@ async function setTeam(main) {
 
 /* GST automation */
 async function setGstSec(main) {
+  const gh = setBox(main, `<div class="card"><h3>JLR GST helper (Chrome add-on)</h3>
+      <p class="muted small">Staff log in to the GST portal themselves (password + captcha). The add-on sends GSTR-1, GSTR-3B, 2B, 2A, notices and GSTIN checks to the tracker — no client OTP. Each staff member makes their own key in GST review → Fetch from GST portal.</p>
+      <div data-ghme></div><div data-ghall style="margin-top:10px"></div></div>`);
+  gsthKeyCard($('[data-ghme]', gh));
+  safe(sb.rpc('gsth_keys_list')).then(r => { const L = (r.data || []).filter(k => !k.mine), el = $('[data-ghall]', gh); if (!el || r.error || !L.length) return;
+    el.innerHTML = `<div class="table-wrap"><table><thead><tr><th>Staff</th><th>PC</th><th>Made</th><th>Last used</th><th></th></tr></thead><tbody>${L.map(k => `<tr><td>${esc(k.user_name || '')}</td><td class="small">${esc(k.label || '')}</td>
+      <td class="small">${new Date(k.created_at).toLocaleDateString('en-IN')}</td><td class="small">${k.last_used_at ? new Date(k.last_used_at).toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' }) : 'never'}</td>
+      <td><button class="link small" data-ghrv="${k.id}">Remove</button></td></tr>`).join('')}</tbody></table></div>`;
+    el.onclick = async e => { const id = e.target.dataset.ghrv; if (!id || !confirm('Remove this add-on key?')) return; await safe(sb.rpc('gsth_revoke', { p_id: id })); e.target.closest('tr').remove(); toast('Removed'); }; });
   renderGst(setBox(main));
   await renderAutoWorkSettings(setBox(main));
 }
@@ -5055,7 +5066,7 @@ VIEWS.gst = async v => {
   // v38: GSTR-3B goes for verification only when 2B is complete (2B in, reco ready, nothing left to decide)
   function gate3(sm, st) {
     const M = meth(), why = [], [y, m] = grMonth.split('-').map(Number), nx = new Date(y, m, 14);
-    if (!row.gstr2b) why.push(`GSTR-2B is not added yet — it comes on ${nx.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })} (upload or fetch with OTP)`);
+    if (!row.gstr2b) why.push(`GSTR-2B is not added yet — it comes on ${nx.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })} (upload, or send it with the JLR GST helper)`);
     else if (M !== '2b_confirm' && !row.purchases) why.push('The purchase register is not added');
     else if (!st.ready) why.push('2B vs books is not ready');
     if (st.ready && st.decideN) why.push(`${st.decideN} bill${st.decideN > 1 ? 's' : ''} still to decide in 2B vs books`);
@@ -5112,9 +5123,9 @@ VIEWS.gst = async v => {
     const myRules = grRules.filter(r => r.client_id === c.id && r.active !== false).length;
     const chips = {
       s1: chip('sales', 'Sales register', S, S ? `${S.rows.length} docs · tax ${gst$(gTax(sm.out))}` : '', `<button class="btn sm" data-up="sales">${S ? 'Replace' : 'Upload'}</button><button class="link small" data-tpl="sales">Template</button>`)
-        + chip('gstr1', 'GSTR-1 filed', G1f, G1f ? (G1f.source === 'working' ? 'copied from our working' : G1f.source === 'api' ? 'from portal' : 'typed in') + ` · tax ${gst$(gTax(G1f))}` : '', `<button class="btn sm" data-portal-api="g1">Fetch</button>${S ? '<button class="btn sm" data-g1copy>Same as working</button>' : ''}<button class="link small" data-ent="gstr1">Type in</button>`),
+        + chip('gstr1', 'GSTR-1 filed', G1f, G1f ? (G1f.source === 'working' ? 'copied from our working' : /^(api|portal)$/.test(G1f.source) ? 'from portal' : 'typed in') + ` · tax ${gst$(gTax(G1f))}` : '', `<button class="btn sm" data-portal-api="g1">Fetch</button>${S ? '<button class="btn sm" data-g1copy>Same as working</button>' : ''}<button class="link small" data-ent="gstr1">Type in</button>`),
       s2: (M === '2b_confirm' ? '' : chip('purchases', 'Purchase register', P, P ? `${P.rows.length} bills · ITC ${gst$(gTax(sm.itcBooks))}` : '', `<button class="btn sm" data-up="purchases">${P ? 'Replace' : 'Upload'}</button><button class="btn sm" data-bills>Read bills</button><button class="link small" data-tpl="purchases">Template</button>`))
-        + chip('gstr2b', 'GSTR-2B', B, B ? `${B.rows.length} bills · ITC ${gst$(gTax(sm.itc2b))}` : '', `<button class="btn sm" data-up="gstr2b">${B ? 'Replace' : 'Upload'}</button><button class="link small" data-portal-api>Fetch (OTP)</button>`)
+        + chip('gstr2b', 'GSTR-2B', B, B ? `${B.rows.length} bills · ITC ${gst$(gTax(sm.itc2b))}` : '', `<button class="btn sm" data-up="gstr2b">${B ? 'Replace' : 'Upload'}</button><button class="link small" data-portal-api>Fetch from portal</button>`)
         + `<div class="grc meta"><div class="grc-b"><small>ITC method</small><b>${ITCM[M][0]}</b></div><div class="grc-a"><button class="link small" data-itcm>Change</button></div></div>
            <div class="grc meta"><div class="grc-b"><small>Client rules</small><b>${myRules}</b></div><div class="grc-a"><button class="link small" data-rules>Open</button></div></div>`,
       s3: chip('gstr3b', 'GSTR-3B filed', G3, G3 ? `cash ${gst$(gTax(G3.cash))} · ITC ${gst$(gTax(G3.itc_net))}` : '', `<button class="btn sm" data-portal-api>Fetch</button><button class="link small" data-ent="gstr3b">Type in</button>`),
@@ -5304,7 +5315,7 @@ VIEWS.gst = async v => {
   function renderBills(o, k, sm) {
     const d = row[k], title = k === 'purchases' ? 'Purchase register — as per books' : 'GSTR-2B — as per 2B';
     if (k === 'purchases' && meth() === '2b_confirm') { o.innerHTML = `<h3 style="margin-top:0">${title}</h3><p class="muted">Not used for ${esc(c.name)} — ITC method is “2B — client confirms”. <button class="link" data-itcm>Change</button></p>`; return; }
-    if (!d) { o.innerHTML = `<h3 style="margin-top:0">${title}</h3><p class="muted">Not added yet.</p><div class="toolbar"><button class="btn primary" data-up="${k}">Upload</button>${k === 'purchases' ? '<button class="btn" data-bills>Read bills</button><button class="link small" data-tpl="purchases">Template</button>' : '<button class="btn" data-portal-api>Fetch with OTP</button>'}</div>`; return; }
+    if (!d) { o.innerHTML = `<h3 style="margin-top:0">${title}</h3><p class="muted">Not added yet.</p><div class="toolbar"><button class="btn primary" data-up="${k}">Upload</button>${k === 'purchases' ? '<button class="btn" data-bills>Read bills</button><button class="link small" data-tpl="purchases">Template</button>' : '<button class="btn" data-portal-api>Fetch from portal</button>'}</div>`; return; }
     const rows = d.rows || [], S = {};
     if (k === 'gstr2b') rows.forEach(r => { const key = (r.src || 'B2B') + (r.na ? ' · ITC not available' : r.rc ? ' · reverse charge' : ''); const z = S[key] = S[key] || { n: 0, t: 0, ig: 0, cg: 0, sg: 0, cs: 0 }; z.n++; H5.forEach(h => z[h] = GR.r2(z[h] + (+r[h] || 0))); });
     else rows.forEach(r => { const key = r.cn ? 'Credit notes' : r.rc ? 'Reverse charge' : 'Invoices'; const z = S[key] = S[key] || { n: 0, t: 0, ig: 0, cg: 0, sg: 0, cs: 0 }; z.n++; H5.forEach(h => z[h] = GR.r2(z[h] + (+r[h] || 0))); });
@@ -5735,8 +5746,194 @@ function gstr1FromApi(j) {
   });
   return { tot, secs, period: d.ret_period || '' };
 }
+/* v55 JLR GST helper (Chrome add-on): staff log in to the GST portal themselves (password + captcha), the add-on sends the data here — no client OTP */
+const GSTH_ZIP = 'addon/jlr-gst-helper.zip';
+function gstinCheckUrl(g) { return 'https://services.gst.gov.in/services/searchtp#jlrg=' + encodeURIComponent(g); }
+function gstinCheckBadge(chk, g) {
+  const link = `<a class="link small" href="${gstinCheckUrl(g)}" target="_blank" rel="noopener" title="Opens Search Taxpayer on the GST portal — type the captcha, then click “Save GSTIN check” (JLR GST helper add-on)">Check</a>`;
+  if (!chk) return `<div class="muted">${link}</div>`;
+  const okS = /^active/i.test(chk.status || ''), when = new Date(chk.checked_at).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
+  return `<div title="${esc(chk.legal_name || '')} · checked ${when}"><span class="${okS ? 'ok-t' : 'late'}">${okS ? '✓' : '⚠'} ${esc(chk.status || '')}</span> <span class="muted">${when}</span> ${link}</div>`;
+}
+const GSTH_KIND = { status: 'Return status', gstr1: 'GSTR-1 (filed summary)', gstr1_b2b: 'GSTR-1 B2B invoice list', gstr3b: 'GSTR-3B', gstr2b: 'GSTR-2B', gstr2a: 'GSTR-2A' };
+async function gsthKeyCard(el) {
+  el.innerHTML = '<div class="loading">…</div>';
+  const r = await safe(sb.rpc('gsth_keys_list'));
+  if (r.error) { el.innerHTML = `<p class="note warn small">The add-on is not set up on the server yet (run <b>update-gst-helper.sql</b> and deploy the <b>gst-helper</b> function).</p>`; return; }
+  const mine = (r.data || []).filter(k => k.mine);
+  el.innerHTML = `<p class="small" style="margin:0 0 6px">${mine.length ? `<span class="ok-t">● Your add-on key is made</span> (${mine.length}) · last used ${mine[0].last_used_at ? new Date(mine[0].last_used_at).toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' }) : 'never'}` : 'You have no add-on key yet.'}</p>
+    <div class="toolbar"><button class="btn sm ${mine.length ? '' : 'primary'}" data-ghnew>${mine.length ? 'Make a new key' : 'Make my add-on key'}</button><a class="btn sm" href="${GSTH_ZIP}" download>Download the add-on</a>${mine.length ? '<button class="link small" data-ghoff>Remove my keys</button>' : ''}</div>
+    <div data-ghkey></div>`;
+  el.onclick = async e => {
+    const b = e.target.closest('button'); if (!b) return;
+    if ('ghnew' in b.dataset) {
+      try { const { data: k } = await must(sb.rpc('gsth_new_key', { p_label: navigator.userAgent.includes('Windows') ? 'Windows PC' : 'PC' }));
+        const st0 = $('p', el); if (st0) st0.innerHTML = '<span class="ok-t">● Your add-on key is made</span>';
+        $('[data-ghkey]', el).innerHTML = `<p class="note small" style="margin-top:8px">Your key (shown only once — paste it in the add-on now):</p><div class="linkbox"><input readonly value="${esc(k)}" aria-label="Add-on key"><button class="btn sm" data-ghcp>Copy</button></div>`;
+        $('[data-ghcp]', el).onclick = () => copySecret(k, 'Key copied');
+      } catch (err) { toast(friendly(err), true); }
+    }
+    if ('ghoff' in b.dataset) { if (!confirm('Remove your add-on keys? The add-on on your PC stops working until you make a new key.')) return;
+      for (const k of mine) await safe(sb.rpc('gsth_revoke', { p_id: k.id })); gsthKeyCard(el); }
+  };
+}
+async function gsthBox(el, c, month, onData) {
+  const draw = async () => {
+    const r = await safe(sb.from('gst_portal_pulls').select('id,kind,info,pulled_at,applied_at,pulled_by').eq('client_id', c.id).eq('period', month + '-01'));
+    const L = r.error ? [] : (r.data || []), by = Object.fromEntries(L.map(x => [x.kind, x]));
+    const st = by.status, g3filed = st ? /GSTR3B filed/i.test(st.info || '') : null;
+    const when = x => new Date(x.pulled_at).toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' }) + ' · ' + esc((profiles.find(p => p.id === x.pulled_by) || {}).full_name || '');
+    const act = k => ({ gstr2b: ['Use this 2B', 'primary'], gstr1: ['Save as filed GSTR-1', ''], gstr3b: g3filed === false ? null : ['Save as filed GSTR-3B', ''], gstr2a: ['Download', 'dl'], gstr1_b2b: ['Download', 'dl'] }[k]);
+    const rows = ['status', 'gstr1', 'gstr1_b2b', 'gstr3b', 'gstr2b', 'gstr2a'].filter(k => by[k]).map(k => { const x = by[k], a = act(k);
+      return `<tr><td><b>${GSTH_KIND[k]}</b><div class="muted small">${esc(x.info || '')}</div>${k === 'gstr3b' && g3filed === false ? '<div class="late small">Not filed yet on the portal — these are the portal draft figures</div>' : ''}</td>
+        <td class="small muted">${when(x)}${x.applied_at ? '<br><span class="ok-t">used ✓</span>' : ''}</td>
+        <td>${a ? `<button class="btn sm ${a[1] === 'primary' ? 'primary' : ''}" data-ghuse="${k}" data-id="${x.id}">${a[0]}</button>` : ''}${k === 'gstr3b' ? `<button class="link small" data-ghview="${x.id}">View</button>` : ''}</td></tr>`; }).join('');
+    const [yy, mm] = month.split('-').map(Number);
+    el.innerHTML = `<h3 style="margin:0 0 6px">From the GST portal — JLR GST helper <span class="badge">no OTP</span></h3>
+      ${rows ? `<div class="table-wrap"><table><thead><tr><th>${MONTHS[mm - 1]} ${yy}</th><th>Sent</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`
+        : `<p class="muted small">Nothing sent yet for ${MONTHS[mm - 1]} ${yy}.</p>`}
+      <details ${rows ? '' : 'open'} style="margin-top:8px"><summary class="small"><b>How it works</b> · your add-on key</summary>
+        <ol class="small" style="line-height:1.8;padding-left:18px;margin:8px 0">
+          <li>One time: <b>Download the add-on</b>, unzip it, open <code>chrome://extensions</code>, switch on <b>Developer mode</b>, click <b>Load unpacked</b> and pick the unzipped folder.</li>
+          <li>One time: <b>Make my add-on key</b> below, click the JLR add-on icon in Chrome and paste the key.</li>
+          <li>Log in to the GST portal for <b>${esc(c.name)}</b> as usual — you type the password and captcha.</li>
+          <li>Click the round <b>JLR</b> button (bottom-left of the portal page), pick the month, click <b>Send to tracker</b>. Then come back here.</li></ol>
+        <div data-ghkeys></div></details>
+      <div data-ghmsg class="small" style="margin-top:6px"></div>`;
+    gsthKeyCard($('[data-ghkeys]', el));
+  };
+  const msg = t => { const x = $('[data-ghmsg]', el); if (x) x.innerHTML = t; };
+  const dataOf = async id => (await must(sb.from('gst_portal_pulls').select('data,kind').eq('id', id).single())).data;
+  el.addEventListener('click', async e => {
+    const b = e.target.closest('[data-ghuse],[data-ghview]'); if (!b) return; b.disabled = true;
+    try {
+      if (b.dataset.ghview) { const d = await dataOf(b.dataset.ghview), g = gstr3bFromApi(d.data); if (!g) { msg('<span class="late">No 3B figures in this copy.</span>'); return; }
+        msg(`<div class="table-wrap"><table><thead><tr><th></th><th class="r">Taxable</th><th class="r">IGST</th><th class="r">CGST</th><th class="r">SGST</th><th class="r">Cess</th></tr></thead><tbody>
+          <tr><td>3.1(a) Outward taxable</td><td class="r">${gst$(g.t31a.t)}</td>${['ig', 'cg', 'sg', 'cs'].map(k => `<td class="r">${gst$(g.t31a[k])}</td>`).join('')}</tr>
+          <tr><td>4(C) Net ITC</td><td></td>${['ig', 'cg', 'sg', 'cs'].map(k => `<td class="r">${gst$(g.itc_net[k])}</td>`).join('')}</tr>
+          <tr><td>Paid in cash</td><td></td>${['ig', 'cg', 'sg', 'cs'].map(k => `<td class="r">${gst$(g.cash[k])}</td>`).join('')}</tr></tbody></table></div>`); return; }
+      const k = b.dataset.ghuse, d = await dataOf(b.dataset.id), at = new Date().toISOString();
+      if (k === 'gstr2b') { const p = GR.parse2BJson(d.data); if (p.error) { msg(`<span class="late">${esc(p.error)}</span>`); return; }
+        await onData({ gstr2b: { rows: p.rows, source: 'portal', at, by: me.id } }); msg(`<span class="ok-t">GSTR-2B saved — ${p.rows.length} documents.</span>`); }
+      if (k === 'gstr1') { const g = gstr1FromApi(d.data); if (!g) { msg('<span class="late">GSTR-1 summary is empty for this month (not filed yet?)</span>'); return; }
+        await onData({ gstr1: { ...g.tot, secs: g.secs, source: 'portal', at, by: me.id } }); msg('<span class="ok-t">Filed GSTR-1 totals saved.</span>'); }
+      if (k === 'gstr3b') { const g = gstr3bFromApi(d.data); if (!g) { msg('<span class="late">No 3B figures in this copy.</span>'); return; }
+        await onData({ gstr3b: { ...g, source: 'portal', at, by: me.id } }); msg('<span class="ok-t">Filed GSTR-3B figures saved.</span>'); }
+      if (k === 'gstr2a' || k === 'gstr1_b2b') { const blob = new Blob([JSON.stringify(d.data, null, 1)], { type: 'application/json' }), a = document.createElement('a');
+        a.href = URL.createObjectURL(blob); a.download = `${(c.client_code || c.name).replace(/[^\w-]+/g, '_')}_${k.toUpperCase()}_${month}.json`; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 4000); return; }
+      await safe(sb.from('gst_portal_pulls').update({ applied_at: at }).eq('id', b.dataset.id)); setTimeout(draw, 600);
+    } catch (err) { msg(`<span class="late">${esc(friendly(err))}</span>`); }
+    finally { b.disabled = false; }
+  });
+  await draw();
+}
+/* v56 GSTIN check page: paste any list (clients, suppliers…) → check with the GST API (Sandbox, paid, no captcha)
+   or on the GST portal one by one with the JLR GST helper add-on (free, staff type each captcha) */
+let gcList = [];
+const fmtPrd = p => /^\d{6}$/.test(p || '') ? `${MONTHS[+p.slice(0, 2) - 1]} ${p.slice(2)}` : '—';
+function gcBehind(p) {      // months between the latest filed period and last month
+  if (!/^\d{6}$/.test(p || '')) return null;
+  const d = new Date(), last = d.getFullYear() * 12 + d.getMonth() - 1, got = +p.slice(2) * 12 + (+p.slice(0, 2) - 1);
+  return last - got;
+}
+VIEWS.gstin = async v => {
+  await loadRefs();
+  const q = new URLSearchParams((location.hash.split('?')[1] || ''));
+  if (q.get('from') === 'clients') { gcList = [...new Set([...gcList, ...clients.filter(c => c.active !== false && c.gstin).map(c => c.gstin.toUpperCase())])]; history.replaceState(null, '', '#/gstin'); }
+  v.innerHTML = `<div class="page-head"><h2>GSTIN check</h2><span class="muted">Status, legal name and return filing of any GSTIN — clients or suppliers</span></div>
+    <div class="grid2" style="gap:14px;align-items:start">
+      <div class="card"><h3 style="margin-top:0">1 · GSTINs to check</h3>
+        <textarea id="gcIn" rows="5" style="width:100%" placeholder="Paste GSTINs — one per line, or any text / Excel column; GSTINs are picked out"></textarea>
+        <div class="toolbar" style="margin-top:6px"><button class="btn sm" id="gcAdd">Add pasted</button><button class="btn sm" id="gcCl">Add all clients</button>
+          <select id="gcSupC" class="sm" aria-label="Suppliers of client"><option value="">Suppliers of a client (from 2B)…</option>${clients.filter(c => c.active !== false).map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select>
+          <span class="spacer"></span><button class="link small" id="gcClr">Clear list</button></div>
+        <div id="gcMsg" class="small" style="margin-top:6px"></div></div>
+      <div class="card"><h3 style="margin-top:0">2 · Check</h3>
+        <label class="check small"><input type="checkbox" id="gcSkip" checked> Skip GSTINs checked in the last 30 days</label>
+        <label class="check small"><input type="checkbox" id="gcFil" checked> Also check return filing (last GSTR-1 / GSTR-3B) — API only</label>
+        <div class="toolbar" style="margin-top:10px"><button class="btn primary" id="gcApi">Check with GST API</button><button class="btn" id="gcPortal">Check on GST portal (free)</button></div>
+        <p class="muted small" style="margin:6px 0 0"><b>GST API</b>: no captcha, done in seconds — Sandbox charges per call. <b>GST portal</b>: needs the JLR GST helper add-on and a GST portal login in Chrome; you type each captcha, the rest is automatic.</p>
+        <div id="gcUse" class="muted small" style="margin-top:6px"></div></div>
+    </div>
+    <div class="card" style="margin-top:14px"><div class="toolbar"><h3 style="margin:0">Results</h3><span class="spacer"></span><button class="btn sm" id="gcCsv">Download (Excel CSV)</button></div><div id="gcRes"><div class="loading">…</div></div></div>`;
+  const msg = (t, bad) => { $('#gcMsg', v).innerHTML = `<span class="${bad ? 'late' : 'muted'}">${t}</span>`; };
+  const nameOf = {}; clients.forEach(c => { if (c.gstin) nameOf[c.gstin.toUpperCase()] = c.name; });
+  let checks = {};
+  const addList = (L, from) => { const before = gcList.length; gcList = [...new Set([...gcList, ...L.map(x => String(x).toUpperCase())])]; msg(`${gcList.length - before} added${from ? ' from ' + esc(from) : ''} · ${gcList.length} in the list`); draw(); };
+  const valid = g => BILL.gstinCheck(g);
+  async function loadChecks() {
+    if (!gcList.length) { checks = {}; return; }
+    const r = await safe(sb.from('gstin_checks').select('*').in('gstin', gcList.slice(0, 1000)));
+    checks = Object.fromEntries((r.data || []).map(x => [x.gstin, x]));
+  }
+  async function usage() {
+    const r = await safe(sb.from('gst_api_usage').select('kind,calls,day').gte('day', today().slice(0, 7) + '-01'));
+    if (r.error) return; const t = { search: 0, track: 0 }; (r.data || []).forEach(x => { t[x.kind] = (t[x.kind] || 0) + x.calls; });
+    $('#gcUse', v).textContent = `GST API calls this month: ${t.search} searches · ${t.track} filing checks`;
+  }
+  async function draw() {
+    await loadChecks();
+    const el = $('#gcRes', v);
+    if (!gcList.length) { el.innerHTML = '<p class="muted">Add GSTINs above — paste a list, all clients, or the suppliers of a client.</p>'; return; }
+    const rows = gcList.map((g, i) => { const c = checks[g], ok = valid(g), act = c && /^active/i.test(c.status || ''), b3 = c && gcBehind(c.last_3b);
+      return `<tr><td class="muted small">${i + 1}</td><td><b>${esc(g)}</b>${ok ? '' : '<div class="late small">Check digit wrong — not a real GSTIN</div>'}${nameOf[g] ? `<div class="muted small">Client: ${esc(nameOf[g])}</div>` : ''}</td>
+        <td>${c ? `${esc(c.legal_name || '')}${c.trade_name && c.trade_name !== c.legal_name ? `<div class="muted small">${esc(c.trade_name)}</div>` : ''}` : '<span class="muted">not checked</span>'}${c && c.error ? `<div class="late small">${esc(c.error)}</div>` : ''}</td>
+        <td>${c && c.status ? `<span class="${act ? 'ok-t' : 'late'}">${act ? '✓' : '⚠'} ${esc(c.status)}</span>${c.cancel_date ? `<div class="small late">from ${esc(c.cancel_date)}</div>` : ''}` : ''}</td>
+        <td class="small">${c ? esc(c.reg_date || '') : ''}</td>
+        <td class="small">${c && c.filing_checked_at ? `GSTR-1: ${fmtPrd(c.last_r1)}<br>GSTR-3B: <span class="${b3 != null && b3 > 1 ? 'late' : ''}">${fmtPrd(c.last_3b)}${b3 != null && b3 > 1 ? ` (${b3} months behind)` : ''}</span>` : '<span class="muted">—</span>'}</td>
+        <td class="small muted">${c ? `${new Date(c.checked_at).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })} · ${c.source === 'api' ? 'API' : 'portal'}` : ''}</td>
+        <td><button class="link small" data-rm="${i}" aria-label="Remove ${esc(g)}">×</button></td></tr>`; }).join('');
+    const nAct = gcList.filter(g => checks[g] && /^active/i.test(checks[g].status || '')).length, nBad = gcList.filter(g => checks[g] && checks[g].status && !/^active/i.test(checks[g].status)).length;
+    el.innerHTML = `<p class="small" style="margin:6px 0">${gcList.length} GSTINs · <span class="ok-t">${nAct} active</span> · <span class="late">${nBad} not active</span> · ${gcList.filter(g => !checks[g]).length} not checked</p>
+      <div class="table-wrap"><table><thead><tr><th>#</th><th>GSTIN</th><th>Legal name</th><th>Status</th><th>Registered</th><th>Last filed</th><th>Checked</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  }
+  const todo = () => { const skip = $('#gcSkip', v).checked, lim = Date.now() - 30 * 864e5;
+    return gcList.filter(g => valid(g) && !(skip && checks[g] && checks[g].status && new Date(checks[g].checked_at).getTime() > lim && (!$('#gcFil', v).checked || checks[g].filing_checked_at))); };
+  $('#gcAdd', v).onclick = () => { const L = BILL.findGstins($('#gcIn', v).value).map(x => x.gstin || x); const raw = ($('#gcIn', v).value.toUpperCase().match(/\b[0-9]{2}[A-Z0-9]{13}\b/g) || []);
+    addList([...new Set([...L, ...raw])], 'the pasted text'); $('#gcIn', v).value = ''; };
+  $('#gcCl', v).onclick = () => addList(clients.filter(c => c.active !== false && c.gstin).map(c => c.gstin), 'clients');
+  $('#gcSupC', v).onchange = async e => { const cid = e.target.value; if (!cid) return;
+    const r = await safe(sb.from('gst_months').select('gstr2b,purchases').eq('client_id', cid).order('period', { ascending: false }).limit(6));
+    const L = new Set(); (r.data || []).forEach(m => [m.gstr2b, m.purchases].forEach(x => ((x && x.rows) || []).forEach(row => { const g = String(row.g || row.gstin || row.ctin || '').toUpperCase(); if (g.length === 15) L.add(g); })));
+    addList([...L], 'suppliers of ' + (clients.find(c => c.id === cid) || {}).name + ' (last 6 months)'); e.target.value = ''; };
+  $('#gcClr', v).onclick = () => { gcList = []; msg(''); draw(); };
+  $('#gcRes', v).onclick = e => { const i = e.target.dataset.rm; if (i == null) return; gcList.splice(+i, 1); draw(); };
+  $('#gcApi', v).onclick = async e => {
+    const L = todo(), fil = $('#gcFil', v).checked;
+    if (!L.length) { msg('Nothing to check — all GSTINs in the list were checked recently (untick “Skip…” to check again).'); return; }
+    if (!confirm(`Check ${L.length} GSTIN(s) with the GST API?\n\nThis uses about ${L.length}${fil ? ` + ${L.length}–${L.length * 2}` : ''} Sandbox calls (paid).`)) return;
+    const b = e.target; b.disabled = true; let done = 0, bad = 0;
+    try {
+      for (let i = 0; i < L.length; i += 25) {
+        b.textContent = `Checking… ${done}/${L.length}`;
+        const r = await fnCall('gstin-check', 'check', { gstins: L.slice(i, i + 25), filing: fil });
+        done += r.results.length; bad += r.results.filter(x => x.error).length;
+      }
+      toast(`${done} checked${bad ? ` · ${bad} with errors` : ''}`, !!bad);
+    } catch (err) { msg(esc(friendly(err)), true); }
+    finally { b.disabled = false; b.textContent = 'Check with GST API'; draw(); usage(); }
+  };
+  $('#gcPortal', v).onclick = () => {
+    const L = todo(); if (!L.length) { msg('Nothing to check — all GSTINs in the list were checked recently.'); return; }
+    const part = L.slice(0, 80);
+    window.open('https://services.gst.gov.in/services/searchtp#jlrq=' + part.join(','), '_blank', 'noopener');
+    msg(`Opened the GST portal with ${part.length} GSTIN(s)${L.length > 80 ? ` (first 80 of ${L.length})` : ''}. Log in there if asked, then type each captcha and press Enter — the add-on saves each result and brings the next GSTIN. Come back and click Results → refresh.`);
+    const once = () => { if (document.visibilityState === 'visible' && location.hash.startsWith('#/gstin')) draw(); };
+    document.addEventListener('visibilitychange', once);
+  };
+  $('#gcCsv', v).onclick = () => {
+    const H = ['GSTIN', 'Client', 'Legal name', 'Trade name', 'Status', 'Registered', 'Cancelled from', 'Type', 'Last GSTR-1', 'Last GSTR-3B', 'Checked on', 'Checked via', 'Error'];
+    const q = x => `"${String(x ?? '').replace(/"/g, '""')}"`;
+    const L = gcList.map(g => { const c = checks[g] || {}; return [g, nameOf[g] || '', c.legal_name, c.trade_name, c.status, c.reg_date, c.cancel_date, c.taxpayer_type,
+      c.last_r1 ? fmtPrd(c.last_r1) : '', c.last_3b ? fmtPrd(c.last_3b) : '', c.checked_at ? new Date(c.checked_at).toLocaleDateString('en-IN') : '', c.source || '', c.error].map(q).join(','); });
+    const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob(['﻿' + [H.map(q).join(','), ...L].join('\r\n')], { type: 'text/csv' }));
+    a.download = `GSTIN-check-${today()}.csv`; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+  };
+  draw(); usage();
+};
 async function gstPortalFetch(c, month, onData, only = '') {
-  const m = modal(`Fetch from GST portal · ${c.name}`, '<div data-gp><div class="loading">Checking…</div></div>', { wide: true });
+  const m = modal(`Fetch from GST portal · ${c.name}`, '<div data-gh><div class="loading">Checking…</div></div><details class="gp-api" style="margin-top:16px"><summary class="small"><b>Or use the GST API</b> (needs the client\'s OTP)</summary><div data-gp style="margin-top:8px"><div class="loading">Checking…</div></div></details>', { wide: true });
+  gsthBox($('[data-gh]', m.el), c, month, onData);
   const box = $('[data-gp]', m.el), [yy, mm] = month.split('-').map(Number);
   let st;
   try { st = await fnCall('gst-data', 'status', { client_id: c.id }); }
