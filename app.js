@@ -606,6 +606,7 @@ const NI = {   // menu icons (stroke SVG paths)
   gst: '<path d="M6 2h12v20l-3-2-3 2-3-2-3 2z"></path><path d="M9 7h6M9 11h6"></path>',
   tds: '<circle cx="7" cy="7" r="2.5"></circle><circle cx="17" cy="17" r="2.5"></circle><path d="M19 5L5 19"></path>',
   gstw: '<path d="M4 4h16v16H4z"></path><path d="M8 9h8M8 13h8M8 17h5"></path>',
+  filing: '<path d="M22 2L11 13"></path><path d="M22 2l-7 20-4-9-9-4z"></path>',
   acks: '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"></path><path d="M14 3v5h5M9 14l2 2 4-4"></path>',
   docs: '<path d="M9 11l3 3L22 4"></path><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path>',
   profit: '<path d="M3 17l6-6 4 4 8-8"></path><path d="M14 7h7v7"></path>',
@@ -637,7 +638,7 @@ const navIcon = k => `<svg aria-hidden="true" width="18" height="18" viewBox="0 
 function navGroups() {
   const G = [
     ['Overview', [['dashboard', 'Dashboard'], ['calendar', 'Due-date calendar'], ['work', isManager() ? 'All work' : 'My work']]],
-    ['GST', [['work-gst', isManager() ? 'GST work' : 'My GST work', 'gstw'], ['gst', 'GST review', 'gst']]],
+    ['GST', [['work-gst', isManager() ? 'GST work' : 'My GST work', 'gstw'], ['gst', 'GST review', 'gst'], ['filing', 'Filing desk', 'filing']]],
     ['TDS', [['work-tds', isManager() ? 'TDS / TCS work' : 'My TDS work', 'tds'], ['tds', 'TDS working', 'tdsw']]],
     ['MCA', [['work-mca', isManager() ? 'MCA / ROC work' : 'My MCA work', 'mca'], ['mca', 'Companies & LLPs', 'companies']]],
     !settings.notices_off && ['Notices', [['notices', 'All notices', 'notices'], ['notices-gst', 'GST notices', 'notices'], ['notices-tds', 'TDS notices', 'notices'], ['notices-mca', 'MCA notices', 'notices']]],
@@ -843,6 +844,135 @@ function pickTheme() {
 }
 
 const VIEWS = {};
+/* =====================================================================
+   v53 GST FILING DESK — returns approved by the senior, 3B payment first, portal sheet
+   ===================================================================== */
+const T3B_KEYS = ['a', 'b', 'c', 'd', 'e', 'imp', 'rcm', 'isd', 'a5', 'B1', 'B2', 'C', 'D1', 'D2'];
+function t3bOf(d) {                                          // the draft 3B figures, rounded, for the portal sheet
+  const r = x => typeof x === 'number' ? { t: Math.round(x), ig: 0, cg: 0, sg: 0, cs: 0 } : x ? { t: Math.round(+x.t || 0), ig: Math.round(+x.ig || 0), cg: Math.round(+x.cg || 0), sg: Math.round(+x.sg || 0), cs: Math.round(+x.cs || 0) } : null;
+  const o = {}; T3B_KEYS.forEach(k => { if (d && d[k]) o[k] = r(d[k]); });
+  if (d && d.cashNeed) o.cash = r({ t: 0, ...d.cashNeed });
+  return o;
+}
+const gstCash = s => { const c = s && s.cash && typeof s.cash === 'object' ? s.cash : null; return c ? Math.round(num(c.ig) + num(c.cg) + num(c.sg) + num(c.cs)) : Math.round(num(s && s.cash_draft)); };
+async function payGateMsg(task) {
+  if (!task || typeof REV === 'undefined' || REV.kindOf(task.return_name) !== 'gstr3b') return null;
+  const ym = periodToMonth(task.period); if (!ym) return null;
+  const [g, t] = await Promise.all([safe(sb.from('gst_months').select('summary').eq('client_id', task.client_id).eq('period', ym + '-01').maybeSingle()),
+    safe(sb.from('tax_intimations').select('paid_on').eq('client_id', task.client_id).eq('kind', 'GST').eq('period', monthLabel(ym)).maybeSingle())]);
+  if (g.error || t.error) return null;                       // tables not there yet: no gate
+  const cash = gstCash((g.data || {}).summary || {});
+  return cash > 0 && !(t.data && t.data.paid_on) ? `GSTR-3B ${task.period}: ${inr(cash)} cash to pay. Record the payment (CPIN / CIN) on the Filing desk first.` : null;
+}
+let fdMonth = null, fdTab = 'ready', fdQ = '';
+VIEWS.filing = async v => {
+  await loadRefs();
+  if (!fdMonth) fdMonth = prevMonth();
+  const ym = fdMonth, per = ym + '-01', label = monthLabel(ym), td = today();
+  v.innerHTML = `<div class="page-head"><h2>GST filing desk</h2><span class="muted">Returns approved by the senior → pay → file → acknowledgement to client</span><span class="spacer"></span>
+      <label class="small muted" for="fdM">Return month</label><input type="month" id="fdM" value="${esc(ym)}"></div>
+    <div id="fdBody"><div class="loading">Loading…</div></div>`;
+  $('#fdM', v).onchange = e => { fdMonth = e.target.value || prevMonth(); route(); };
+  const body = $('#fdBody', v);
+  const [tq, rq, gq, pq] = await Promise.all([
+    safe(sb.from('tasks').select('id,client_id,return_name,period,status,due_date,assigned_to,arn,filed_on').eq('period', label).limit(5000)),
+    safe(sb.from('gst_reviews').select('client_id,kind,state,sent_at').eq('period', per).limit(5000)),
+    safe(sb.from('gst_months').select('client_id,status,summary').eq('period', per).limit(5000)),
+    safe(sb.from('tax_intimations').select('*').eq('kind', 'GST').eq('period', label).limit(5000))]);
+  if (tq.error) { body.innerHTML = `<p class="note warn">${esc(friendly(tq.error))}</p>`; return; }
+  const rv = new Map((rq.data || []).map(r => [r.client_id + '|' + (r.kind || 'gstr3b'), r])), gm = new Map((gq.data || []).map(r => [r.client_id, r])), tp = new Map((pq.data || []).map(r => [r.client_id, r]));
+  const rows = (tq.data || []).filter(t => REV.kindOf(t.return_name) && t.status !== 'Not applicable').map(t => {
+    const k = REV.kindOf(t.return_name), c = clientById(t.client_id) || { name: '—' }, r = rv.get(t.client_id + '|' + k), RS = r ? r.state : 'draft';
+    const g = gm.get(t.client_id), cash = k === 'gstr3b' ? gstCash((g || {}).summary || {}) : 0, pay = tp.get(t.client_id), paid = !!(pay && pay.paid_on);
+    const ok = ['approved', 'sent_client'].includes(RS), filed = t.status === 'Filed';
+    const stage = filed ? 'filed' : !ok ? 'approval' : k === 'gstr3b' && cash > 0 && !paid ? 'pay' : 'ready';
+    return { t, k, c, RS, g, cash, pay, paid, stage, late: !filed && t.due_date && t.due_date < td, today: !filed && t.due_date === td };
+  }).filter(x => !fdQ || (x.c.name + ' ' + (x.c.client_code || '') + ' ' + (x.c.gstin || '')).toLowerCase().includes(fdQ.toLowerCase()));
+  const N = s => rows.filter(x => s === 'all' ? x.stage !== 'filed' : x.stage === s).length;
+  const TABS = [['ready', 'Ready to file'], ['pay', 'Waiting for payment'], ['approval', 'Waiting for approval'], ['filed', 'Filed'], ['all', 'All open']];
+  const list = rows.filter(x => fdTab === 'all' ? x.stage !== 'filed' : x.stage === fdTab).sort((a, b) => (a.t.due_date || '9').localeCompare(b.t.due_date || '9') || a.c.name.localeCompare(b.c.name));
+  const RSL = { draft: 'Not sent', sent: 'With the senior', changes: 'Changes needed', approved: 'Verified', sent_client: 'Verified' };
+  const who = id => { const p = profiles.find(x => x.id === id); return p ? (p.full_name || p.email) : '—'; };
+  body.innerHTML = `<div class="fd-tiles">${TABS.slice(0, 4).map(([k, l]) => `<button class="fd-tile ${k} ${fdTab === k ? 'on' : ''}" data-fdt="${k}"><b>${N(k)}</b><span>${l}</span></button>`).join('')}</div>
+    <div class="toolbar"><div class="seg">${TABS.map(([k, l]) => `<button data-fdt="${k}" class="${fdTab === k ? 'on' : ''}">${l} · ${N(k)}</button>`).join('')}</div><span class="spacer"></span>
+      <input type="search" id="fdQ" placeholder="Search client" value="${esc(fdQ)}" aria-label="Search client"></div>
+    ${list.length ? `<div class="table-wrap"><table class="fd-t"><thead><tr><th>Due</th><th>Client</th><th>Return</th><th>Senior</th><th class="r">Cash to pay</th><th>Files</th><th></th></tr></thead><tbody>
+      ${list.map(x => { const i = rows.indexOf(x);
+        return `<tr data-i="${i}" class="${x.late ? 'overdue' : ''}"><td class="small">${x.t.due_date ? fmtDate(x.t.due_date) : '—'}${x.late ? '<div class="late">overdue</div>' : x.today ? '<div class="warn-t">today</div>' : ''}</td>
+          <td class="wrap"><b>${esc(x.c.name)}</b><div class="muted small">${esc(x.c.gstin || '')}</div></td>
+          <td>${esc(x.t.return_name)}<div class="muted small">${esc(x.t.period)}</div></td>
+          <td><span class="pill ${['approved', 'sent_client'].includes(x.RS) ? 'g' : x.RS === 'changes' ? 'r' : x.RS === 'sent' ? 'b' : ''}">${RSL[x.RS] || x.RS}</span></td>
+          <td class="r">${x.k === 'gstr3b' ? (x.cash > 0 ? `${inr(x.cash)}<div class="small ${x.paid ? 'ok-t' : 'late'}">${x.paid ? `paid ${fmtDate(x.pay.paid_on)}${x.pay.challan ? ' · ' + esc(x.pay.challan) : ''}` : 'not paid'}</div>` : '<span class="muted small">nil — ITC covers it</span>') : '<span class="muted small">—</span>'}</td>
+          <td class="small">${esc(who(x.t.assigned_to))}</td>
+          <td class="row-btns">${x.stage === 'filed' ? `<span class="ok-t small">Filed ${x.t.filed_on ? fmtDate(x.t.filed_on) : ''}${x.t.arn ? ' · ' + esc(x.t.arn) : ''}</span>` : `
+            ${x.stage === 'approval' ? '<button class="btn sm" data-a="open">Open review</button>' : ''}
+            ${x.stage === 'pay' ? '<button class="btn sm primary" data-a="pay">Record payment</button>' : ''}
+            ${x.stage !== 'approval' ? `<button class="btn sm" data-a="sheet">${x.k === 'gstr1' ? 'GSTR-1 JSON' : 'Portal sheet'}</button><button class="btn sm" data-a="logins" title="GST portal login">🔑</button><button class="btn sm" data-a="otp" title="Copy a message asking the client for the OTP">Ask OTP</button>` : ''}
+            ${x.stage === 'ready' ? '<button class="btn sm primary" data-a="ack">Upload ack</button><button class="btn sm" data-a="filed">Filed (ARN)</button>' : ''}
+            ${x.k === 'gstr3b' && x.paid ? '<button class="link small" data-a="pay">payment</button>' : ''}`}</td></tr>`; }).join('')}</tbody></table></div>`
+      : `<p class="muted" style="padding:16px 4px">${fdTab === 'ready' ? `Nothing ready to file for ${label}. Returns appear here after the senior verifies them${N('pay') ? ' and the GSTR-3B cash is paid' : ''}.` : 'Nothing here.'}</p>`}
+    <p class="muted small">Only GSTR-1 and GSTR-3B work items for <b>${label}</b> are listed. A GSTR-3B with cash to pay can't be marked filed until the payment (CPIN / CIN) is recorded. After filing, “Upload ack” marks it Filed and sends the acknowledgement and workings to the client (if auto-send is on).</p>`;
+  $$('[data-fdt]', body).forEach(b => b.onclick = () => { fdTab = b.dataset.fdt; route(); });
+  const q = $('#fdQ', body); q.oninput = () => { clearTimeout(q._t); q._t = setTimeout(() => { fdQ = q.value; route(); }, 350); };
+  body.onclick = async e => {
+    const b = e.target.closest('[data-a]'); if (!b) return;
+    const x = rows[+b.closest('tr').dataset.i], a = b.dataset.a;
+    if (a === 'open' || (a === 'sheet' && x.k === 'gstr1')) { grClient = x.t.client_id; grMonth = ym; location.hash = '#/gst'; if (a === 'sheet') toast('GSTR-1 workspace → GSTR-1 entry → “GSTR-1 JSON” downloads the file for the portal'); return; }
+    if (a === 'logins') return openLogins(x.c);
+    if (a === 'otp') { const msg = `Dear ${x.c.name},\nWe are filing your ${x.t.return_name} for ${x.t.period} now. You will get an OTP from GSTN on your registered mobile / email — please send it to us as soon as it arrives.\nThank you,\n${firmName()}`;
+      navigator.clipboard.writeText(msg).then(() => toast('Message copied — paste it to the client (Telegram / WhatsApp / call)')).catch(() => window.prompt('Copy this message:', msg)); return; }
+    if (a === 'sheet') return portalSheet(x);
+    if (a === 'pay') return payModal(x);
+    if (a === 'ack') return ackForTask({ ...x.t }, () => route());
+    if (a === 'filed') {
+      const gate = await payGateMsg(x.t).catch(() => null); if (gate) return toast(gate, true);
+      const arn = window.prompt(`${x.t.return_name} ${x.t.period} — ${x.c.name}\nEnter the ARN (from the portal):`, ''); if (arn === null) return;
+      try { await must(sb.from('tasks').update({ status: 'Filed', filed_on: today(), ...(arn.trim() ? { arn: arn.trim().toUpperCase() } : {}), updated_by: me.id }).eq('id', x.t.id)); toast('Marked filed — upload the acknowledgement PDF to send it to the client'); route(); }
+      catch (err) { toast(friendly(err), true); }
+    }
+  };
+  function payModal(x) {
+    const c0 = ((x.g || {}).summary || {}).cash || {}, p = x.pay || {}, due = (gstPayDue(x.c, ym) || {}).due || x.t.due_date || null;
+    const ch = String(p.challan || ''), cpin = (ch.match(/CPIN[:\s]*(\S+)/i) || [])[1] || (!/CIN/i.test(ch) ? ch : ''), cin = (ch.match(/\bCIN[:\s]*(\S+)/i) || [])[1] || '';
+    modal(`GSTR-3B ${label} payment — ${x.c.name}`, `<p class="small muted">Cash to pay as per the verified draft 3B: <b>${inr(x.cash)}</b> (IGST ${inr(c0.ig)} · CGST ${inr(c0.cg)} · SGST ${inr(c0.sg)}${num(c0.cs) ? ' · Cess ' + inr(c0.cs) : ''})</p>
+      <div class="form-grid"><label>Paid on<input type="date" name="on" value="${esc(p.paid_on || today())}"></label>
+        <label>Amount paid (₹)<input type="number" name="amt" value="${esc(p.paid_amount ?? x.cash)}"></label>
+        <label>CPIN<input name="cpin" value="${esc(cpin)}" placeholder="14-digit CPIN"></label><label>CIN (after payment)<input name="cin" value="${esc(cin)}" placeholder="e.g. HDFC26110000123"></label>
+        <label class="full">Remarks<input name="rm" value="${esc(p.remarks || '')}"></label></div>`, {
+      extra: p.paid_on ? '<button class="btn danger" data-unpay>Not paid</button>' : '',
+      onSave: async el => {
+        const amt = num(fv(el, 'amt')), cp = fv(el, 'cpin').trim(), ci = fv(el, 'cin').trim();
+        if (!cp && !ci) throw new Error('Enter the CPIN or the CIN of the challan');
+        if (amt + 1 < x.cash && !confirm(`Paid ${inr(amt)} is less than the ${inr(x.cash)} to pay. Save anyway?`)) return false;
+        await must(sb.from('tax_intimations').upsert({ client_id: x.c.id, kind: 'GST', period: label, due_date: due, amounts: { ig: Math.round(num(c0.ig)), cg: Math.round(num(c0.cg)), sg: Math.round(num(c0.sg)), cs: Math.round(num(c0.cs)) }, total: x.cash,
+          paid_on: fv(el, 'on') || today(), paid_amount: amt, challan: [cp && 'CPIN ' + cp, ci && 'CIN ' + ci].filter(Boolean).join(' · '), remarks: fv(el, 'rm') || null }, { onConflict: 'client_id,kind,period' }));
+        toast('Payment saved — the GSTR-3B can be filed now'); route();
+      } });
+    const un = $('[data-unpay]'); if (un) un.onclick = async () => { try { await must(sb.from('tax_intimations').update({ paid_on: null, paid_amount: null }).eq('id', p.id)); un.closest('.modal-back').remove(); route(); } catch (err) { toast(friendly(err), true); } };
+  }
+  function portalSheet(x) {
+    const T = ((x.g || {}).summary || {}).t3b;
+    if (!T || !Object.keys(T).length) { toast('Open this month in GST review once (it saves the 3B figures), then try again', true); return; }
+    const Z = { t: 0, ig: 0, cg: 0, sg: 0, cs: 0 }, R = k => T[k] || Z;
+    const cell = (v, nt) => nt ? '<td></td>' : `<td class="r"><button class="link copy-n" data-cp="${Math.round(v) || 0}" title="Copy">${(Math.round(v) || 0).toLocaleString('en-IN')}</button></td>`;
+    const line = (lbl, k, opt = {}) => { const v = R(k); return `<tr><td class="wrap">${lbl}</td>${cell(v.t, opt.noT)}${cell(v.ig, opt.noTax)}${opt.ig ? '<td></td><td></td>' : `${cell(v.cg, opt.noTax)}${cell(v.sg, opt.noTax)}`}${cell(v.cs, opt.noTax)}</tr>`; };
+    const head = t => `<tr class="fd-sec"><th colspan="6">${t}</th></tr>`;
+    modal(`Portal sheet — GSTR-3B ${label} — ${x.c.name}`, `<p class="small muted">Figures as per the verified draft 3B, rounded to rupees, in GST portal order. Click a figure to copy it. Check against the portal's auto-filled values before submitting.</p>
+      <div class="table-wrap"><table class="fd-sheet"><thead><tr><th>Table</th><th class="r">Taxable value</th><th class="r">IGST</th><th class="r">CGST</th><th class="r">SGST/UTGST</th><th class="r">Cess</th></tr></thead><tbody>
+        ${head('3.1 Outward and inward supplies liable to reverse charge')}
+        ${line('(a) Outward taxable supplies (other than zero / nil / exempt)', 'a')}${line('(b) Outward taxable supplies (zero rated)', 'b', { ig: true })}
+        ${line('(c) Other outward supplies (nil rated, exempted)', 'c', { noTax: true })}${line('(d) Inward supplies (liable to reverse charge)', 'd')}${line('(e) Non-GST outward supplies', 'e', { noTax: true })}
+        ${head('4 Eligible ITC')}
+        ${line('A(1) Import of goods', 'imp', { noT: true })}${line('A(3) Inward supplies liable to reverse charge', 'd', { noT: true })}${line('A(4) Inward supplies from ISD', 'isd', { noT: true })}${line('A(5) All other ITC', 'a5', { noT: true })}
+        ${line('B(1) Reversed — Rules 38, 42, 43 and Sec 17(5)', 'B1', { noT: true })}${line('B(2) Reversed — others', 'B2', { noT: true })}
+        ${line('C Net ITC available (A − B)', 'C', { noT: true })}${line('D(1) ITC reclaimed (reversed earlier)', 'D1', { noT: true })}${line('D(2) Ineligible ITC — Sec 16(4) and place of supply', 'D2', { noT: true })}
+        ${head('6.1 Payment of tax — cash')}
+        ${line('Tax to be paid in cash', 'cash', { noT: true })}
+      </tbody></table></div>
+      <p class="small muted">3.1.1 (e-commerce), 3.2 (inter-state supplies to unregistered / composition / UIN) and 5 (exempt inward) are not in the tracker — check them on the portal.${x.paid ? ` Payment recorded: ${esc(x.pay.challan || '')}.` : ''}</p>`, { wide: true });
+    $$('.copy-n').forEach(b => b.onclick = () => navigator.clipboard.writeText(b.dataset.cp).then(() => { toast('Copied ' + b.dataset.cp); b.classList.add('flash-ok'); }));
+  }
+};
 async function route() {
   if (!me) return;
   GAME.bar();
@@ -903,6 +1033,8 @@ function bindTaskTable(el, rows, refresh) {
     const id = sid || aid;
     const patch = sid ? { status: e.target.value } : { assigned_to: e.target.value || null };
     if (sid && e.target.value === 'Filed') {
+      const gate = await payGateMsg(rows.find(r => r.id === id)).catch(() => null);
+      if (gate) { toast(gate, true); const r0 = rows.find(r => r.id === id); e.target.value = r0 ? r0.status : e.target.value; return; }
       const arn = window.prompt('Filed! Enter the ARN / acknowledgement number (optional):', '');
       if (arn) patch.arn = arn.trim();
     }
@@ -4823,7 +4955,7 @@ VIEWS.gst = async v => {
     const next = { ...row, ...patch };
     const sm = gsum(next);
     const st2 = recoHist ? itcState(sm, next) : null, d3s = draft3b(next, sm, c, st2 && st2.ready ? st2.cl.claim : null);
-    patch.summary = { ...sm.trend, sales_n: sm.counts.sales, b2b_n: sm.counts.b2b, cash_draft: d3s.cashTotal, cash: { ...d3s.cashNeed }, cash_total: next.gstr3b && next.gstr3b.cash ? sm.trend.cash : d3s.cashTotal, deposit: d3s.depositTotal, at: new Date().toISOString() };
+    patch.summary = { ...sm.trend, sales_n: sm.counts.sales, b2b_n: sm.counts.b2b, cash_draft: d3s.cashTotal, cash: { ...d3s.cashNeed }, cash_total: next.gstr3b && next.gstr3b.cash ? sm.trend.cash : d3s.cashTotal, deposit: d3s.depositTotal, at: new Date().toISOString(), t3b: t3bOf(d3s) };
     const { data } = await must(sb.from('gst_months').upsert({ client_id: grClient, period, ...patch }, { onConflict: 'client_id,period' }).select().single());
     row = data || { ...next, ...patch };
     const HIT = { gstr1: ['sales', 'g1'], gstr3b: ['sales', 'purchases', 'gstr2b', 'g1'] }, back = [];
@@ -10517,6 +10649,8 @@ const ACK = {
 
 /* one work item: button in the work window */
 async function ackForTask(task, after) {
+  const gate = await payGateMsg(task).catch(() => null);
+  if (gate) { toast(gate, true); return; }
   const inp = document.createElement('input'); inp.type = 'file'; inp.accept = 'application/pdf,.pdf';
   inp.onchange = async () => {
     const file = inp.files[0]; if (!file) return;

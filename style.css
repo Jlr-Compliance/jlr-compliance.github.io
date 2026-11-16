@@ -1422,3 +1422,15 @@ input.otp{font-size:22px;letter-spacing:.35em;text-align:center;font-variant-num
 .mail-pick{width:auto;min-width:170px;max-width:260px;padding:5px 8px;font-size:.84rem}
 @media (max-width:600px){.mail-co{margin-left:0;width:100%}.mail-pick{flex:1;max-width:none}}
 .flash-ok{background:var(--green-soft)!important;transition:background .6s}
+
+/* v53 GST filing desk */
+.fd-tiles{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:4px 0 14px}
+.fd-tile{all:unset;box-sizing:border-box;cursor:pointer;background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:12px 14px;display:flex;flex-direction:column;gap:2px}
+.fd-tile b{font-size:1.5rem}.fd-tile span{font-size:.8rem;color:var(--muted)}
+.fd-tile.on{border-color:var(--brand);box-shadow:inset 0 -3px 0 var(--brand)}
+.fd-tile:focus-visible{outline:2px solid var(--brand);outline-offset:2px}
+.fd-tile.ready b{color:var(--green)}.fd-tile.pay b{color:var(--amber,#b45309)}.fd-tile.approval b{color:var(--blue)}
+.fd-t .row-btns{white-space:normal}
+.fd-sheet td,.fd-sheet th{padding:5px 8px}.fd-sec th{background:var(--grey-soft,#eef1f6);text-align:left;font-size:.8rem}
+.copy-n{font-variant-numeric:tabular-nums}
+@media (max-width:760px){.fd-tiles{grid-template-columns:1fr 1fr}}
