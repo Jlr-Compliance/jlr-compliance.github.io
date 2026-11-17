@@ -4517,6 +4517,9 @@ const GR = (() => {
       trend: { sales: out.t, outTax: tax(out), itc: tax(itcBase), cash: g3 && g3.cash ? tax(g3.cash) : tax(cash), filedCash: g3 && g3.cash ? true : false } };
   }
   // v66: document type shown to staff and clients — B2B, B2B-A, CRN (credit note), DBN, IMPG, IMPG-SEZ, ISD
+  // v67: an import (IMPG) in 2B that staff / client chose to keep pending or not ours — left out of 3B 4(A)(1)
+  const IMP_HOLD = ['hold', 'notours', 'skip', 'notmine'];
+  const impHeld = (reco, x) => IMP_HOLD.includes(effA(reco, `${x.g || ''}|${normInv(x.i)}`));
   function docWord(x) { const t = typeOf(x); return /^IMPG/.test(t) ? 'Bill of entry' : /^CRN/.test(t) ? 'Credit note' : /^DBN/.test(t) ? 'Debit note' : /^ISD/.test(t) ? 'ISD invoice' : 'Bill'; }
   function typeOf(x) {
     const s = String((x && x.src) || '').toUpperCase();
@@ -4528,7 +4531,7 @@ const GR = (() => {
     if (/B2BA/.test(s)) return 'B2B-A';
     return 'B2B';
   }
-  return { amt, normInv, cleanInv, panOf, digits, toDate, mapHeader, parseTable, parse2BJson, mergeDocs, setoff, reconcile, summarise, effA, ANS_TAKE, tax, gstinOk, r2, typeOf, docWord };
+  return { amt, normInv, cleanInv, panOf, digits, toDate, mapHeader, parseTable, parse2BJson, mergeDocs, setoff, reconcile, summarise, effA, ANS_TAKE, tax, gstinOk, r2, typeOf, docWord, impHeld };
 })();
 
 /* v33.3: Draft GSTR-3B in the portal's format. 3.1 from the filed GSTR-1 when there is one, else from the sales working.
@@ -4550,7 +4553,7 @@ function draft3b(m, sm, client, claim = null) {
   } else add(a, sm.out);
   const B2 = (m.gstr2b && m.gstr2b.rows) || [], itcSrc = claim ? (sm.method === 'books' ? 'books' : 'reco') : sm.itcFrom;
   const imp = Z(), isd = Z();
-  if (itcSrc !== 'books') B2.forEach(x => { if (x.na || x.rc) return; if (/IMP/.test(x.src || '')) add(imp, x); if (/ISD/.test(x.src || '')) add(isd, x); });
+  if (itcSrc !== 'books') B2.forEach(x => { if (x.na || x.rc) return; if (/IMP/.test(x.src || '') && !GR.impHeld(m.reco, x)) add(imp, x); if (/ISD/.test(x.src || '')) add(isd, x); });
   const a5 = add(add(add(Z(), claim || sm.itcBase), imp, -1), isd, -1); add(a5, g('reclaim'));
   const A = add(add(add(add(Z(), imp), sm.rcm), isd), a5);
   const B1 = g('rev_perm'), B2r = g('rev_temp'), C = add(add(add(Z(), A), B1, -1), B2r, -1);
@@ -4711,7 +4714,7 @@ const RECO = (() => {
       else if (it.st === 'books_only') add(held, b);
     });
     (o.late || []).forEach(e => { if (!e.x.rc) { add(c, e.x); add(late, e.x); } });
-    if (method !== 'books') (b2rows || []).forEach(x => { if (/IMP|ISD/.test(x.src || '') && !x.na && !x.rc) add(other, x); });
+    if (method !== 'books') (b2rows || []).forEach(x => { if (/IMP|ISD/.test(x.src || '') && !x.na && !x.rc) { if (/IMP/.test(x.src || '') && GR.impHeld(reco, x)) add(held, x); else add(other, x); } });
     add(c, other);
     return { claim: c, held, carried, other, late, undecided };
   }
@@ -5625,6 +5628,7 @@ VIEWS.gst = async v => {
     gstin_diff: [['link', 'Same bill'], ['fixbooks', 'Books GSTIN wrong'], ['notsame', 'Not same']],
     books_only: [['follow', 'Chase supplier'], ['later', 'Filing late'], ['noclaim', "Don't claim"]],
     '2b_only': [['addbooks', 'Add & claim'], ['hold', 'Keep pending'], ['notours', 'Not ours']],
+    imp_2b: [['addbooks', 'Add & claim'], ['hold', 'Keep pending'], ['notours', 'Not ours']],
     confirm: [['take', 'Take credit'], ['skip', 'Not now'], ['notmine', 'Not mine']]
   };
   const WHY = { imp_matched: ['Import — matched', 'g'], imp_diff: ['Import — IGST differs', 'a'], imp_2b: ['Import, not in books', 'b'], mismatch: ['Tax differs', 'a'], suggest: ['Possible match', 'b'], gstin_diff: ['Other GSTIN, same PAN', 'a'], books_only: ['Missing in 2B', 'r'], '2b_only': ['Not in books', 'b'],
@@ -5657,6 +5661,10 @@ VIEWS.gst = async v => {
       ? box('ITC as per books (claimed)', gTax(cl.claim), 'ok') + box('ITC in GSTR-2B', gTax(sm.itc2b)) + box('Books above 2B', Math.max(0, sm.over2b), sm.over2b > RECO.TOL ? 'bad' : '')
       : box('ITC in GSTR-2B', gTax(sm.itc2b)) + box('ITC to claim now', gTax(cl.claim), 'ok', gTax(cl.carried) || gTax(cl.late) ? `incl. ${gst$(gTax(cl.carried) + gTax(cl.late))} from earlier months` : '') + box('Held back', gTax(cl.held), gTax(cl.held) ? 'warn' : '');
     const decBtns = it => {
+      if (it.st === 'imp_2b') {   // v67: import in 2B, not in books — claimed in 4(A)(1) unless kept pending / not ours
+        const cur4 = (dec[it.k] || {}).a || '', ca = (ans[it.k] || {}).a, held = GR.impHeld(reco, it.x);
+        return `<div class="rc-btns">${DEC_BTN.imp_2b.map(([v, l]) => `<button class="btn sm ${cur4 === v ? 'primary' : ''}" data-d1="${esc(it.k)}" data-v="${v}" data-kind="dec" aria-pressed="${cur4 === v}">${l}</button>`).join('')}<button class="link small" data-note1="${esc(it.k)}" title="Add a note">${(dec[it.k] || {}).note ? '✎ ' + esc((dec[it.k] || {}).note).slice(0, 24) : 'Note'}</button></div>
+          <div class="tiny ${held ? 'late' : 'muted'}">${held ? 'Not claimed — left out of 3B 4(A)(1)' : cur4 ? 'Claimed in 3B 4(A)(1)' : 'Claimed in 3B 4(A)(1) unless you keep it pending'}</div>${ca ? `<div class="small"><span class="pill small">Client: ${esc(RECO.ansLabel(ca))}</span></div>` : asked[it.k] ? `<div class="muted tiny">Sent to client</div>` : ''}`; }
       if (/^imp_/.test(it.st)) { const ca = (ans[it.k] || {}).a;   // v66: imports — ITC goes to 3B 4(A)(1) from 2B; shown for checking
         return `<span class="small muted">ITC in 3B 4(A)(1) from 2B${it.st === 'imp_diff' ? ` · books ${gst$(gTax(it.b))}` : ''}</span>${ca ? `<div class="small"><span class="pill small">Client: ${esc(RECO.ansLabel(ca))}</span></div>` : asked[it.k] ? `<div class="muted tiny">Sent to client</div>` : ''}`; }
       if (it.st === 'claimed_before') return `<span class="small muted">Claimed in ${RECO.monthName(it.from)} — not again</span>`;
