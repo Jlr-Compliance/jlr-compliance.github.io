@@ -4332,6 +4332,13 @@ const GR = (() => {
     }
     if (!best || best.sc < 4) return { rows: [], error: 'Could not find the column headings (need at least Invoice no and Taxable value / tax columns).' };
     const m = best.m, out = [], get = (row, k) => m[k] == null ? '' : row[m[k]];
+    // v66: portal GSTR-2B Excel, IMPG / IMPGSEZ sheet — "Bill of Entry Details: Port Code | Number | Date", no supplier GSTIN
+    const isImp = /IMPG/i.test(section); let portIx = -1;
+    if (isImp) {
+      const hc = (rows[best.r] || []).map((c, j) => H((c !== '' && c != null) ? c : (best.r > 0 ? (rows[best.r - 1] || [])[j] : '')));
+      if (m.i == null) { const ix = hc.findIndex((x, j) => !Object.values(m).includes(j) && /^(number|bill of entry (no|number)|boe (no|number)|be (no|number))$/.test(x)); if (ix >= 0) m.i = ix; }
+      portIx = hc.findIndex(x => /port code|^port$/.test(x));
+    }
     for (let r = best.r + 1; r < rows.length; r++) {
       const row = rows[r] || [];
       const first = String(row.find(c => c !== '' && c != null) ?? '').toLowerCase();
@@ -4343,6 +4350,9 @@ const GR = (() => {
       const ty = String(get(row, 'ty')).toLowerCase(), cn = /credit|^c$|cr ?note|return/.test(ty) || /cdn/.test(section) && /^c/.test(ty);
       const sign = cn && t > 0 ? -1 : 1;
       const br = String(get(row, 'br') ?? '').trim();
+      if (isImp) { const pc = portIx >= 0 ? String(row[portIx] ?? '').trim() : '';
+        out.push({ g: String(get(row, 'g') || '').trim().toUpperCase() || 'IMPORT', n: String(get(row, 'n') || '').trim() || ('Import of goods' + (pc ? ' · port ' + pc : '')), i: String(get(row, 'i') ?? '').trim(), d: toDate(get(row, 'd')),
+          t: r2(t), ig: r2(ig), cg: r2(cg), sg: r2(sg), cs: r2(cs), v: r2(Math.abs(v)), src: section.toUpperCase() }); continue; }
       out.push({ g: String(get(row, 'g') || '').trim().toUpperCase(), n: String(get(row, 'n') || '').trim(), i: String(get(row, 'i') ?? '').trim(), d: toDate(get(row, 'd')),
         t: r2(sign * t), ig: r2(sign * ig), cg: r2(sign * cg), sg: r2(sign * sg), cs: r2(sign * cs), v: r2(sign * Math.abs(v)),
         cn: cn || undefined, rc: /^y/i.test(String(get(row, 'rc'))) || undefined, na: /^n/i.test(String(get(row, 'na'))) || undefined, src: section || undefined, br: br || undefined, nt: nt ? r2(sign * nt) : undefined });
@@ -4451,6 +4461,18 @@ const GR = (() => {
       hit.add(j); const x = b2[j];
       out.push({ st, b, x, diff: r2(tax(b) - tax(x)), tdiff: r2((b.t || 0) - (x.t || 0)), how: st });
     });
+    // v66: imports (IMPG / IMPGSEZ) — match the books entry by Bill of Entry number, else by IGST (books line has no GSTIN, dates within 30 days).
+    // Their ITC goes to 3B table 4(A)(1) straight from 2B, so these rows never change the claim; they are shown so nothing is hidden.
+    const impJ = b2.map((x, j) => j).filter(j => /IMPG/.test(b2[j].src || '') && !hit.has(j));
+    if (impJ.length) {
+      const looksImp = b => !gstinOk(b.g) || /IMP/i.test(b.src || '') || /custom|import|bill of entry|\bboe\b/i.test(b.n || '');
+      for (let n = out.length - 1; n >= 0; n--) { const o = out[n]; if (o.st !== 'books_only') continue; const b = o.b;
+        let j = impJ.find(j2 => !hit.has(j2) && digits(b.i).length >= 5 && digits(b.i) === digits(b2[j2].i));
+        if (j == null && looksImp(b)) j = impJ.find(j2 => { if (hit.has(j2)) return false; const g = dayGap(b.d, b2[j2].d); return close(b, b2[j2]) && (g == null || g <= 30); });
+        if (j == null) continue;
+        hit.add(j); const x = b2[j]; out[n] = { st: close(b, x) ? 'imp_matched' : 'imp_diff', b, x, diff: r2(tax(b) - tax(x)), tdiff: r2((b.t || 0) - (x.t || 0)), how: 'impg' }; }
+      impJ.forEach(j => { if (!hit.has(j)) { hit.add(j); out.push({ st: 'imp_2b', x: b2[j] }); } });
+    }
     b2.forEach((x, j) => { if (free(j)) out.push({ st: '2b_only', x }); });
     const groups = {}; out.forEach(o => { const g = groups[o.st] = groups[o.st] || { n: 0, tax: 0 }; g.n++; g.tax = r2(g.tax + tax(o.b || o.x)); });
     return { items: out, groups };
@@ -4494,7 +4516,19 @@ const GR = (() => {
       counts: { sales: SA.length, purchases: P.length, b2b: B.length },
       trend: { sales: out.t, outTax: tax(out), itc: tax(itcBase), cash: g3 && g3.cash ? tax(g3.cash) : tax(cash), filedCash: g3 && g3.cash ? true : false } };
   }
-  return { amt, normInv, cleanInv, panOf, digits, toDate, mapHeader, parseTable, parse2BJson, mergeDocs, setoff, reconcile, summarise, effA, ANS_TAKE, tax, gstinOk, r2 };
+  // v66: document type shown to staff and clients — B2B, B2B-A, CRN (credit note), DBN, IMPG, IMPG-SEZ, ISD
+  function docWord(x) { const t = typeOf(x); return /^IMPG/.test(t) ? 'Bill of entry' : /^CRN/.test(t) ? 'Credit note' : /^DBN/.test(t) ? 'Debit note' : /^ISD/.test(t) ? 'ISD invoice' : 'Bill'; }
+  function typeOf(x) {
+    const s = String((x && x.src) || '').toUpperCase();
+    if (/IMPGSEZ/.test(s)) return 'IMPG-SEZ';
+    if (/IMPG/.test(s) || (x && x.g === 'IMPORT')) return 'IMPG';
+    if (/ISD/.test(s)) return 'ISD';
+    if (/CDN/.test(s)) return x.cn ? 'CRN' + (/A$/.test(s) ? '-A' : '') : 'DBN' + (/A$/.test(s) ? '-A' : '');
+    if (x && x.cn) return 'CRN';
+    if (/B2BA/.test(s)) return 'B2B-A';
+    return 'B2B';
+  }
+  return { amt, normInv, cleanInv, panOf, digits, toDate, mapHeader, parseTable, parse2BJson, mergeDocs, setoff, reconcile, summarise, effA, ANS_TAKE, tax, gstinOk, r2, typeOf, docWord };
 })();
 
 /* v33.3: Draft GSTR-3B in the portal's format. 3.1 from the filed GSTR-1 when there is one, else from the sales working.
@@ -4682,7 +4716,7 @@ const RECO = (() => {
     return { claim: c, held, carried, other, late, undecided };
   }
   // bills that can be sent to the client to confirm (in 2B, not in books / no books), not yet answered
-  const askable = (list, reco) => list.filter(it => (it.st === '2b_only' || it.st === 'confirm') && !GR.effA(reco, it.k) && !(it.x && (it.x.rc || it.x.na)));
+  const askable = (list, reco) => list.filter(it => (it.st === '2b_only' || it.st === 'imp_2b' || it.st === 'confirm') && !GR.effA(reco, it.k) && !(it.x && (it.x.rc || it.x.na)));
 
   // suppliers to chase, with their documents
   function suppliers(list, dec, cf) {
@@ -5593,7 +5627,7 @@ VIEWS.gst = async v => {
     '2b_only': [['addbooks', 'Add & claim'], ['hold', 'Keep pending'], ['notours', 'Not ours']],
     confirm: [['take', 'Take credit'], ['skip', 'Not now'], ['notmine', 'Not mine']]
   };
-  const WHY = { mismatch: ['Tax differs', 'a'], suggest: ['Possible match', 'b'], gstin_diff: ['Other GSTIN, same PAN', 'a'], books_only: ['Missing in 2B', 'r'], '2b_only': ['Not in books', 'b'],
+  const WHY = { imp_matched: ['Import — matched', 'g'], imp_diff: ['Import — IGST differs', 'a'], imp_2b: ['Import, not in books', 'b'], mismatch: ['Tax differs', 'a'], suggest: ['Possible match', 'b'], gstin_diff: ['Other GSTIN, same PAN', 'a'], books_only: ['Missing in 2B', 'r'], '2b_only': ['Not in books', 'b'],
     matched: ['Matched', 'g'], not_avail: ['ITC not available', 'a'], carried: ['Earlier bill, now in 2B', 'g'], claimed_before: ['Claimed earlier', 'g'], confirm: ['From 2B', 'b'] };
   async function renderReco(o, sm, st) {
     st = st || itcState(sm);
@@ -5611,8 +5645,8 @@ VIEWS.gst = async v => {
     // five simple filters
     const F = M === '2b_confirm'
       ? [['waiting', 'Waiting for answer', list.filter(x => x.st2 === 'c_new' || x.st2 === 'c_asked')], ['take', 'Take credit', list.filter(x => x.st2 === 'c_take')], ['nottaken', 'Not taken', list.filter(x => x.st2 === 'c_skip' || x.st2 === 'c_notmine')], ['earlier', 'Earlier months', null]]
-      : [['decide', 'To decide', list.filter(x => ['mismatch', 'suggest', 'gstin_diff'].includes(x.st))], ['missing', 'Missing in 2B', list.filter(x => x.st === 'books_only')], ['notbooks', 'Not in books', list.filter(x => x.st === '2b_only')],
-         ['earlier', 'Earlier months', null], ['matched', 'Matched', list.filter(x => ['matched', 'not_avail'].includes(x.st))]];
+      : [['decide', 'To decide', list.filter(x => ['mismatch', 'suggest', 'gstin_diff'].includes(x.st))], ['missing', 'Missing in 2B', list.filter(x => x.st === 'books_only')], ['notbooks', 'Not in books', list.filter(x => x.st === '2b_only' || x.st === 'imp_2b')],
+         ['earlier', 'Earlier months', null], ['matched', 'Matched', list.filter(x => ['matched', 'not_avail', 'imp_matched', 'imp_diff'].includes(x.st))]];
     const earlier = [...list.filter(x => x.st === 'carried' || x.st === 'claimed_before').map(x => ({ kind: x.st, it: x })), ...cf.missing.map(e => ({ kind: 'cf_missing', e })), ...lw.wait.map(e => ({ kind: 'cf_wait', e })), ...lw.late.map(e => ({ kind: 'late', e }))];
     const cnt = f => f[2] ? f[2].length : earlier.length;
     if (!F.some(f => f[0] === grRecFilter)) grRecFilter = (F.find(f => cnt(f)) || F[0])[0];
@@ -5623,6 +5657,8 @@ VIEWS.gst = async v => {
       ? box('ITC as per books (claimed)', gTax(cl.claim), 'ok') + box('ITC in GSTR-2B', gTax(sm.itc2b)) + box('Books above 2B', Math.max(0, sm.over2b), sm.over2b > RECO.TOL ? 'bad' : '')
       : box('ITC in GSTR-2B', gTax(sm.itc2b)) + box('ITC to claim now', gTax(cl.claim), 'ok', gTax(cl.carried) || gTax(cl.late) ? `incl. ${gst$(gTax(cl.carried) + gTax(cl.late))} from earlier months` : '') + box('Held back', gTax(cl.held), gTax(cl.held) ? 'warn' : '');
     const decBtns = it => {
+      if (/^imp_/.test(it.st)) { const ca = (ans[it.k] || {}).a;   // v66: imports — ITC goes to 3B 4(A)(1) from 2B; shown for checking
+        return `<span class="small muted">ITC in 3B 4(A)(1) from 2B${it.st === 'imp_diff' ? ` · books ${gst$(gTax(it.b))}` : ''}</span>${ca ? `<div class="small"><span class="pill small">Client: ${esc(RECO.ansLabel(ca))}</span></div>` : asked[it.k] ? `<div class="muted tiny">Sent to client</div>` : ''}`; }
       if (it.st === 'claimed_before') return `<span class="small muted">Claimed in ${RECO.monthName(it.from)} — not again</span>`;
       const opts2 = DEC_BTN[it.st]; if (!opts2) return '';
       const cur = it.st === 'confirm' ? ((ans[it.k] || {}).a || '') : ((dec[it.k] || {}).a || '');
@@ -5656,8 +5692,8 @@ VIEWS.gst = async v => {
         const rows = cur[2];
         rb.innerHTML = rows.length ? `<div class="table-wrap"><table class="reco-t"><thead><tr><th>Supplier</th><th>Bill</th><th>Why</th>${M === '2b_confirm' ? '' : '<th class="r">Books</th>'}<th class="r">2B</th><th>IMS</th><th>Decide</th></tr></thead><tbody>
           ${rows.slice(0, 500).map(x => { const d = x.b || x.x, s = RECO.ims(x, eff(x.k)), w = WHY[x.st] || ['', ''];
-            return `<tr><td class="wrap"><b>${esc(d.n || (x.x && x.x.n) || '')}</b><div class="muted small">${esc(d.g)}</div>${x.st === 'gstin_diff' ? `<div class="small late">2B GSTIN: ${esc(x.x.g)}</div>` : ''}</td>
-              <td>${esc(x.b ? x.b.i : x.x.i)}${x.x && x.b && GR.normInv(x.x.i) !== GR.normInv(x.b.i) ? `<div class="muted small">2B: ${esc(x.x.i)}</div>` : ''}<div class="muted small">${dt(d.d)}${d.cn ? ' · credit note' : ''}</div></td>
+            return `<tr><td class="wrap"><b>${esc(d.n || (x.x && x.x.n) || '')}</b><div class="muted small">${d.g === 'IMPORT' ? 'Customs (ICEGATE)' : esc(d.g)}</div>${x.st === 'gstin_diff' ? `<div class="small late">2B GSTIN: ${esc(x.x.g)}</div>` : ''}</td>
+              <td>${esc(x.b ? x.b.i : x.x.i)}${x.x && x.b && GR.normInv(x.x.i) !== GR.normInv(x.b.i) ? `<div class="muted small">2B: ${esc(x.x.i)}</div>` : ''}<div class="muted small"><span class="tag-ty">${GR.typeOf(x.x || d)}</span> ${dt(d.d)}</div></td>
               <td><span class="pill ${w[1]} small">${w[0]}</span>${x.st === 'mismatch' && x.b && x.x ? (() => {   // v65: say what differs — taxable value, GST, or the IGST / CGST+SGST split
                 const tb = x.b.t || 0, t2 = x.x.t || 0, l = [];
                 const dv = GR.r2(gTax(x.b) - gTax(x.x)); l.push(`${dv > 0 ? 'Books' : '2B'} ₹${Math.abs(dv).toLocaleString('en-IN')} more GST`);
@@ -5731,7 +5767,7 @@ VIEWS.gst = async v => {
       const portal = new URL('portal.html', location.href).href, mL = RECO.monthName(period), by = {};
       items.forEach(it => { const b = it.b; (by[b.g] = by[b.g] || { n: b.n || b.g, g: b.g, bills: [] }).bills.push(b); });
       const sups = Object.values(by).sort((a, b) => b.bills.length - a.bills.length), tot = items.reduce((a, it) => a + gTax(it.b), 0);
-      const lines = sups.map((s2, i) => `${i + 1}. ${s2.n} (GSTIN ${s2.g})\n${s2.bills.map(b => `   – ${b.cn ? 'Credit note' : 'Bill'} ${b.i}${b.d ? ' dated ' + b.d.split('-').reverse().join('-') : ''} – Taxable ${gst$(b.t)} – GST ${gst$(gTax(b))}`).join('\n')}`);
+      const lines = sups.map((s2, i) => `${i + 1}. ${s2.g === 'IMPORT' ? 'Import of goods – customs (ICEGATE)' : `${s2.n} (GSTIN ${s2.g})`}\n${s2.bills.map(b => `   – [${GR.typeOf(b)}] ${GR.docWord(b)} ${b.i}${b.d ? ' dated ' + b.d.split('-').reverse().join('-') : ''} – Taxable ${gst$(b.t)} – GST ${gst$(gTax(b))}`).join('\n')}`);
       const txt = `Dear ${c.contact_person || c.name},\n\nThe following ${items.length} purchase bill${items.length > 1 ? 's are' : ' is'} in your purchase register for ${mL}, but the supplier has not uploaded ${items.length > 1 ? 'them' : 'it'} in their GSTR-1, so ${items.length > 1 ? 'they are' : 'it is'} not in your GSTR-2B. Input tax credit of ${gst$(tot)} cannot be claimed until the supplier uploads ${items.length > 1 ? 'them' : 'it'}.\n\nPlease ask these suppliers to upload the bills in their GSTR-1 (or IFF) at the earliest:\n\n${lines.join('\n\n')}\n\nIf any bill is cancelled or not yours, please tell us. You can also mark each bill on your client portal: ${portal}\n\nThank you,\n${settings.firm_name || cfg.FIRM_NAME || ''}`;
       const m = modal(`Send ${items.length} missing bill${items.length > 1 ? 's' : ''} to ${c.name}`, `<p class="muted small" style="margin-top:0">${sups.length} supplier${sups.length > 1 ? 's' : ''} · ITC held ${gst$(tot)}. The bills are shown on the client's portal under “Bills missing in your GSTR-2B”, where the client can mark <i>Asked supplier</i>, <i>Supplier says filed</i> or <i>Not our bill</i>. You can also send the message below on Telegram or email.</p>
         <textarea rows="16" style="width:100%" id="mzMsg">${esc(txt)}</textarea>
@@ -5749,19 +5785,19 @@ VIEWS.gst = async v => {
     // v63: one message + one Excel with both lists — missing in 2B (chase supplier) and in 2B not in books (take credit?)
     async function clientXlsx(miss, ask) {
       const X = await loadXlsx(), wb = X.utils.book_new(), mL = RECO.monthName(period), dd = d => d ? d.split('-').reverse().join('-') : '';
-      const add = (name, title, rows) => { const ws = X.utils.aoa_to_sheet([[title], [], ...rows]); ws['!cols'] = [6, 30, 18, 18, 12, 14, 12, 12, 12, 14, 26].map(w => ({ wch: w })); X.utils.book_append_sheet(wb, ws, name); };
-      const hd = ['#', 'Supplier', 'Supplier GSTIN', 'Bill no', 'Date', 'Taxable', 'IGST', 'CGST', 'SGST', 'Total GST'];
-      const line = (x, i) => [i + 1, x.n || '', x.g, (x.cn ? 'CN ' : '') + x.i, dd(x.d), x.t || 0, x.ig || 0, x.cg || 0, x.sg || 0, gTax(x)];
-      if (miss.length) add('Missing in 2B', `${c.name} – ${mL} – bills in your books, NOT uploaded by the supplier (ITC on hold). Please ask the supplier to upload in GSTR-1 / IFF.`, [[...hd, 'Your reply (Asked supplier / Supplier says filed / Not our bill)'], ...miss.map((it, i) => line(it.b, i)), [], ['', 'Total', '', '', '', GR.r2(miss.reduce((a, it) => a + (it.b.t || 0), 0)), '', '', '', GR.r2(miss.reduce((a, it) => a + gTax(it.b), 0))]]);
-      if (ask.length) add('In 2B not in books', `${c.name} – ${mL} – bills in your GSTR-2B but NOT in your purchase register. Please tell us for each: Take credit / Don't take now / Not my purchase.`, [[...hd, "Your reply (Take credit / Don't take now / Not my purchase)"], ...ask.map((it, i) => line(it.x, i)), [], ['', 'Total', '', '', '', GR.r2(ask.reduce((a, it) => a + (it.x.t || 0), 0)), '', '', '', GR.r2(ask.reduce((a, it) => a + gTax(it.x), 0))]]);
+      const add = (name, title, rows) => { const ws = X.utils.aoa_to_sheet([[title], [], ...rows]); ws['!cols'] = [6, 10, 30, 18, 18, 12, 14, 12, 12, 12, 14, 26].map(w => ({ wch: w })); X.utils.book_append_sheet(wb, ws, name); };
+      const hd = ['#', 'Type', 'Supplier', 'Supplier GSTIN', 'Bill / BoE no', 'Date', 'Taxable', 'IGST', 'CGST', 'SGST', 'Total GST'];
+      const line = (x, i) => [i + 1, GR.typeOf(x), x.g === 'IMPORT' ? 'Import of goods – customs' : x.n || '', x.g === 'IMPORT' ? '' : x.g, x.i, dd(x.d), x.t || 0, x.ig || 0, x.cg || 0, x.sg || 0, gTax(x)];
+      if (miss.length) add('Missing in 2B', `${c.name} – ${mL} – bills in your books, NOT uploaded by the supplier (ITC on hold). Please ask the supplier to upload in GSTR-1 / IFF.`, [[...hd, 'Your reply (Asked supplier / Supplier says filed / Not our bill)'], ...miss.map((it, i) => line(it.b, i)), [], ['', '', 'Total', '', '', '', GR.r2(miss.reduce((a, it) => a + (it.b.t || 0), 0)), '', '', '', GR.r2(miss.reduce((a, it) => a + gTax(it.b), 0))]]);
+      if (ask.length) add('In 2B not in books', `${c.name} – ${mL} – bills in your GSTR-2B but NOT in your purchase register. Please tell us for each: Take credit / Don't take now / Not my purchase.`, [[...hd, "Your reply (Take credit / Don't take now / Not my purchase)"], ...ask.map((it, i) => line(it.x, i)), [], ['', '', 'Total', '', '', '', GR.r2(ask.reduce((a, it) => a + (it.x.t || 0), 0)), '', '', '', GR.r2(ask.reduce((a, it) => a + gTax(it.x), 0))]]);
       X.writeFile(wb, `${(c.client_code || c.name).replace(/[^\w-]+/g, '_')}_GSTR-2B_bills_${period.slice(0, 7)}.xlsx`);
     }
     function bothClient(miss, ask) {
       const portal = new URL('portal.html', location.href).href, mL = RECO.monthName(period), by = {};
       miss.forEach(it => { const b = it.b; (by[b.g] = by[b.g] || { n: b.n || b.g, g: b.g, bills: [] }).bills.push(b); });
       const tm = miss.reduce((a, it) => a + gTax(it.b), 0), ta = ask.reduce((a, it) => a + gTax(it.x), 0), dd = d => d ? ' dated ' + d.split('-').reverse().join('-') : '';
-      const partA = Object.values(by).map((s2, i) => `${i + 1}. ${s2.n} (GSTIN ${s2.g})\n${s2.bills.map(b => `   – ${b.cn ? 'Credit note' : 'Bill'} ${b.i}${dd(b.d)} – GST ${gst$(gTax(b))}`).join('\n')}`).join('\n');
-      const partB = ask.map((it, i) => `${i + 1}. ${it.x.n || it.x.g} – ${it.x.cn ? 'Credit note' : 'Bill'} ${it.x.i}${dd(it.x.d)} – GST ${gst$(gTax(it.x))}`).join('\n');
+      const partA = Object.values(by).map((s2, i) => `${i + 1}. ${s2.g === 'IMPORT' ? 'Import of goods – customs (ICEGATE)' : `${s2.n} (GSTIN ${s2.g})`}\n${s2.bills.map(b => `   – [${GR.typeOf(b)}] ${GR.docWord(b)} ${b.i}${dd(b.d)} – GST ${gst$(gTax(b))}`).join('\n')}`).join('\n');
+      const partB = ask.map((it, i) => `${i + 1}. ${it.x.g === 'IMPORT' ? 'Import of goods – customs' : it.x.n || it.x.g} – [${GR.typeOf(it.x)}] ${GR.docWord(it.x)} ${it.x.i}${dd(it.x.d)} – GST ${gst$(gTax(it.x))}`).join('\n');
       const txt = `Dear ${c.contact_person || c.name},\n\nWe have checked your purchase register against GSTR-2B for ${mL}. We need your help on two lists (also attached as Excel):\n\nA) ${miss.length} bill${miss.length > 1 ? 's' : ''} in your books but NOT uploaded by the supplier – ITC ${gst$(tm)} on hold. Please ask these suppliers to upload them in GSTR-1 / IFF:\n\n${partA}\n\nB) ${ask.length} bill${ask.length > 1 ? 's' : ''} in your GSTR-2B but NOT in your purchase register – GST ${gst$(ta)}. For each, reply: Take credit / Don't take now / Not my purchase (and send the bill copy if it is yours):\n\n${partB}\n\nYou can also mark each bill on your client portal: ${portal}\n\nThank you,\n${settings.firm_name || cfg.FIRM_NAME || ''}`;
       const subj = `GSTR-2B vs purchase register – ${mL}`;
       const m = modal(`Send to ${c.name} · ${miss.length} missing in 2B + ${ask.length} not in books`, `<p class="muted small" style="margin-top:0">One message with both lists. Download the Excel to attach it to the email. “Show on client portal” puts both lists on the client's portal, where the client answers each bill; the answers come back here.</p>
@@ -5783,7 +5819,7 @@ VIEWS.gst = async v => {
       const portal = new URL('portal.html', location.href).href, mL = RECO.monthName(period);
       const by = {}, dd = d => d ? ' dated ' + d.split('-').reverse().join('-') : '', tot = items.reduce((a, it) => a + gTax(it.x), 0);
       items.forEach(it => { const x = it.x; (by[x.g] = by[x.g] || { n: x.n || x.g, g: x.g, bills: [] }).bills.push(x); });
-      const list = Object.values(by).sort((p, q) => q.bills.length - p.bills.length).map((s2, i) => `${i + 1}. ${s2.n} (GSTIN ${s2.g})\n${s2.bills.map(x => `   – ${x.cn ? 'Credit note' : 'Bill'} ${x.i}${dd(x.d)} – Taxable ${gst$(x.t)} – GST ${gst$(gTax(x))}`).join('\n')}`).join('\n');
+      const list = Object.values(by).sort((p, q) => q.bills.length - p.bills.length).map((s2, i) => `${i + 1}. ${s2.g === 'IMPORT' ? 'Import of goods – customs (ICEGATE)' : `${s2.n} (GSTIN ${s2.g})`}\n${s2.bills.map(x => `   – [${GR.typeOf(x)}] ${GR.docWord(x)} ${x.i}${dd(x.d)} – Taxable ${gst$(x.t)} – GST ${gst$(gTax(x))}`).join('\n')}`).join('\n');
       const nb = `${items.length} bill${items.length > 1 ? 's' : ''}`;
       const txt = M === '2b_confirm'
         ? `Dear ${c.contact_person || c.name},\n\nWe have checked your GSTR-2B for ${mL}. The following ${nb} (GST ${gst$(tot)}) ${items.length > 1 ? 'are' : 'is'} in your GSTR-2B (also attached as Excel). Please tell us for each bill whether we should take input tax credit:\n\n${list}\n\nFor each bill, reply: Take credit / Don't take now / Not my purchase.\n\nYou can also mark each bill on your client portal: ${portal}\n\nThank you,\n${settings.firm_name || cfg.FIRM_NAME || ''}`
@@ -5805,7 +5841,7 @@ VIEWS.gst = async v => {
   async function recoExcel({ list, reco, cf, cl, sup, sm, fu, lw, M }) {
     const X = await loadXlsx(), wb = X.utils.book_new(), mLabel = RECO.monthName(period), dec = reco.dec || {}, ans = reco.ans || {}, eff = k => GR.effA(reco, k);
     const lab = { matched: 'Matched', mismatch: 'Tax differs', suggest: 'Possible match', gstin_diff: 'Same supplier, other GSTIN', books_only: 'In books, not in 2B', '2b_only': 'In 2B, not in books',
-      not_avail: 'ITC not available', carried: 'Earlier month, now in 2B', claimed_before: 'Already claimed earlier', confirm: 'For client to confirm' };
+      not_avail: 'ITC not available', imp_matched: 'Import (IMPG) – matched', imp_diff: 'Import (IMPG) – IGST differs', imp_2b: 'Import (IMPG) – not in books', carried: 'Earlier month, now in 2B', claimed_before: 'Already claimed earlier', confirm: 'For client to confirm' };
     const t4 = o => [o.ig, o.cg, o.sg, o.cs, gTax(o)];
     const sheet = (name, aoa, widths) => { const ws = X.utils.aoa_to_sheet(aoa); if (widths) ws['!cols'] = widths.map(w => ({ wch: w })); X.utils.book_append_sheet(wb, ws, name); };
     const G = RECO.groups(list);
@@ -5817,9 +5853,9 @@ VIEWS.gst = async v => {
       ['Earlier months, still missing', cf.missing.length, GR.r2(cf.missing.reduce((a, e) => a + gTax(e.b), 0))],
       ['Earlier months, waiting for client', lw.wait.length, GR.r2(lw.wait.reduce((a, e) => a + gTax(e.x), 0))], [],
       [`Tolerance: ₹${RECO.TOL} per document. Bills match only when the supplier GSTIN (or PAN) agrees.`]], [40, 14, 14, 14, 12, 14]);
-    const rec = [['Status', 'Supplier GSTIN', 'Supplier', 'Bill (books)', 'Bill (2B)', 'GSTIN (2B)', 'Date', 'Taxable (books)', 'Taxable (2B)', 'Tax (books)', 'Tax (2B)', 'Difference', 'IGST (2B)', 'CGST (2B)', 'SGST (2B)', 'Decision', 'Client answer', 'Note', 'IMS action']];
+    const rec = [['Status', 'Type', 'Supplier GSTIN', 'Supplier', 'Bill (books)', 'Bill (2B)', 'GSTIN (2B)', 'Date', 'Taxable (books)', 'Taxable (2B)', 'Tax (books)', 'Tax (2B)', 'Difference', 'IGST (2B)', 'CGST (2B)', 'SGST (2B)', 'Decision', 'Client answer', 'Note', 'IMS action']];
     list.forEach(x => { const b = x.b || (x.st === 'carried' ? x.eb : null) || {}, y = x.x || (x.st === 'claimed_before' ? x.eb : null) || {}, d = dec[x.k] || {}, a = ans[x.k] || {}, s = RECO.ims(x, eff(x.k));
-      rec.push([lab[x.st] + (x.from ? ` (${RECO.monthName(x.from)})` : ''), b.g || y.g, b.n || y.n, b.i || '', y.i || '', y.g && y.g !== b.g ? y.g : '', b.d || y.d, b.t ?? '', y.t ?? '', b.g ? gTax(b) : '', y.g ? gTax(y) : '', x.diff ?? '', y.ig ?? '', y.cg ?? '', y.sg ?? '',
+      rec.push([lab[x.st] + (x.from ? ` (${RECO.monthName(x.from)})` : ''), GR.typeOf(x.x && x.x.g ? x.x : b), b.g || y.g, b.n || y.n, b.i || '', y.i || '', y.g && y.g !== b.g ? y.g : '', b.d || y.d, b.t ?? '', y.t ?? '', b.g ? gTax(b) : '', y.g ? gTax(y) : '', x.diff ?? '', y.ig ?? '', y.cg ?? '', y.sg ?? '',
         RECO.decLabel(x.st, d.a), a.a ? RECO.ansLabel(a.a) + (a.via === 'staff' ? ' (recorded)' : ' (client)') : (reco.mans || {})[x.k] ? ({ asked: 'Asked supplier', filed: 'Supplier says filed', notours: 'Not our bill / cancelled' }[reco.mans[x.k].a] || reco.mans[x.k].a) + ' (client)' : (reco.miss && reco.miss.items || {})[x.k] ? 'Sent to client' : '', d.note || a.note || '', s ? (s.a === 'NA' ? 'Not in IMS' : s.a) : '']); });
     sheet('Reconciliation', rec, [24, 17, 28, 16, 16, 17, 11, 13, 13, 11, 11, 10, 10, 10, 10, 30, 18, 24, 10]);
     sheet('Earlier months', [['Status', 'Month', 'Supplier GSTIN', 'Supplier', 'Bill', 'Date', 'Taxable', 'Tax', 'Now in 2B of / claim in', 'Last date to claim', 'Note'],
