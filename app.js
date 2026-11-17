@@ -5151,7 +5151,7 @@ VIEWS.gst = async v => {
   function itcState(sm, row0) {
     const row = row0 || rowNow(), M = meth(), B2 = (row.gstr2b || {}).rows || [], reco = row.reco || {}, dec = reco.dec || {}, asked = (reco.ask && reco.ask.items) || {};
     const ready = M === '2b_confirm' ? B2.length > 0 : !!sm.rec;
-    if (!ready) return { M, ready, reco, dec, asked, decideN: 0, openN: 0, list: [], undecided: [], toAsk: [], sup: [], cl: null, cf: { missing: [], now: [], cleared: [] }, lw: { late: [], wait: [] } };
+    if (!ready) return { M, ready, reco, dec, asked, decideN: 0, openN: 0, list: [], undecided: [], toAsk: [], toMiss: [], missed: {}, sup: [], cl: null, cf: { missing: [], now: [], cleared: [] }, lw: { late: [], wait: [] } };
     const before = M === '2b_confirm' ? null : RECO.claimedBefore(recoHist || []);
     const cf = M === '2b_confirm' ? { missing: [], now: [], cleared: [], nowByKey: new Map() } : RECO.carry(recoHist || [], row, before);
     const eff = k => GR.effA(reco, k);
@@ -5159,8 +5159,10 @@ VIEWS.gst = async v => {
       .map(it => it.st === 'confirm' ? { ...it, st2: eff(it.k) ? 'c_' + (GR.ANS_TAKE.includes(eff(it.k)) ? 'take' : eff(it.k) === 'notmine' || eff(it.k) === 'notours' ? 'notmine' : 'skip') : asked[it.k] ? 'c_asked' : 'c_new' } : it);
     const lw = RECO.lateAndWaiting(recoHist || [], period), cl = RECO.claim(list, reco, B2, { method: M, late: lw.late }), sup = RECO.suppliers(list, dec, cf);
     const toAsk = RECO.askable(list, reco).filter(it => !asked[it.k]);
+    // v63: bills in books but missing in 2B — tell the client so they chase their suppliers
+    const missed = (reco.miss && reco.miss.items) || {}, toMiss = M === '2b_confirm' ? [] : list.filter(it => it.st === 'books_only' && it.b && !missed[it.k] && (dec[it.k] || {}).a !== 'noclaim');
     const decideN = cl.undecided.filter(x => ['mismatch', 'suggest', 'gstin_diff'].includes(x.st)).length, openN = cl.undecided.length - decideN;
-    return { M, ready, reco, dec, asked, eff, list, cf, lw, cl, sup, toAsk, undecided: cl.undecided, decideN, openN };
+    return { M, ready, reco, dec, asked, eff, list, cf, lw, cl, sup, toAsk, toMiss, missed, undecided: cl.undecided, decideN, openN };
   }
   const chip = (k, label, d, info, btns) => `<div class="grc ${d ? 'ok' : ''}"><span class="grc-i" aria-hidden="true">${d ? '✓' : '○'}</span><div class="grc-b"><b>${label}</b><small>${d ? info : 'Not added'}</small></div><div class="grc-a">${btns}${d ? `<button class="link small danger-t" data-clr="${k}" aria-label="Remove ${esc(label)}">Remove</button>` : ''}</div></div>`;
   // v38: GSTR-3B goes for verification only when 2B is complete (2B in, reco ready, nothing left to decide)
@@ -5402,6 +5404,7 @@ VIEWS.gst = async v => {
     if (!B) todo.push(['Add GSTR-2B (upload, or send it with the JLR GST helper)', 'gstr3b', 1]);
     if (st.decideN) todo.push([`Decide ${st.decideN} bill${st.decideN > 1 ? 's' : ''} (amount, GSTIN or bill no differs)`, 'gstr3b', 2, 'decide']);
     if (st.openN && !st.toAsk.length) todo.push([`${st.openN} bill${st.openN > 1 ? 's' : ''} in 2B ${M === '2b_confirm' ? 'waiting for the client' : 'not in books — decide'}`, 'gstr3b', 2, M === '2b_confirm' ? 'waiting' : 'notbooks']);
+    if (st.toMiss && st.toMiss.length) todo.push([`Tell the client about ${st.toMiss.length} bill${st.toMiss.length > 1 ? 's' : ''} missing in 2B`, 'gstr3b', 2, 'missing']);
     if (st.toAsk.length) todo.push([`Send ${st.toAsk.length} bill${st.toAsk.length > 1 ? 's' : ''} to the client`, 'gstr3b', 2, M === '2b_confirm' ? 'waiting' : 'notbooks']);
     if (st.sup.length) todo.push([`Chase ${st.sup.length} supplier${st.sup.length > 1 ? 's' : ''} (missing in 2B)`, 'gstr3b', 2]);
     if (st.lw.wait.length) todo.push([`${st.lw.wait.length} earlier bill${st.lw.wait.length > 1 ? 's' : ''} still waiting for the client`, 'gstr3b', 2, 'earlier']);
@@ -5594,7 +5597,7 @@ VIEWS.gst = async v => {
     matched: ['Matched', 'g'], not_avail: ['ITC not available', 'a'], carried: ['Earlier bill, now in 2B', 'g'], claimed_before: ['Claimed earlier', 'g'], confirm: ['From 2B', 'b'] };
   async function renderReco(o, sm, st) {
     st = st || itcState(sm);
-    const { M, reco, dec, asked, list, cf, lw, cl, sup, toAsk } = st, B2 = (row.gstr2b || {}).rows || [];
+    const { M, reco, dec, asked, list, cf, lw, cl, sup, toAsk, toMiss, missed } = st, B2 = (row.gstr2b || {}).rows || [];
     if (!st.ready) {
       o.innerHTML = `<p class="muted">${M === '2b_confirm' ? 'Add GSTR-2B for the month (above). Its bills then go to the client to confirm.' : 'Add both the purchase register and GSTR-2B (above) to match bills.'}</p>
         <p class="muted small">ITC method for ${esc(c.name)}: <b>${ITCM[M][0]}</b> — ${ITCM[M][1]} <button class="link small" data-itcm>Change</button></p>`; return;
@@ -5623,6 +5626,12 @@ VIEWS.gst = async v => {
       if (it.st === 'claimed_before') return `<span class="small muted">Claimed in ${RECO.monthName(it.from)} — not again</span>`;
       const opts2 = DEC_BTN[it.st]; if (!opts2) return '';
       const cur = it.st === 'confirm' ? ((ans[it.k] || {}).a || '') : ((dec[it.k] || {}).a || '');
+      const ma = (reco.mans || {})[it.k], MAL = { asked: 'Asked supplier', filed: 'Supplier says filed', notours: 'Not our bill / cancelled' };
+      if (it.st === 'books_only' && (ma || missed[it.k])) {
+        const tag = ma ? `<div class="small"><span class="pill ${ma.a === 'notours' ? 'r' : ma.a === 'filed' ? 'g' : 'a'} small">Client: ${esc(MAL[ma.a] || ma.a)}</span>${ma.note ? ` <span class="muted tiny">${esc(ma.note)}</span>` : ''}</div>` : `<div class="muted tiny">Sent to client ${sh(reco.miss.at)}</div>`;
+        const opts3 = DEC_BTN[it.st], cur3 = (dec[it.k] || {}).a || '';
+        return `<div class="rc-btns">${opts3.map(([v, l]) => `<button class="btn sm ${cur3 === v ? 'primary' : ''}" data-d1="${esc(it.k)}" data-v="${v}" data-kind="dec" aria-pressed="${cur3 === v}">${l}</button>`).join('')}</div>${tag}`;
+      }
       const cs = (it.st === '2b_only' && ans[it.k]) ? `<div class="small"><span class="pill ${GR.ANS_TAKE.includes(ans[it.k].a) ? 'g' : ans[it.k].a === 'notmine' ? 'r' : 'a'} small">${ans[it.k].via === 'staff' ? 'Recorded' : 'Client'}: ${esc(RECO.ansLabel(ans[it.k].a))}</span></div>` : asked[it.k] && !cur ? `<div class="muted tiny">Sent to client ${sh(reco.ask.at)}</div>` : '';
       const by = it.st === 'confirm' ? ans[it.k] : dec[it.k];
       return `<div class="rc-btns">${opts2.map(([v, l]) => `<button class="btn sm ${cur === v ? 'primary' : ''}" data-d1="${esc(it.k)}" data-v="${v}" data-kind="${it.st === 'confirm' ? 'ans' : 'dec'}" aria-pressed="${cur === v}">${l}</button>`).join('')}<button class="link small" data-note1="${esc(it.k)}" title="Add a note">${(dec[it.k] || {}).note ? '✎ ' + esc((dec[it.k] || {}).note).slice(0, 24) : 'Note'}</button></div>${cs}${by && by.at ? `<div class="muted tiny">${esc(by.via === 'client' ? 'Client' : profName(by.by) || '')} · ${sh(by.at)}</div>` : ''}`;
@@ -5632,7 +5641,7 @@ VIEWS.gst = async v => {
       ${cl.undecided.length ? `<p class="note warn small" style="margin:10px 0 0">${cl.undecided.length} bill${cl.undecided.length > 1 ? 's need' : ' needs'} a decision. ${M === 'books_2b' ? 'Until then the lower of books and 2B is counted for differences, and other bills are held back.' : 'Until then they are not claimed.'}</p>` : ''}
       ${M === 'books' && sm.over2b > RECO.TOL ? `<p class="note warn small" style="margin:10px 0 0">Credit as per books is ${gst$(sm.over2b)} more than GSTR-2B. ITC needs the bill in 2B (Sec 16(2)(aa)).</p>` : ''}
       ${grRecView === 'inv' ? `<div class="rc-f" role="tablist">${F.map(f => `<button role="tab" aria-selected="${grRecFilter === f[0]}" class="rc-fb ${grRecFilter === f[0] ? 'on' : ''}" data-rf="${f[0]}">${f[1]} · ${cnt(f)}</button>`).join('')}
-        <span class="spacer"></span>${toAsk.length ? `<button class="btn sm primary" id="grAsk">Send ${toAsk.length} bill${toAsk.length > 1 ? 's' : ''} to client</button>` : ''}<button class="btn sm" id="grXl">Excel</button></div>` : ''}
+        <span class="spacer"></span>${['missing', 'notbooks'].includes(grRecFilter) && toMiss.length && toAsk.length ? `<button class="btn sm primary" id="grBoth" title="One message and one Excel with both lists">Send both to client · ${toMiss.length} missing in 2B + ${toAsk.length} not in books</button>` : ''}${grRecFilter === 'missing' ? (toMiss.length ? `<button class="btn sm primary" id="grMiss" title="Tell the client these bills are not in GSTR-2B so they can ask their suppliers to upload them">Send ${toMiss.length} missing bill${toMiss.length > 1 ? 's' : ''} to client</button>` : Object.keys(missed).length ? `<span class="small muted">Missing bills sent to client ${sh(reco.miss.at)}</span>` : '') : toAsk.length ? `<button class="btn sm primary" id="grAsk">Send ${toAsk.length} bill${toAsk.length > 1 ? 's' : ''} to client</button>` : ''}<button class="btn sm" id="grXl">Excel</button></div>` : ''}
       <div id="rcBody"></div>
       ${grRecView === 'inv' ? `<p class="muted small">Bills match only when the supplier agrees (same GSTIN, or same PAN for “other GSTIN”) — a bill number alone never matches. Up to ₹${RECO.TOL} per bill is rounding.</p>` : ''}`;
     const rb = $('#rcBody', o);
@@ -5688,6 +5697,8 @@ VIEWS.gst = async v => {
 
     $$('[data-itcm]', o).forEach(b => b.onclick = () => itcMethodDialog());
     if ($('#grAsk', o)) $('#grAsk', o).onclick = () => askClient(toAsk);
+    if ($('#grMiss', o)) $('#grMiss', o).onclick = () => missClient(toMiss);
+    if ($('#grBoth', o)) $('#grBoth', o).onclick = () => bothClient(toMiss, toAsk);
     if ($('#grXl', o)) $('#grXl', o).onclick = () => recoExcel({ list, reco, cf, cl, sup, sm, fu, lw, M }).catch(e => toast(friendly(e), true));
 
     async function saveReco(fn) {
@@ -5710,19 +5721,73 @@ VIEWS.gst = async v => {
     function saveAns(k, a) {
       return saveReco(r => { r.ans = r.ans || {}; if (!a) delete r.ans[k]; else r.ans[k] = { a, at: new Date().toISOString(), by: me.id, via: 'staff' }; });
     }
+    // v63: bills in the purchase register that the supplier has not uploaded (not in GSTR-2B) → client chases the supplier
+    function missClient(items) {
+      const portal = new URL('portal.html', location.href).href, mL = RECO.monthName(period), by = {};
+      items.forEach(it => { const b = it.b; (by[b.g] = by[b.g] || { n: b.n || b.g, g: b.g, bills: [] }).bills.push(b); });
+      const sups = Object.values(by).sort((a, b) => b.bills.length - a.bills.length), tot = items.reduce((a, it) => a + gTax(it.b), 0);
+      const lines = sups.map((s2, i) => `${i + 1}. ${s2.n} (GSTIN ${s2.g})\n${s2.bills.map(b => `   – ${b.cn ? 'Credit note' : 'Bill'} ${b.i}${b.d ? ' dated ' + b.d.split('-').reverse().join('-') : ''} – Taxable ${gst$(b.t)} – GST ${gst$(gTax(b))}`).join('\n')}`);
+      const txt = `Dear ${c.contact_person || c.name},\n\nThe following ${items.length} purchase bill${items.length > 1 ? 's are' : ' is'} in your purchase register for ${mL}, but the supplier has not uploaded ${items.length > 1 ? 'them' : 'it'} in their GSTR-1, so ${items.length > 1 ? 'they are' : 'it is'} not in your GSTR-2B. Input tax credit of ${gst$(tot)} cannot be claimed until the supplier uploads ${items.length > 1 ? 'them' : 'it'}.\n\nPlease ask these suppliers to upload the bills in their GSTR-1 (or IFF) at the earliest:\n\n${lines.join('\n\n')}\n\nIf any bill is cancelled or not yours, please tell us. You can also mark each bill on your client portal: ${portal}\n\nThank you,\n${settings.firm_name || cfg.FIRM_NAME || ''}`;
+      const m = modal(`Send ${items.length} missing bill${items.length > 1 ? 's' : ''} to ${c.name}`, `<p class="muted small" style="margin-top:0">${sups.length} supplier${sups.length > 1 ? 's' : ''} · ITC held ${gst$(tot)}. The bills are shown on the client's portal under “Bills missing in your GSTR-2B”, where the client can mark <i>Asked supplier</i>, <i>Supplier says filed</i> or <i>Not our bill</i>. You can also send the message below on Telegram or email.</p>
+        <textarea rows="16" style="width:100%" id="mzMsg">${esc(txt)}</textarea>
+        <div class="toolbar" style="margin-top:8px"><a class="btn sm" id="mzWa" target="_blank" rel="noopener" href="${waShare(txt, c.phone)}">Telegram</a><a class="btn sm" id="mzMail" href="mailto:${esc(c.email || '')}?subject=${encodeURIComponent(`Purchase bills missing in GSTR-2B – ${mL}`)}&body=${encodeURIComponent(txt)}">Email</a><button class="btn sm" id="mzCopy">Copy</button><button class="btn sm" id="mzXl">⬇ Excel for client</button></div>`,
+        { wide: true, saveText: 'Show on client portal', onSave: async () => {
+          const at = new Date().toISOString();
+          const ok = await saveReco(r => { r.miss = r.miss || {}; r.miss.at = at; r.miss.by = me.id; r.miss.items = { ...(r.miss.items || {}),
+            ...Object.fromEntries(items.map(it => [it.k, { g: it.b.g, n: it.b.n || '', i: it.b.i, d: it.b.d || '', t: it.b.t, tax: gTax(it.b), cn: it.b.cn || undefined }])) }; });
+          if (ok) toast(`${items.length} missing bill${items.length > 1 ? 's' : ''} shown on ${c.name}'s portal`); return ok;
+        } });
+      $('#mzXl', m.el).onclick = () => clientXlsx(items, []).catch(e => toast(friendly(e), true));
+      $('#mzCopy', m.el).onclick = () => copySecret($('#mzMsg', m.el).value, 'Message copied');
+      $('#mzMsg', m.el).oninput = e => { $('#mzWa', m.el).href = waShare(e.target.value, c.phone); $('#mzMail', m.el).href = `mailto:${encodeURIComponent(c.email || '')}?subject=${encodeURIComponent(`Purchase bills missing in GSTR-2B – ${mL}`)}&body=${encodeURIComponent(e.target.value)}`; };
+    }
+    // v63: one message + one Excel with both lists — missing in 2B (chase supplier) and in 2B not in books (take credit?)
+    async function clientXlsx(miss, ask) {
+      const X = await loadXlsx(), wb = X.utils.book_new(), mL = RECO.monthName(period), dd = d => d ? d.split('-').reverse().join('-') : '';
+      const add = (name, title, rows) => { const ws = X.utils.aoa_to_sheet([[title], [], ...rows]); ws['!cols'] = [6, 30, 18, 18, 12, 14, 12, 12, 12, 14, 26].map(w => ({ wch: w })); X.utils.book_append_sheet(wb, ws, name); };
+      const hd = ['#', 'Supplier', 'Supplier GSTIN', 'Bill no', 'Date', 'Taxable', 'IGST', 'CGST', 'SGST', 'Total GST'];
+      const line = (x, i) => [i + 1, x.n || '', x.g, (x.cn ? 'CN ' : '') + x.i, dd(x.d), x.t || 0, x.ig || 0, x.cg || 0, x.sg || 0, gTax(x)];
+      if (miss.length) add('Missing in 2B', `${c.name} – ${mL} – bills in your books, NOT uploaded by the supplier (ITC on hold). Please ask the supplier to upload in GSTR-1 / IFF.`, [[...hd, 'Your reply (Asked supplier / Supplier says filed / Not our bill)'], ...miss.map((it, i) => line(it.b, i)), [], ['', 'Total', '', '', '', GR.r2(miss.reduce((a, it) => a + (it.b.t || 0), 0)), '', '', '', GR.r2(miss.reduce((a, it) => a + gTax(it.b), 0))]]);
+      if (ask.length) add('In 2B not in books', `${c.name} – ${mL} – bills in your GSTR-2B but NOT in your purchase register. Please tell us for each: Take credit / Don't take now / Not my purchase.`, [[...hd, "Your reply (Take credit / Don't take now / Not my purchase)"], ...ask.map((it, i) => line(it.x, i)), [], ['', 'Total', '', '', '', GR.r2(ask.reduce((a, it) => a + (it.x.t || 0), 0)), '', '', '', GR.r2(ask.reduce((a, it) => a + gTax(it.x), 0))]]);
+      X.writeFile(wb, `${(c.client_code || c.name).replace(/[^\w-]+/g, '_')}_GSTR-2B_bills_${period.slice(0, 7)}.xlsx`);
+    }
+    function bothClient(miss, ask) {
+      const portal = new URL('portal.html', location.href).href, mL = RECO.monthName(period), by = {};
+      miss.forEach(it => { const b = it.b; (by[b.g] = by[b.g] || { n: b.n || b.g, g: b.g, bills: [] }).bills.push(b); });
+      const tm = miss.reduce((a, it) => a + gTax(it.b), 0), ta = ask.reduce((a, it) => a + gTax(it.x), 0), dd = d => d ? ' dated ' + d.split('-').reverse().join('-') : '';
+      const partA = Object.values(by).map((s2, i) => `${i + 1}. ${s2.n} (GSTIN ${s2.g})\n${s2.bills.map(b => `   – ${b.cn ? 'Credit note' : 'Bill'} ${b.i}${dd(b.d)} – GST ${gst$(gTax(b))}`).join('\n')}`).join('\n');
+      const partB = ask.map((it, i) => `${i + 1}. ${it.x.n || it.x.g} – ${it.x.cn ? 'Credit note' : 'Bill'} ${it.x.i}${dd(it.x.d)} – GST ${gst$(gTax(it.x))}`).join('\n');
+      const txt = `Dear ${c.contact_person || c.name},\n\nWe have checked your purchase register against GSTR-2B for ${mL}. We need your help on two lists (also attached as Excel):\n\nA) ${miss.length} bill${miss.length > 1 ? 's' : ''} in your books but NOT uploaded by the supplier – ITC ${gst$(tm)} on hold. Please ask these suppliers to upload them in GSTR-1 / IFF:\n\n${partA}\n\nB) ${ask.length} bill${ask.length > 1 ? 's' : ''} in your GSTR-2B but NOT in your purchase register – GST ${gst$(ta)}. For each, reply: Take credit / Don't take now / Not my purchase (and send the bill copy if it is yours):\n\n${partB}\n\nYou can also mark each bill on your client portal: ${portal}\n\nThank you,\n${settings.firm_name || cfg.FIRM_NAME || ''}`;
+      const subj = `GSTR-2B vs purchase register – ${mL}`;
+      const m = modal(`Send to ${c.name} · ${miss.length} missing in 2B + ${ask.length} not in books`, `<p class="muted small" style="margin-top:0">One message with both lists. Download the Excel to attach it to the email. “Show on client portal” puts both lists on the client's portal, where the client answers each bill; the answers come back here.</p>
+        <textarea rows="16" style="width:100%" id="bzMsg">${esc(txt)}</textarea>
+        <div class="toolbar" style="margin-top:8px"><button class="btn sm primary" id="bzXl">⬇ Excel for client (2 sheets)</button><a class="btn sm" id="bzWa" target="_blank" rel="noopener" href="${waShare(txt, c.phone)}">Telegram</a><a class="btn sm" id="bzMail" href="mailto:${esc(c.email || '')}?subject=${encodeURIComponent(subj)}&body=${encodeURIComponent(txt)}">Email</a><button class="btn sm" id="bzCopy">Copy</button></div>`,
+        { wide: true, saveText: 'Show on client portal', onSave: async () => {
+          const at = new Date().toISOString(), pick = x => ({ g: x.g, n: x.n || '', i: x.i, d: x.d || '', t: x.t, tax: gTax(x), cn: x.cn || undefined });
+          const ok = await saveReco(r => {
+            r.miss = r.miss || {}; r.miss.at = at; r.miss.by = me.id; r.miss.items = { ...(r.miss.items || {}), ...Object.fromEntries(miss.map(it => [it.k, pick(it.b)])) };
+            r.ask = r.ask || {}; r.ask.at = at; r.ask.by = me.id; r.ask.items = { ...(r.ask.items || {}), ...Object.fromEntries(ask.map(it => [it.k, pick(it.x)])) };
+          });
+          if (ok) toast(`${miss.length + ask.length} bills shown on ${c.name}'s portal`); return ok;
+        } });
+      $('#bzXl', m.el).onclick = () => clientXlsx(miss, ask).catch(e => toast(friendly(e), true));
+      $('#bzCopy', m.el).onclick = () => copySecret($('#bzMsg', m.el).value, 'Message copied');
+      $('#bzMsg', m.el).oninput = e => { $('#bzWa', m.el).href = waShare(e.target.value, c.phone); $('#bzMail', m.el).href = `mailto:${encodeURIComponent(c.email || '')}?subject=${encodeURIComponent(subj)}&body=${encodeURIComponent(e.target.value)}`; };
+    }
     function askClient(items) {
       const portal = new URL('portal.html', location.href).href, mL = RECO.monthName(period);
       const lines = items.map((it, i) => `${i + 1}. ${it.x.n || it.x.g} – ${it.x.cn ? 'Credit note' : 'Bill'} ${it.x.i}${it.x.d ? ' dated ' + it.x.d.split('-').reverse().join('-') : ''} – GST ${gst$(gTax(it.x))}`);
       const txt = `Dear ${c.contact_person || c.name},\n\nThe following purchase bills are in your GSTR-2B for ${mL}${M === '2b_confirm' ? '' : ' but not in your purchase register'}. Please tell us which ones we should take input tax credit for:\n\n${lines.join('\n')}\n\nFor each bill, reply: Take credit / Don't take now / Not my purchase.\nYou can also mark them on your client portal: ${portal}\n\nThank you,\n${settings.firm_name || cfg.FIRM_NAME || ''}`;
       const m = modal(`Send ${items.length} bill${items.length > 1 ? 's' : ''} to ${c.name}`, `<p class="muted small" style="margin-top:0">The bills are shown on the client's portal under “Bills to confirm”, where the client marks each one. Their answers come back here. You can also send the message below on Telegram or email.</p>
         <textarea rows="14" style="width:100%" id="askMsg">${esc(txt)}</textarea>
-        <div class="toolbar" style="margin-top:8px"><a class="btn sm" id="askWa" target="_blank" rel="noopener" href="${waShare(txt, c.phone)}">Telegram</a><a class="btn sm" href="mailto:${esc(c.email || '')}?subject=${encodeURIComponent(`Purchase bills to confirm – ${mL}`)}&body=${encodeURIComponent(txt)}">Email</a><button class="btn sm" id="askCopy">Copy</button></div>`,
+        <div class="toolbar" style="margin-top:8px"><a class="btn sm" id="askWa" target="_blank" rel="noopener" href="${waShare(txt, c.phone)}">Telegram</a><a class="btn sm" href="mailto:${esc(c.email || '')}?subject=${encodeURIComponent(`Purchase bills to confirm – ${mL}`)}&body=${encodeURIComponent(txt)}">Email</a><button class="btn sm" id="askCopy">Copy</button><button class="btn sm" id="askXl">⬇ Excel for client</button></div>`,
         { wide: true, saveText: 'Show on client portal', onSave: async () => {
           const at = new Date().toISOString();
           const ok = await saveReco(r => { r.ask = r.ask || {}; r.ask.at = at; r.ask.by = me.id; r.ask.items = { ...(r.ask.items || {}),
             ...Object.fromEntries(items.map(it => [it.k, { g: it.x.g, n: it.x.n || '', i: it.x.i, d: it.x.d || '', t: it.x.t, tax: gTax(it.x), cn: it.x.cn || undefined }])) }; });
           if (ok) toast(`${items.length} bill${items.length > 1 ? 's' : ''} shown on ${c.name}'s portal`); return ok;
         } });
+      $('#askXl', m.el).onclick = () => clientXlsx([], items).catch(e => toast(friendly(e), true));
       $('#askCopy', m.el).onclick = () => copySecret($('#askMsg', m.el).value, 'Message copied');
       $('#askMsg', m.el).oninput = e => { $('#askWa', m.el).href = waShare(e.target.value, c.phone); };
     }
@@ -5745,7 +5810,7 @@ VIEWS.gst = async v => {
     const rec = [['Status', 'Supplier GSTIN', 'Supplier', 'Bill (books)', 'Bill (2B)', 'GSTIN (2B)', 'Date', 'Taxable (books)', 'Taxable (2B)', 'Tax (books)', 'Tax (2B)', 'Difference', 'IGST (2B)', 'CGST (2B)', 'SGST (2B)', 'Decision', 'Client answer', 'Note', 'IMS action']];
     list.forEach(x => { const b = x.b || (x.st === 'carried' ? x.eb : null) || {}, y = x.x || (x.st === 'claimed_before' ? x.eb : null) || {}, d = dec[x.k] || {}, a = ans[x.k] || {}, s = RECO.ims(x, eff(x.k));
       rec.push([lab[x.st] + (x.from ? ` (${RECO.monthName(x.from)})` : ''), b.g || y.g, b.n || y.n, b.i || '', y.i || '', y.g && y.g !== b.g ? y.g : '', b.d || y.d, b.t ?? '', y.t ?? '', b.g ? gTax(b) : '', y.g ? gTax(y) : '', x.diff ?? '', y.ig ?? '', y.cg ?? '', y.sg ?? '',
-        RECO.decLabel(x.st, d.a), a.a ? RECO.ansLabel(a.a) + (a.via === 'staff' ? ' (recorded)' : ' (client)') : '', d.note || a.note || '', s ? (s.a === 'NA' ? 'Not in IMS' : s.a) : '']); });
+        RECO.decLabel(x.st, d.a), a.a ? RECO.ansLabel(a.a) + (a.via === 'staff' ? ' (recorded)' : ' (client)') : (reco.mans || {})[x.k] ? ({ asked: 'Asked supplier', filed: 'Supplier says filed', notours: 'Not our bill / cancelled' }[reco.mans[x.k].a] || reco.mans[x.k].a) + ' (client)' : (reco.miss && reco.miss.items || {})[x.k] ? 'Sent to client' : '', d.note || a.note || '', s ? (s.a === 'NA' ? 'Not in IMS' : s.a) : '']); });
     sheet('Reconciliation', rec, [24, 17, 28, 16, 16, 17, 11, 13, 13, 11, 11, 10, 10, 10, 10, 30, 18, 24, 10]);
     sheet('Earlier months', [['Status', 'Month', 'Supplier GSTIN', 'Supplier', 'Bill', 'Date', 'Taxable', 'Tax', 'Now in 2B of / claim in', 'Last date to claim', 'Note'],
       ...cf.missing.map(e => ['Still missing from 2B', RECO.monthName(e.from), e.b.g, e.b.n, e.b.i, e.b.d, e.b.t, gTax(e.b), '', e.deadline.split('-').reverse().join('-'), e.note]),

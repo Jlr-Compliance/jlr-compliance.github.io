@@ -86,6 +86,8 @@
     data.extra = ex.error || !ex.data ? { acks: [], claims: [], upi: null } : ex.data;
     const ic = await sb.rpc('portal_itc_list');
     data.itc = ic.error ? [] : (ic.data || []);
+    const mz = await sb.rpc('portal_miss_list');   // v63: bills missing in GSTR-2B
+    data.miss = mz.error ? [] : (mz.data || []);
     render();
     if (!idleT) idleStart();
   }
@@ -123,7 +125,15 @@
       ${itc.map((x, n) => `<div class="need-item"><div><b>${esc(x.n || x.g)}</b> · ${esc(x.i)}${x.cn ? ' (credit note)' : ''}
           <div class="small muted">${x.d ? fmt(x.d) + ' · ' : ''}GST ${inr(x.tax)} · GSTR-2B ${MN(x.period)}${x.answer ? ` · <b>${esc((ANS.find(a => a[0] === x.answer) || [])[1] || x.answer)}</b>${x.by_staff ? ' (noted by us)' : ''}` : ''}</div></div>
         <div class="itc-btns">${ANS.map(([k, l]) => `<button class="btn sm ${x.answer === k ? 'primary' : ''}" data-itc="${n}" data-a="${k}" aria-pressed="${x.answer === k}">${l}</button>`).join('')}</div></div>`).join('')}</section>` : '';
-    out.innerHTML = itcBox + needBox + `<div class="stats">
+    // v63: bills in the client's books that the supplier has not uploaded (not in GSTR-2B)
+    const miss = data.miss || [], mOpen = miss.filter(x => !x.answer), MANS = [['asked', 'Asked supplier'], ['filed', 'Supplier says filed'], ['notours', 'Not our bill / cancelled']];
+    const mSup = {}; miss.forEach((x, n) => { (mSup[x.g] = mSup[x.g] || { n: x.n || x.g, g: x.g, xs: [] }).xs.push([x, n]); });
+    const missBox = miss.length ? `<section class="card need-box itc-box" aria-label="Bills missing in GSTR-2B"><h3 style="margin:0 0 4px">Bills missing in your GSTR-2B${mOpen.length ? ` · ${mOpen.length} open` : ''}</h3>
+      <p class="muted small" style="margin:0 0 10px">These bills are in your purchase register, but the supplier has not uploaded them in GSTR-1, so input tax credit of <b>${inr(mOpen.reduce((a, x) => a + Number(x.tax || 0), 0))}</b> is on hold. Please ask each supplier to upload them, then mark the bill here.</p>
+      ${Object.values(mSup).map(s => `<div class="small" style="margin:10px 0 4px"><b>${esc(s.n)}</b> <span class="muted">· GSTIN ${esc(s.g)} · ${s.xs.length} bill${s.xs.length > 1 ? 's' : ''}</span></div>` + s.xs.map(([x, n]) => `<div class="need-item"><div><b>${esc(x.i)}</b>${x.cn ? ' (credit note)' : ''}
+          <div class="small muted">${x.d ? fmt(x.d) + ' · ' : ''}Taxable ${inr(x.t)} · GST ${inr(x.tax)} · ${MN(x.period)}${x.answer ? ` · <b>${esc((MANS.find(a => a[0] === x.answer) || [])[1] || x.answer)}</b>` : ''}</div></div>
+        <div class="itc-btns">${MANS.map(([k, l]) => `<button class="btn sm ${x.answer === k ? 'primary' : ''}" data-mz="${n}" data-a="${k}" aria-pressed="${x.answer === k}">${l}</button>`).join('')}</div></div>`).join('')).join('')}</section>` : '';
+    out.innerHTML = itcBox + missBox + needBox + `<div class="stats">
         <div class="stat amber"><div class="n">${cnt('Pending data')}</div><div class="l">Waiting for your documents</div></div>
         <div class="stat blue"><div class="n">${cnt('In progress') + cnt('Ready to file')}</div><div class="l">In progress</div></div>
         <div class="stat green"><div class="n">${cnt('Filed')}</div><div class="l">Filed</div></div>
@@ -139,6 +149,15 @@
       b.disabled = false;
       if (r.error) return toast(r.error.message || 'Could not save — please try again', true);
       x.answer = a; x.by_staff = false; toast('Thank you — noted'); render();
+    });
+    $$('[data-mz]', out).forEach(b => b.onclick = async () => {
+      const x = (data.miss || [])[+b.dataset.mz], a = b.dataset.a; let note = null;
+      if (a === 'notours') { note = prompt('Anything to add? (optional)', ''); if (note === null) return; }
+      b.disabled = true;
+      const r = await sb.rpc('portal_miss_answer', { p_period: x.period, p_key: x.k, p_answer: a, p_note: note || null });
+      b.disabled = false;
+      if (r.error) return toast(r.error.message || 'Could not save — please try again', true);
+      x.answer = a; toast('Thank you — noted'); render();
     });
     $$('.need-box [data-up]', out).forEach(b => b.onclick = () => upload(tasks.find(t => t.id === b.dataset.up)));
     $$('.need-box [data-updoc]', out).forEach(b => b.onclick = () => uploadDoc(b.dataset.updoc));
