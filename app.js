@@ -5269,7 +5269,7 @@ VIEWS.gst = async v => {
     } else {
       if (SN === 1) {
         const g1src = row.g1 && (row.g1.sales || []).length ? 'GSTR-1 workings' : S ? 'sales register' : '';
-        content = `<div class="grcs">${M === '2b_confirm' ? '' : chip('purchases', 'Purchase register', P, P ? `${P.rows.length} bills · ITC ${gst$(gTax(sm.itcBooks))}` : '', `<button class="btn sm" data-up="purchases">${P ? 'Replace' : 'Upload'}</button><button class="btn sm" data-bills>Read bills</button><button class="link small" data-tpl="purchases">Template</button>`)}
+        content = `<div class="grcs">${M === '2b_confirm' ? '' : chip('purchases', 'Purchase register', P, P ? `${P.rows.length} bills · ITC ${gst$(gTax(sm.itcBooks))}` : '', `<button class="btn sm" data-up="purchases" title="${P ? 'Upload another register (e.g. Expenses) to add to it, or a corrected file to replace it' : ''}">${P ? 'Add / replace' : 'Upload'}</button><button class="btn sm" data-bills>Read bills</button><button class="link small" data-tpl="purchases">Template</button>`)}
           ${chip('gstr2b', 'GSTR-2B', B, B ? `${B.rows.length} bills · ITC ${gst$(gTax(sm.itc2b))}` : '', `<button class="btn sm" data-up="gstr2b">${B ? 'Replace' : 'Upload'}</button><button class="link small" data-portal-api>From JLR GST helper</button>`)}
           <div class="grc meta ${g1src ? 'ok' : ''}"><div class="grc-b"><small>Sales (outward)</small><b>${g1src ? 'From ' + g1src : 'From GSTR-1'}</b><small>${g1src ? `taxable ${gst$(sm.out.t)} · tax ${gst$(gTax(sm.out))}` : 'Add GSTR-1 data first'}</small></div><div class="grc-a"><button class="link small" data-rs="gstr1:${g1src ? 2 : 1}">Open</button></div></div>
           <div class="grc meta"><div class="grc-b"><small>ITC method</small><b>${ITCM[M][0]}</b></div><div class="grc-a"><button class="link small" data-itcm>Change</button></div></div>
@@ -5499,7 +5499,7 @@ VIEWS.gst = async v => {
     const rows = d.rows || [], S = {};
     if (k === 'gstr2b') rows.forEach(r => { const key = (r.src || 'B2B') + (r.na ? ' · ITC not available' : r.rc ? ' · reverse charge' : ''); const z = S[key] = S[key] || { n: 0, t: 0, ig: 0, cg: 0, sg: 0, cs: 0 }; z.n++; H5.forEach(h => z[h] = GR.r2(z[h] + (+r[h] || 0))); });
     else rows.forEach(r => { const key = r.cn ? 'Credit notes' : r.rc ? 'Reverse charge' : 'Invoices'; const z = S[key] = S[key] || { n: 0, t: 0, ig: 0, cg: 0, sg: 0, cs: 0 }; z.n++; H5.forEach(h => z[h] = GR.r2(z[h] + (+r[h] || 0))); });
-    o.innerHTML = `<div class="rc-head"><div><h3 style="margin:0">${title}</h3><p class="muted small" style="margin:2px 0 0">${srcLine(d)}</p></div><span class="spacer"></span><button class="btn sm" data-up="${k}">Replace</button><button class="btn sm" data-vx2>Download Excel</button></div>
+    o.innerHTML = `<div class="rc-head"><div><h3 style="margin:0">${title}</h3><p class="muted small" style="margin:2px 0 0">${srcLine(d)}</p></div><span class="spacer"></span><button class="btn sm" data-up="${k}">${k === 'purchases' ? 'Add / replace' : 'Replace'}</button><button class="btn sm" data-vx2>Download Excel</button></div>
       <div class="table-wrap"><table class="gr-t"><thead><tr><th>${k === 'gstr2b' ? 'Section' : 'Type'}</th><th class="r">Docs</th><th class="r">Taxable</th><th class="r">IGST</th><th class="r">CGST</th><th class="r">SGST</th><th class="r">Cess</th><th class="r">Total tax</th></tr></thead><tbody>
         ${Object.entries(S).map(([l, z]) => `<tr class="${/not available/.test(l) ? 'warn-row' : ''}"><td>${esc(l)}</td><td class="r">${z.n}</td>${cells(z)}<td class="r"><b>${gst$(gTax(z))}</b></td></tr>`).join('')}
         <tr class="tot"><td><b>${k === 'gstr2b' ? 'ITC available (excl. not available, RCM)' : 'ITC as per books (excl. RCM)'}</b></td><td></td>${cells(k === 'gstr2b' ? sm.itc2b : sm.itcBooks)}<td class="r"><b>${gst$(gTax(k === 'gstr2b' ? sm.itc2b : sm.itcBooks))}</b></td></tr></tbody></table></div>
@@ -5864,13 +5864,17 @@ VIEWS.gst = async v => {
         rows = p.rows;
       } else {
         const sheets = await readSheets(f);
-        const use = kind === 'gstr2b' ? sheets.filter(s => /b2b|cdnr|b2ba|impg|isd/i.test(s.name)) : sheets.slice(0, 1);
-        let err = '';
+        // v64: a purchase register can come as several sheets (e.g. Bills + Expenses) — read every sheet that has bills
+        const use = kind === 'gstr2b' ? sheets.filter(s => /b2b|cdnr|b2ba|impg|isd/i.test(s.name)) : kind === 'purchases' ? sheets : sheets.slice(0, 1);
+        let err = ''; const got = [];
         for (const s of (use.length ? use : sheets.slice(0, 1))) {
           const p = GR.parseTable(s.rows, { section: kind === 'gstr2b' ? s.name.toUpperCase().replace(/[^A-Z0-9]/g, '') : '' });
-          if (p.error) err = err || p.error;
+          if (p.error) { err = err || p.error; continue; }
+          if (kind === 'purchases' && sheets.length > 1 && /summary|total|abstract|index/i.test(s.name)) continue;
+          if ((p.rows || []).length) got.push(`${s.name} (${p.rows.length})`);
           rows = rows.concat(p.rows || []); meta = p.columns ? p.columns.join(',') : meta;
         }
+        if (got.length > 1) meta = 'sheets: ' + got.join(', ');
         if (!rows.length && err) return toast(err, true);
       }
       if (!rows.length) return toast('No invoice rows found in this file', true);
@@ -5880,7 +5884,29 @@ VIEWS.gst = async v => {
       const t = rows.reduce((a, x) => a + gTax(x), 0), tx = rows.reduce((a, x) => a + (x.t || 0), 0);
       const label = { sales: 'sales register', purchases: 'purchase register', gstr2b: 'GSTR-2B' }[kind];
       const rl = RP.hits.length ? `\n\nClient rules applied:\n• ${RP.hits.map(h => `${h.n} bill(s): ${RULES.describe(h.r)}`).join('\n• ')}` : '';
-      if (!confirm(`${f.name}\n\n${rows.length} documents found\nTaxable value: ${gst$(tx)}\nTotal tax: ${gst$(t)}${rl}\n\nSave as this month's ${label}?${row[kind] ? '\n(This replaces the current data.)' : ''}`)) return;
+      const shs = meta.startsWith('sheets: ') ? `\nRead from ${meta.slice(8)}` : '';
+      const old = kind === 'purchases' && row.purchases && (row.purchases.rows || []).length ? row.purchases : null;
+      if (old) {   // v64: second register for the same month (e.g. Bills + Expenses) → add to it, or replace
+        const keys = new Set(old.rows.map(BILL.dupKey)), fresh = rows.filter(x => !keys.has(BILL.dupKey(x))), dup = rows.length - fresh.length;
+        const ft = fresh.reduce((a, x) => a + gTax(x), 0), ot = old.rows.reduce((a, x) => a + gTax(x), 0);
+        const pick = await new Promise(res => {
+          const m = modal(`Purchase register already saved for ${monthLabel(grMonth)}`, `<p style="margin-top:0"><b>${esc(f.name)}</b> — ${rows.length} documents · taxable ${gst$(tx)} · tax ${gst$(t)}${esc(shs).replace('\n', ' · ')}</p>
+            <p class="small">Already saved: <b>${esc(old.file || 'purchase register')}</b> — ${old.rows.length} documents · tax ${gst$(ot)}</p>
+            <div class="gr-box" style="padding:10px 12px"><b>Add to it</b> <span class="muted small">— for a second register (e.g. Bills + Expenses).</span><br><span class="small">${fresh.length} new document${fresh.length === 1 ? '' : 's'} (tax ${gst$(ft)}) will be added → total ${old.rows.length + fresh.length}.${dup ? ` <b>${dup}</b> already in the register (same supplier GSTIN + bill no) will be skipped.` : ''}</span></div>
+            <div class="gr-box" style="padding:10px 12px;margin-top:8px"><b>Replace it</b> <span class="muted small">— this file is a corrected / full register.</span><br><span class="small">The ${old.rows.length} saved documents are removed and only this file is kept.</span></div>${rl ? `<p class="small muted">${esc(rl.trim()).replace(/\n/g, '<br>')}</p>` : ''}`,
+            { saveText: `Add ${fresh.length} to it`, extra: '<button class="btn" data-rep>Replace it</button>', onSave: () => { res('add'); } });
+          $('[data-rep]', m.el).onclick = () => { res('replace'); m.close(); };
+          $$('[data-x]', m.el).forEach(b => b.addEventListener('click', () => res(null)));
+          m.el.addEventListener('mousedown', e => { if (e.target === m.el) res(null); });
+        });
+        if (!pick) return;
+        if (pick === 'add') {
+          if (!fresh.length) { toast('Nothing new — every bill in this file is already in the register'); return true; }
+          const files = [...new Set([...String(old.file || '').split(' + ').filter(Boolean), f.name])];
+          await save({ purchases: { ...old, rows: [...old.rows, ...fresh], file: files.join(' + '), files: [...(old.files || [{ name: old.file, n: old.rows.length }]), { name: f.name, n: fresh.length, at: new Date().toISOString() }], source: old.source || (given ? 'email' : 'file'), ...by() } });
+          toast(`Added ${fresh.length} document${fresh.length === 1 ? '' : 's'} — purchase register now has ${old.rows.length + fresh.length}${dup ? ` (${dup} duplicate${dup === 1 ? '' : 's'} skipped)` : ''}`); return true;
+        }
+      } else if (!confirm(`${f.name}\n\n${rows.length} documents found${shs}\nTaxable value: ${gst$(tx)}\nTotal tax: ${gst$(t)}${rl}\n\nSave as this month's ${label}?${row[kind] ? '\n(This replaces the current data.)' : ''}`)) return;
       await save({ [kind]: { rows, file: f.name, source: given ? 'email' : 'file', ...by() } });
       toast(`${label} saved — ${rows.length} documents`); return true;
     } catch (e) { toast('Could not read the file: ' + friendly(e), true); }
