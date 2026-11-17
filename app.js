@@ -4292,7 +4292,7 @@ const GR = (() => {
   const FIELDS = [   // [key, exact aliases, contains-words]
     ['ig', ['igst', 'integrated tax', 'igst amount', 'igst amt', 'integrated tax amount'], ['integrated tax', 'igst']],
     ['cg', ['cgst', 'central tax', 'cgst amount', 'cgst amt', 'central tax amount'], ['central tax', 'cgst']],
-    ['sg', ['sgst', 'sgst/utgst', 'state/ut tax', 'state tax', 'utgst', 'sgst amount', 'sgst amt', 'state/ut tax amount'], ['state/ut tax', 'sgst', 'utgst', 'state tax']],
+    ['sg', ['sgst', 'sgst/utgst', 'state/ut tax', 'state tax', 'utgst', 'sgst amount', 'sgst amt', 'state/ut tax amount', 's/ugst', 's/utgst', 'sgst/ugst', 's/ugst amount'], ['state/ut tax', 'sgst', 'utgst', 'state tax', 's/ugst']],
     ['cs', ['cess', 'cess amount', 'compensation cess'], ['cess']],
     ['t', ['taxable value', 'taxable amount', 'taxable', 'assessable value', 'taxable val'], ['taxable']],
     ['v', ['invoice value', 'total', 'total amount', 'gross total', 'bill amount', 'invoice amount', 'note value', 'note value '], ['invoice value', 'gross total', 'note value', 'invoice amount']],
@@ -4301,12 +4301,19 @@ const GR = (() => {
     ['g', ['gstin', 'gstin/uin', 'gstin uin', 'party gstin', 'customer gstin', 'supplier gstin', 'gstin of supplier', 'gst no', 'gstin no', 'gstin/uin of recipient', 'gstin of party'], ['gstin']],
     ['n', ['party name', 'customer name', 'supplier name', 'name', 'particulars', 'party', 'trade/legal name', 'legal name', 'trade name', 'ledger name', 'receiver name'], ['trade/legal name', 'party name', 'supplier name', 'customer name']],
     ['ty', ['type', 'document type', 'voucher type', 'invoice type', 'note type', 'doc type'], ['note type', 'voucher type', 'document type']],
-    ['rc', ['reverse charge', 'supply attract reverse charge', 'rcm'], ['reverse charge']],
+    ['rc', ['reverse charge', 'supply attract reverse charge', 'rcm', 'rcm y/n'], ['reverse charge', 'rcm']],
+    ['nt', ['non taxable', 'non taxable value', 'non gst', 'nil rated', 'exempt', 'exempted', 'nil/exempt', 'exempt value', 'nil rated value'], ['non taxable', 'nil rated', 'exempt']],
+    ['br', ['branch', 'branch name', 'branch code', 'location', 'unit', 'division', 'site', 'our gstin', 'company gstin'], ['branch']],
     ['na', ['itc availability', 'itc available'], ['itc availability']]
   ];
+  // v61: the supplier's own invoice no / date (needed to match 2B) win over our voucher no / date when both are there
+  const PREF = { i: ['vendor ref', 'vendor ref no', 'vendor invoice no', 'vendor inv no', 'supplier invoice no', 'supplier inv no', 'supplier ref', 'party invoice no', 'party inv no', 'party bill no', 'party ref no'],
+    d: ['vendor ref date', 'vendor invoice date', 'vendor inv date', 'supplier invoice date', 'supplier inv date', 'party invoice date', 'party bill date'] };
   function mapHeader(cells) {
     const h = cells.map(H), used = new Set(), map = {};
+    for (const [k, list] of Object.entries(PREF)) { const ix = h.findIndex((x, j) => !used.has(j) && list.includes(x)); if (ix >= 0) { map[k] = ix; used.add(ix); } }
     for (const [k, ex, cont] of FIELDS) {
+      if (map[k] != null) continue;
       let ix = h.findIndex((x, j) => !used.has(j) && ex.includes(x));
       if (ix < 0) ix = h.findIndex((x, j) => !used.has(j) && x && cont.some(w => x.includes(w)));
       if (ix >= 0) { map[k] = ix; used.add(ix); }
@@ -4331,15 +4338,24 @@ const GR = (() => {
       if (/^(grand )?total|^sub ?total/.test(first) || /^total/.test(String(get(row, 'n')).toLowerCase())) continue;
       let t = amt(get(row, 't')), ig = amt(get(row, 'ig')), cg = amt(get(row, 'cg')), sg = amt(get(row, 'sg')), cs = amt(get(row, 'cs')), v = amt(get(row, 'v'));
       if (!t && v && (ig || cg || sg)) t = v - ig - cg - sg - cs;
-      if (!t && !ig && !cg && !sg && !cs) continue;
+      const nt = amt(get(row, 'nt'));
+      if (!t && !ig && !cg && !sg && !cs && !nt) continue;     // v61: keep non-taxable lines (unregistered / exempt / import of services) — no ITC, but part of the register
       const ty = String(get(row, 'ty')).toLowerCase(), cn = /credit|^c$|cr ?note|return/.test(ty) || /cdn/.test(section) && /^c/.test(ty);
       const sign = cn && t > 0 ? -1 : 1;
+      const br = String(get(row, 'br') ?? '').trim();
       out.push({ g: String(get(row, 'g') || '').trim().toUpperCase(), n: String(get(row, 'n') || '').trim(), i: String(get(row, 'i') ?? '').trim(), d: toDate(get(row, 'd')),
         t: r2(sign * t), ig: r2(sign * ig), cg: r2(sign * cg), sg: r2(sign * sg), cs: r2(sign * cs), v: r2(sign * Math.abs(v)),
-        cn: cn || undefined, rc: /^y/i.test(String(get(row, 'rc'))) || undefined, na: /^n/i.test(String(get(row, 'na'))) || undefined, src: section || undefined });
+        cn: cn || undefined, rc: /^y/i.test(String(get(row, 'rc'))) || undefined, na: /^n/i.test(String(get(row, 'na'))) || undefined, src: section || undefined, br: br || undefined, nt: nt ? r2(sign * nt) : undefined });
     }
-    return { rows: out, headerRow: best.r + 1, columns: Object.keys(m) };
+    // v61: some accounting software exports a register with every bill negative (credit side) — turn it the right way round;
+    // the few positive lines are then returns / debit notes
+    let flipped = false;
+    const mag = x => x.t || gTaxOf(x) || x.nt || 0;
+    if (!section && out.length >= 3) { const nz = out.filter(x => mag(x)), neg = nz.filter(x => mag(x) < 0).length;
+      if (nz.length && neg / nz.length >= 0.7) { flipped = true; out.forEach(x => { ['t', 'ig', 'cg', 'sg', 'cs', 'v'].forEach(k => { x[k] = r2(-(x[k] || 0)); }); if (x.nt) x.nt = r2(-x.nt); if (mag(x) < 0) x.cn = true; else delete x.cn; }); } }
+    return { rows: out, headerRow: best.r + 1, columns: Object.keys(m), flipped };
   }
+  function gTaxOf(x) { return (x.ig || 0) + (x.cg || 0) + (x.sg || 0) + (x.cs || 0); }
   // ---------- GSTR-2B JSON (portal download or API) ----------
   function parse2BJson(obj) {
     let root = obj; for (let k = 0; k < 3 && root && !root.docdata && root.data; k++) root = root.data;
@@ -4403,7 +4419,7 @@ const GR = (() => {
   //  3 same GSTIN + same digits           4 same PAN, other GSTIN, same bill no and amount → gstin_diff
   //  5 same GSTIN, same amount, dates within 10 days, bill no differs → suggest (staff confirm)
   function reconcile(books, b2, tol = 10) {
-    books = mergeDocs(books); b2 = mergeDocs(b2);
+    books = mergeDocs(books.filter(b => tax(b) !== 0 || b.t)); b2 = mergeDocs(b2);     // v61: non-taxable lines (no GST at all) are never in 2B — leave them out of matching
     const kinds = [['exact', r => r.g + '|' + normInv(r.i)], ['clean', r => r.g + '|' + cleanInv(r.i)], ['loose', r => digits(r.i) ? r.g + '|' + digits(r.i) : '']];
     const idx = kinds.map(() => new Map());
     b2.forEach((r, j) => { if (r.src && /IMP/.test(r.src)) return; kinds.forEach(([, f], n) => { const k = f(r); if (k && !idx[n].has(k + (r.cn ? '|C' : ''))) idx[n].set(k + (r.cn ? '|C' : ''), j); }); });
@@ -5726,6 +5742,7 @@ VIEWS.gst = async v => {
         if (!rows.length && err) return toast(err, true);
       }
       if (!rows.length) return toast('No invoice rows found in this file', true);
+      if (kind === 'purchases' && new Set(rows.map(x => x.br).filter(Boolean)).size > 1) return branchSplit(rows, f, given);   // v61: one register for several GSTINs
       await loadClientRules(c.id).catch(() => {});
       const RP = RULES.applyPurch(rows, grRules, kind); rows = RP.rows;
       const t = rows.reduce((a, x) => a + gTax(x), 0), tx = rows.reduce((a, x) => a + (x.t || 0), 0);
@@ -5735,6 +5752,52 @@ VIEWS.gst = async v => {
       await save({ [kind]: { rows, file: f.name, source: given ? 'email' : 'file', ...by() } });
       toast(`${label} saved — ${rows.length} documents`); return true;
     } catch (e) { toast('Could not read the file: ' + friendly(e), true); }
+  }
+  // v61: one purchase register with a Branch column for several GSTINs of a group (e.g. GGL-CHE → Tamil Nadu GSTIN, GGL-BLR → Karnataka GSTIN)
+  const CITY_STATE = { CHE: '33', CHN: '33', MAA: '33', MAS: '33', CBE: '33', COI: '33', TUT: '33', BLR: '29', BLG: '29', BAN: '29', BNG: '29', MUM: '27', BOM: '27', PUN: '27', PNQ: '27', DEL: '07', NDL: '07', HYD: '36', KOL: '19', CCU: '19', AMD: '24', AHM: '24', COK: '32', KOC: '32', TVM: '32', GOA: '30', JAI: '08', LKO: '09', NOI: '09', GGN: '06', GUR: '06', VTZ: '37', VIZ: '37' };
+  async function branchSplit(rows, f, given) {
+    const mates = c.group_id ? clients.filter(x => x.group_id === c.group_id && x.active !== false && x.gstin) : [c];
+    const comps = mates.some(x => x.id === c.id) ? mates : [c, ...mates];
+    const grp = c.group_id ? (await safe(sb.from('client_groups').select('id,name,branch_map').eq('id', c.group_id).maybeSingle())).data : null;
+    let saved = {}; try { saved = (grp && grp.branch_map) || JSON.parse(localStorage.getItem('jlr-branch-map-' + (c.group_id || c.id)) || '{}'); } catch { saved = {}; }
+    const guess = br => { if (saved[br] && comps.some(x => x.id === saved[br])) return saved[br];
+      const B = br.toUpperCase(), byG = comps.find(x => B.includes(x.gstin)); if (byG) return byG.id;
+      const code = Object.keys(CITY_STATE).find(k => new RegExp(`(^|[^A-Z])${k}([^A-Z]|$)`).test(B)), st = code && CITY_STATE[code];
+      const bySt = st && comps.filter(x => x.gstin.slice(0, 2) === st); if (bySt && bySt.length === 1) return bySt[0].id;
+      const byN = comps.find(x => x.name.toUpperCase().split(/\s+/).some(w => w.length > 3 && B.includes(w))); return byN && comps.length === 1 ? byN.id : ''; };
+    const brs = [...new Set(rows.map(x => x.br || '(no branch)'))].map(b => { const L = rows.filter(x => (x.br || '(no branch)') === b);
+      return { b, n: L.length, t: L.reduce((a, x) => a + (x.t || 0), 0), tax: L.reduce((a, x) => a + gTax(x), 0), nt: L.filter(x => !x.t && !gTax(x)).length, rc0: L.filter(x => x.rc && !gTax(x)).length, to: b === '(no branch)' ? c.id : guess(b) }; });
+    const opts = sel => `<option value="">— leave out —</option>${comps.map(x => `<option value="${x.id}" ${sel === x.id ? 'selected' : ''}>${esc(x.name)} · ${esc(x.gstin)}</option>`).join('')}`;
+    const m = modal(`Purchase register — split by branch · ${monthLabel(grMonth)}`, `<p class="small" style="margin-top:0"><b>${esc(f.name)}</b> has bills for <b>${brs.length}</b> branches. Pick the GSTIN (company) for each branch — the tracker remembers it for next month.${c.group_id ? '' : ' <span class="muted">(This client is not in a group, so only its own branch can be kept. Put both companies in one group under Clients → Groups to save the others too.)</span>'}</p>
+      <div class="table-wrap"><table class="gr-t"><thead><tr><th>Branch in the file</th><th class="r">Bills</th><th class="r">Taxable</th><th class="r">Tax (ITC)</th><th>Goes to</th></tr></thead><tbody>
+        ${brs.map((x, i) => `<tr><td><b>${esc(x.b)}</b>${x.nt ? `<div class="muted small">${x.nt} with no GST (unregistered / exempt / import)${x.rc0 ? ` · <span class="warn-t">${x.rc0} reverse charge with no tax worked out</span>` : ''}</div>` : ''}</td><td class="r">${x.n}</td><td class="r">${gst$(x.t)}</td><td class="r">${gst$(x.tax)}</td><td><select data-bi="${i}" aria-label="Company for ${esc(x.b)}">${opts(x.to)}</select></td></tr>`).join('')}</tbody></table></div>
+      <div data-bsum class="small" style="margin-top:8px"></div>
+      <p class="muted small">Each company's purchase register for ${monthLabel(grMonth)} is replaced with its own bills. Its client rules are applied and its 2B reconciliation runs as usual.</p>`, {
+      saveText: 'Save to companies', wide: true,
+      onSave: async el => {
+        brs.forEach((x, i) => { x.to = $(`[data-bi="${i}"]`, el).value; });
+        const grpBy = {}; brs.forEach(x => { if (x.to) (grpBy[x.to] = grpBy[x.to] || []).push(x.b); });
+        if (!Object.keys(grpBy).length) throw new Error('Pick a company for at least one branch');
+        const map = Object.fromEntries(brs.filter(x => x.to && x.b !== '(no branch)').map(x => [x.b, x.to]));
+        if (grp) { const u = await safe(sb.from('client_groups').update({ branch_map: { ...(grp.branch_map || {}), ...map } }).eq('id', grp.id)); if (u.error) try { localStorage.setItem('jlr-branch-map-' + c.group_id, JSON.stringify({ ...saved, ...map })); } catch { /* ignore */ } }
+        else try { localStorage.setItem('jlr-branch-map-' + (c.group_id || c.id), JSON.stringify({ ...saved, ...map })); } catch { /* ignore */ }
+        const done = [];
+        for (const [cid, bl] of Object.entries(grpBy)) {
+          const co = comps.find(x => x.id === cid); let mine = rows.filter(x => bl.includes(x.br || '(no branch)'));
+          const rules = await loadClientRules(cid).catch(() => []), RP = RULES.applyPurch(mine, rules || [], 'purchases'); mine = RP.rows;
+          const val = { rows: mine, file: f.name, source: given ? 'email' : 'file', branches: bl, ...by() };
+          if (cid === c.id) await save({ purchases: val });
+          else { const r = await safe(sb.from('gst_months').upsert({ client_id: cid, period, purchases: val, updated_by: me.id }, { onConflict: 'client_id,period' })); if (r.error) throw new Error(`${co.name}: ${friendly(r.error)}`); }
+          done.push(`${co.name}: ${mine.length} bills`);
+        }
+        await loadClientRules(c.id).catch(() => {});
+        toast('Purchase register saved — ' + done.join(' · '));
+      } });
+    const sumUp = () => { const by = {}; brs.forEach((x, i) => { const to = $(`[data-bi="${i}"]`, m.el).value; if (to) { by[to] = by[to] || { n: 0, tax: 0 }; by[to].n += x.n; by[to].tax += x.tax; } });
+      const left = brs.filter((x, i) => !$(`[data-bi="${i}"]`, m.el).value).reduce((a, x) => a + x.n, 0);
+      $('[data-bsum]', m.el).innerHTML = Object.entries(by).map(([id, v]) => `<b>${esc((comps.find(x => x.id === id) || {}).name || '')}</b>: ${v.n} bills · ITC ${gst$(v.tax)}`).join(' &nbsp;·&nbsp; ') + (left ? ` &nbsp;·&nbsp; <span class="late">${left} bills left out</span>` : ''); };
+    m.el.addEventListener('change', sumUp); sumUp();
+    return true;
   }
   // sales file → GSTR-1 entry (check there, Save pushes it to the draft GSTR-3B)
   async function salesToG1(f) {
