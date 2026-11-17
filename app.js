@@ -4423,7 +4423,7 @@ const GR = (() => {
     const kinds = [['exact', r => r.g + '|' + normInv(r.i)], ['clean', r => r.g + '|' + cleanInv(r.i)], ['loose', r => digits(r.i) ? r.g + '|' + digits(r.i) : '']];
     const idx = kinds.map(() => new Map());
     b2.forEach((r, j) => { if (r.src && /IMP/.test(r.src)) return; kinds.forEach(([, f], n) => { const k = f(r); if (k && !idx[n].has(k + (r.cn ? '|C' : ''))) idx[n].set(k + (r.cn ? '|C' : ''), j); }); });
-    const hit = new Set(), out = [], close = (b, x) => Math.abs(r2(tax(b) - tax(x))) <= tol && Math.abs(r2((b.t || 0) - (x.t || 0))) <= Math.max(tol, 1);
+    const hit = new Set(), out = [], close = (b, x) => Math.abs(r2(tax(b) - tax(x))) <= tol;   // v65: only the tax amount decides a match — taxable value is not compared
     const bLeft = [];
     books.forEach(b => {
       let j = null, how = '';
@@ -5593,7 +5593,7 @@ VIEWS.gst = async v => {
     '2b_only': [['addbooks', 'Add & claim'], ['hold', 'Keep pending'], ['notours', 'Not ours']],
     confirm: [['take', 'Take credit'], ['skip', 'Not now'], ['notmine', 'Not mine']]
   };
-  const WHY = { mismatch: ['Amount differs', 'a'], suggest: ['Possible match', 'b'], gstin_diff: ['Other GSTIN, same PAN', 'a'], books_only: ['Missing in 2B', 'r'], '2b_only': ['Not in books', 'b'],
+  const WHY = { mismatch: ['Tax differs', 'a'], suggest: ['Possible match', 'b'], gstin_diff: ['Other GSTIN, same PAN', 'a'], books_only: ['Missing in 2B', 'r'], '2b_only': ['Not in books', 'b'],
     matched: ['Matched', 'g'], not_avail: ['ITC not available', 'a'], carried: ['Earlier bill, now in 2B', 'g'], claimed_before: ['Claimed earlier', 'g'], confirm: ['From 2B', 'b'] };
   async function renderReco(o, sm, st) {
     st = st || itcState(sm);
@@ -5658,7 +5658,12 @@ VIEWS.gst = async v => {
           ${rows.slice(0, 500).map(x => { const d = x.b || x.x, s = RECO.ims(x, eff(x.k)), w = WHY[x.st] || ['', ''];
             return `<tr><td class="wrap"><b>${esc(d.n || (x.x && x.x.n) || '')}</b><div class="muted small">${esc(d.g)}</div>${x.st === 'gstin_diff' ? `<div class="small late">2B GSTIN: ${esc(x.x.g)}</div>` : ''}</td>
               <td>${esc(x.b ? x.b.i : x.x.i)}${x.x && x.b && GR.normInv(x.x.i) !== GR.normInv(x.b.i) ? `<div class="muted small">2B: ${esc(x.x.i)}</div>` : ''}<div class="muted small">${dt(d.d)}${d.cn ? ' · credit note' : ''}</div></td>
-              <td><span class="pill ${w[1]} small">${w[0]}</span></td>${M === '2b_confirm' ? '' : `<td class="r">${x.b ? gst$(gTax(x.b)) : '—'}</td>`}<td class="r">${x.x ? gst$(gTax(x.x)) : '—'}</td>
+              <td><span class="pill ${w[1]} small">${w[0]}</span>${x.st === 'mismatch' && x.b && x.x ? (() => {   // v65: say what differs — taxable value, GST, or the IGST / CGST+SGST split
+                const tb = x.b.t || 0, t2 = x.x.t || 0, l = [];
+                const dv = GR.r2(gTax(x.b) - gTax(x.x)); l.push(`${dv > 0 ? 'Books' : '2B'} ₹${Math.abs(dv).toLocaleString('en-IN')} more GST`);
+                if ((x.b.ig ? 1 : 0) !== (x.x.ig ? 1 : 0)) l.push(`Books ${x.b.ig ? 'IGST' : 'CGST+SGST'} · 2B ${x.x.ig ? 'IGST' : 'CGST+SGST'}`);
+                void tb; void t2;
+                return l.length ? `<div class="tiny muted" style="margin-top:3px;white-space:nowrap">${l.join('<br>')}</div>` : ''; })() : ''}</td>${M === '2b_confirm' ? '' : `<td class="r">${x.b ? gst$(gTax(x.b)) : '—'}</td>`}<td class="r">${x.x ? gst$(gTax(x.x)) : '—'}</td>
               <td>${s ? (s.a === 'NA' ? '<span class="muted small">—</span>' : pill(s.a)) : ''}</td><td>${decBtns(x)}</td></tr>`; }).join('')}</tbody></table></div>${rows.length > 500 ? '<p class="muted small">Showing first 500 — download Excel for all.</p>' : ''}`
           : `<div class="empty">${{ decide: 'Nothing to decide.', missing: 'Every bill in books is in 2B.', notbooks: 'Every 2B bill is in books.', matched: 'No matched bills yet.', waiting: 'No bills waiting.', take: 'None yet.', nottaken: 'None.' }[grRecFilter] || 'Nothing here.'}</div>`;
       }
@@ -5799,7 +5804,7 @@ VIEWS.gst = async v => {
   }
   async function recoExcel({ list, reco, cf, cl, sup, sm, fu, lw, M }) {
     const X = await loadXlsx(), wb = X.utils.book_new(), mLabel = RECO.monthName(period), dec = reco.dec || {}, ans = reco.ans || {}, eff = k => GR.effA(reco, k);
-    const lab = { matched: 'Matched', mismatch: 'Amount differs', suggest: 'Possible match', gstin_diff: 'Same supplier, other GSTIN', books_only: 'In books, not in 2B', '2b_only': 'In 2B, not in books',
+    const lab = { matched: 'Matched', mismatch: 'Tax differs', suggest: 'Possible match', gstin_diff: 'Same supplier, other GSTIN', books_only: 'In books, not in 2B', '2b_only': 'In 2B, not in books',
       not_avail: 'ITC not available', carried: 'Earlier month, now in 2B', claimed_before: 'Already claimed earlier', confirm: 'For client to confirm' };
     const t4 = o => [o.ig, o.cg, o.sg, o.cs, gTax(o)];
     const sheet = (name, aoa, widths) => { const ws = X.utils.aoa_to_sheet(aoa); if (widths) ws['!cols'] = widths.map(w => ({ wch: w })); X.utils.book_append_sheet(wb, ws, name); };
@@ -5824,7 +5829,7 @@ VIEWS.gst = async v => {
       ...lw.wait.map(e => ['Waiting for client', RECO.monthName(e.from), e.x.g, e.x.n, e.x.i, e.x.d, e.x.t, gTax(e.x), '', e.deadline.split('-').reverse().join('-'), '']),
       ...lw.late.map(e => ['Client said take (late) – claim now', RECO.monthName(e.from), e.x.g, e.x.n, e.x.i, e.x.d, e.x.t, gTax(e.x), mLabel, '', ''])], [30, 11, 17, 28, 16, 11, 13, 11, 16, 16, 24]);
     sheet('Supplier follow-up', [['Supplier GSTIN', 'Supplier', 'Document', 'Date', 'Taxable', 'GST', 'Issue', 'Since', 'Last follow-up'],
-      ...sup.flatMap(s => s.docs.map(d => [s.g, s.n, d.i, d.d, d.t, gTax(d), d.why === 'differs' ? 'Amount differs' : 'Not in 2B', RECO.monthName(d.from || period),
+      ...sup.flatMap(s => s.docs.map(d => [s.g, s.n, d.i, d.d, d.t, gTax(d), d.why === 'differs' ? 'Tax differs' : 'Not in 2B', RECO.monthName(d.from || period),
         fu[s.g] ? new Date(fu[s.g].at).toLocaleDateString('en-IN') : '']))], [17, 28, 16, 11, 13, 11, 14, 10, 13]);
     sheet('IMS actions', [['Supplier GSTIN', 'Supplier', 'Document', 'Type', 'Date', 'Taxable', 'Tax', 'Suggested action', 'Why'],
       ...list.filter(x => x.x).map(x => ({ x, s: RECO.ims(x, eff(x.k)) })).filter(z => z.s && z.s.a !== 'NA')
