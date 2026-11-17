@@ -5776,11 +5776,16 @@ VIEWS.gst = async v => {
     }
     function askClient(items) {
       const portal = new URL('portal.html', location.href).href, mL = RECO.monthName(period);
-      const lines = items.map((it, i) => `${i + 1}. ${it.x.n || it.x.g} – ${it.x.cn ? 'Credit note' : 'Bill'} ${it.x.i}${it.x.d ? ' dated ' + it.x.d.split('-').reverse().join('-') : ''} – GST ${gst$(gTax(it.x))}`);
-      const txt = `Dear ${c.contact_person || c.name},\n\nThe following purchase bills are in your GSTR-2B for ${mL}${M === '2b_confirm' ? '' : ' but not in your purchase register'}. Please tell us which ones we should take input tax credit for:\n\n${lines.join('\n')}\n\nFor each bill, reply: Take credit / Don't take now / Not my purchase.\nYou can also mark them on your client portal: ${portal}\n\nThank you,\n${settings.firm_name || cfg.FIRM_NAME || ''}`;
+      const by = {}, dd = d => d ? ' dated ' + d.split('-').reverse().join('-') : '', tot = items.reduce((a, it) => a + gTax(it.x), 0);
+      items.forEach(it => { const x = it.x; (by[x.g] = by[x.g] || { n: x.n || x.g, g: x.g, bills: [] }).bills.push(x); });
+      const list = Object.values(by).sort((p, q) => q.bills.length - p.bills.length).map((s2, i) => `${i + 1}. ${s2.n} (GSTIN ${s2.g})\n${s2.bills.map(x => `   – ${x.cn ? 'Credit note' : 'Bill'} ${x.i}${dd(x.d)} – Taxable ${gst$(x.t)} – GST ${gst$(gTax(x))}`).join('\n')}`).join('\n');
+      const nb = `${items.length} bill${items.length > 1 ? 's' : ''}`;
+      const txt = M === '2b_confirm'
+        ? `Dear ${c.contact_person || c.name},\n\nWe have checked your GSTR-2B for ${mL}. The following ${nb} (GST ${gst$(tot)}) ${items.length > 1 ? 'are' : 'is'} in your GSTR-2B (also attached as Excel). Please tell us for each bill whether we should take input tax credit:\n\n${list}\n\nFor each bill, reply: Take credit / Don't take now / Not my purchase.\n\nYou can also mark each bill on your client portal: ${portal}\n\nThank you,\n${settings.firm_name || cfg.FIRM_NAME || ''}`
+        : `Dear ${c.contact_person || c.name},\n\nWe have checked your purchase register against GSTR-2B for ${mL}. The following ${nb} (GST ${gst$(tot)}) ${items.length > 1 ? 'are' : 'is'} in your GSTR-2B but NOT in your purchase register (also attached as Excel).\n\nPlease tell us for each bill:\n• Take credit – it is your purchase (please send the bill copy so we can add it to the books)\n• Don't take now – keep it for a later month\n• Not my purchase – the supplier has shown it against your GSTIN by mistake\n\n${list}\n\nYou can also mark each bill on your client portal: ${portal}\n\nThank you,\n${settings.firm_name || cfg.FIRM_NAME || ''}`;
       const m = modal(`Send ${items.length} bill${items.length > 1 ? 's' : ''} to ${c.name}`, `<p class="muted small" style="margin-top:0">The bills are shown on the client's portal under “Bills to confirm”, where the client marks each one. Their answers come back here. You can also send the message below on Telegram or email.</p>
-        <textarea rows="14" style="width:100%" id="askMsg">${esc(txt)}</textarea>
-        <div class="toolbar" style="margin-top:8px"><a class="btn sm" id="askWa" target="_blank" rel="noopener" href="${waShare(txt, c.phone)}">Telegram</a><a class="btn sm" href="mailto:${esc(c.email || '')}?subject=${encodeURIComponent(`Purchase bills to confirm – ${mL}`)}&body=${encodeURIComponent(txt)}">Email</a><button class="btn sm" id="askCopy">Copy</button><button class="btn sm" id="askXl">⬇ Excel for client</button></div>`,
+        <textarea rows="16" style="width:100%" id="askMsg">${esc(txt)}</textarea>
+        <div class="toolbar" style="margin-top:8px"><a class="btn sm" id="askWa" target="_blank" rel="noopener" href="${waShare(txt, c.phone)}">Telegram</a><a class="btn sm" id="askMail" href="mailto:${esc(c.email || '')}?subject=${encodeURIComponent(`${M === '2b_confirm' ? 'Purchase bills to confirm' : 'Bills in GSTR-2B not in your books'} – ${mL}`)}&body=${encodeURIComponent(txt)}">Email</a><button class="btn sm" id="askCopy">Copy</button><button class="btn sm primary" id="askXl">⬇ Excel for client</button></div>`,
         { wide: true, saveText: 'Show on client portal', onSave: async () => {
           const at = new Date().toISOString();
           const ok = await saveReco(r => { r.ask = r.ask || {}; r.ask.at = at; r.ask.by = me.id; r.ask.items = { ...(r.ask.items || {}),
@@ -5789,7 +5794,7 @@ VIEWS.gst = async v => {
         } });
       $('#askXl', m.el).onclick = () => clientXlsx([], items).catch(e => toast(friendly(e), true));
       $('#askCopy', m.el).onclick = () => copySecret($('#askMsg', m.el).value, 'Message copied');
-      $('#askMsg', m.el).oninput = e => { $('#askWa', m.el).href = waShare(e.target.value, c.phone); };
+      $('#askMsg', m.el).oninput = e => { $('#askWa', m.el).href = waShare(e.target.value, c.phone); $('#askMail', m.el).href = `mailto:${encodeURIComponent(c.email || '')}?subject=${encodeURIComponent(`${M === '2b_confirm' ? 'Purchase bills to confirm' : 'Bills in GSTR-2B not in your books'} – ${mL}`)}&body=${encodeURIComponent(e.target.value)}`; };
     }
   }
   async function recoExcel({ list, reco, cf, cl, sup, sm, fu, lw, M }) {
