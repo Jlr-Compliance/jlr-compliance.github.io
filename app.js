@@ -4864,7 +4864,7 @@ async function openMailFile(path, asFile) {
 
 // v47 client groups: each file of a mail has its own company (files[i].client_id); old mails use the mail's client
 const mailFileClient = (m, f) => f.client_id !== undefined ? f.client_id : m.client_id;
-const mailUnsorted = m => (m.files || []).filter(f => !mailFileClient(m, f)).length;
+const mailUnsorted = m => (m.files || []).filter(f => !f.split && !mailFileClient(m, f)).length;
 // companies a file of this mail can be put under: the group's companies, else clients that have the sender's address
 const mailChoices = m => {
   const act = clients.filter(c => c.active);
@@ -4892,9 +4892,9 @@ VIEWS.inbox = async v => {
             <div class="mail-meta"><span class="muted small">${new Date(m.received_at).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' })}</span>${m.to_addr ? `<span class="muted small" title="The office mailbox this mail reached">Received at ${esc(m.to_addr)}</span>` : ''}
               <span class="pill ${m.period_guess ? 'a' : 'b'} small" title="${m.period_guess ? 'Month not in the subject — taken as the month before the mail' : 'Month read from the subject / file name'}">${monthLbl(m.period)}${m.period_guess ? ' (assumed)' : ''}</span></div></div>
           ${m.snippet ? `<div class="mail-snip muted small">${esc(m.snippet.slice(0, 220))}${m.snippet.length > 220 ? '…' : ''}</div>` : ''}
-          <div class="mail-files">${(m.files || []).map((f, i) => { const fid = mailFileClient(m, f), fc = clientById(fid) || {}; return `<div class="mail-file ${multi && !fid ? 'unsorted' : ''}"><span class="pill ${MAIL_KIND[f.kind] ? MAIL_KIND[f.kind][1] : 'a'} small">${(MAIL_KIND[f.kind] || ['File'])[0]}</span>
+          <div class="mail-files">${(m.files || []).map((f, i) => { const fid = mailFileClient(m, f), fc = clientById(fid) || {}; return `<div class="mail-file ${multi && !fid && !f.split ? 'unsorted' : ''}"><span class="pill ${MAIL_KIND[f.kind] ? MAIL_KIND[f.kind][1] : 'a'} small">${(MAIL_KIND[f.kind] || ['File'])[0]}</span>
             <span class="mail-fn">${esc(f.name)}</span><span class="muted small">${Math.max(1, Math.round((f.size || 0) / 1024))} KB</span>
-            <button class="btn sm" data-dl="${i}">Download</button>${['pdf', 'image'].includes(f.kind) && fc.gstin ? `<button class="btn sm primary" data-rb="${i}" title="Read this bill into the purchase register">Read bill</button>` : ''}${['sales', 'purchases', 'gstr2b', 'excel', 'json'].includes(f.kind) && fc.gstin ? `<button class="btn sm primary" data-imp="${i}">Import to GST review</button>` : ''}${multi ? `<span class="mail-co">${fid ? `<span class="small">→ <b>${esc(fc.name || 'Company')}</b>${f.how && f.how !== 'sender' ? ` <span class="muted">(${esc(f.how)})</span>` : ''}</span>` : `<span class="pill a small" title="${esc(f.how || '')}">Needs sorting</span>`}
+            <button class="btn sm" data-dl="${i}">Download</button>${['pdf', 'image'].includes(f.kind) && fc.gstin ? `<button class="btn sm primary" data-rb="${i}" title="Read this bill into the purchase register">Read bill</button>` : ''}${['purchases', 'excel'].includes(f.kind) && /\.(xlsx|xls|csv)$/i.test(f.name) && (multi || fc.group_id) ? `<button class="btn sm primary" data-split="${i}" title="Read the purchase register and split the bills between the companies (Branch column)">Read &amp; split purchases</button>` : ''}${f.split ? `<span class="pill g small" title="${esc((f.split.done || []).join(' · '))}">Split ✓ ${(f.split.companies || []).length} companies</span>` : ''}${['sales', 'purchases', 'gstr2b', 'excel', 'json'].includes(f.kind) && fc.gstin ? `<button class="btn sm primary" data-imp="${i}">Import to GST review</button>` : ''}${multi && !f.split ? `<span class="mail-co">${fid ? `<span class="small">→ <b>${esc(fc.name || 'Company')}</b>${f.how && f.how !== 'sender' ? ` <span class="muted">(${esc(f.how)})</span>` : ''}</span>` : `<span class="pill a small" title="${esc(f.how || '')}">Needs sorting</span>`}
               <select class="mail-pick" data-pick="${i}" aria-label="Company for ${esc(f.name)}"><option value="">${fid ? 'Change company…' : 'Choose company…'}</option>${ch.filter(x => x.id !== fid).map(x => `<option value="${x.id}">${esc(x.name)}${x.gstin ? ' · ' + esc(x.gstin) : ''}</option>`).join('')}</select></span>` : ''}</div>`; }).join('')}</div>
           <div class="mail-foot">${ts.length ? `<span class="small">✓ Marked data received: ${ts.map(t => `<a href="#/work" class="tag-link">${esc(t.return_name)} · ${esc(t.period)}</a>`).join(', ')}</span>`
             : `<span class="small muted">No “Pending data” work found for ${monthLbl(m.period)} — mark it on the work item if needed.</span>`}
@@ -4924,6 +4924,23 @@ VIEWS.inbox = async v => {
     const m = all.find(x => x.id === box.dataset.mail);
     try {
       if (b.dataset.dl) await openMailFile(m.files[+b.dataset.dl].path, false);
+      if (b.dataset.split) {     // v62: read the purchase register in the mail and split it between the group's companies
+        const i = +b.dataset.split, f = m.files[i]; b.disabled = true;
+        try {
+          const file = await openMailFile(f.path, true), sheets = await readSheets(file);
+          const p = GR.parseTable(sheets[0].rows); if (p.error || !(p.rows || []).length) throw new Error(p.error || 'No bills found in this file');
+          const fc = clientById(mailFileClient(m, f)) || {}, gid = m.group_id || fc.group_id || null;
+          const comps = (gid ? clients.filter(x => x.group_id === gid && x.active !== false && x.gstin) : mailChoices(m).filter(x => x.gstin));
+          if (!comps.length) throw new Error('Put the companies in a group first (Clients → Groups)');
+          await purchaseSplitDialog({ rows: p.rows, fname: f.name, source: 'email', month: (m.period || '').slice(0, 7) || prevMonth(), comps, groupId: gid, homeId: null,
+            onDone: async (ids, done) => {
+              const files = (m.files || []).map((x, k) => k === i ? { ...x, split: { companies: ids, done, at: new Date().toISOString(), by: me.id } } : x);
+              const r = await safe(sb.from('mail_inbox').update({ files }).eq('id', m.id)); if (!r.error) m.files = files;
+              draw(); refreshMailBadge();
+            } });
+        } catch (err) { toast(friendly(err), true); } finally { b.disabled = false; }
+        return;
+      }
       if (b.dataset.st) {
         if (b.dataset.st === 'Done' && mailUnsorted(m) && !confirm(`${mailUnsorted(m)} file(s) in this mail are not under any company yet.\n\nMark the mail Done anyway?`)) return;
         const patch = { status: b.dataset.st, handled_by: b.dataset.st === 'New' ? null : me.id, handled_at: b.dataset.st === 'New' ? null : new Date().toISOString() };
@@ -5010,6 +5027,51 @@ async function loadXlsxFull() {
   if (window.XLSX && window.XLSX.__full) return window.XLSX;
   await new Promise((ok, bad) => { const s = document.createElement('script'); s.src = 'xlsx.full.min.js'; s.onload = ok; s.onerror = () => bad(new Error('Could not load the Excel reader')); document.head.appendChild(s); });
   window.XLSX.__full = true; return window.XLSX;
+}
+// v61/v62: split one purchase register (Branch column) between the GSTINs of a group — from GST review or straight from Client mail
+const CITY_STATE = { CHE: '33', CHN: '33', MAA: '33', MAS: '33', CBE: '33', COI: '33', TUT: '33', BLR: '29', BLG: '29', BAN: '29', BNG: '29', MUM: '27', BOM: '27', PUN: '27', PNQ: '27', DEL: '07', NDL: '07', HYD: '36', KOL: '19', CCU: '19', AMD: '24', AHM: '24', COK: '32', KOC: '32', TVM: '32', GOA: '30', JAI: '08', LKO: '09', NOI: '09', GGN: '06', GUR: '06', VTZ: '37', VIZ: '37' };
+async function purchaseSplitDialog({ rows, fname, source = 'file', month, comps, groupId = null, homeId = null, saveHome = null, note = '', onDone = null }) {
+  const period = month + '-01', key = 'jlr-branch-map-' + (groupId || homeId || 'x');
+  const grp = groupId ? (await safe(sb.from('client_groups').select('id,name,branch_map').eq('id', groupId).maybeSingle())).data : null;
+  let saved = {}; try { saved = (grp && grp.branch_map && Object.keys(grp.branch_map).length ? grp.branch_map : null) || JSON.parse(localStorage.getItem(key) || '{}'); } catch { saved = {}; }
+  const guess = br => { if (saved[br] && comps.some(x => x.id === saved[br])) return saved[br];
+    const B = br.toUpperCase(), byG = comps.find(x => B.includes(x.gstin)); if (byG) return byG.id;
+    const code = Object.keys(CITY_STATE).find(k => new RegExp(`(^|[^A-Z])${k}([^A-Z]|$)`).test(B)), st = code && CITY_STATE[code];
+    const bySt = st && comps.filter(x => x.gstin.slice(0, 2) === st); if (bySt && bySt.length === 1) return bySt[0].id;
+    const byN = comps.find(x => x.name.toUpperCase().split(/\s+/).some(w => w.length > 3 && B.includes(w))); return byN && comps.length === 1 ? byN.id : ''; };
+  const brs = [...new Set(rows.map(x => x.br || '(no branch)'))].map(b => { const L = rows.filter(x => (x.br || '(no branch)') === b);
+    return { b, n: L.length, t: L.reduce((a, x) => a + (x.t || 0), 0), tax: L.reduce((a, x) => a + gTax(x), 0), nt: L.filter(x => !x.t && !gTax(x)).length, rc0: L.filter(x => x.rc && !gTax(x)).length, to: b === '(no branch)' ? (homeId || (comps.length === 1 ? comps[0].id : '')) : guess(b) }; });
+  const opts = sel => `<option value="">— leave out —</option>${comps.map(x => `<option value="${x.id}" ${sel === x.id ? 'selected' : ''}>${esc(x.name)} · ${esc(x.gstin)}</option>`).join('')}`;
+  const m = modal(`Purchase register — split by branch · ${monthLabel(month)}`, `<p class="small" style="margin-top:0"><b>${esc(fname)}</b> has bills for <b>${brs.length}</b> branch${brs.length > 1 ? 'es' : ''}. Pick the GSTIN (company) for each branch — the tracker remembers it for next month.${note}</p>
+    <div class="table-wrap"><table class="gr-t"><thead><tr><th>Branch in the file</th><th class="r">Bills</th><th class="r">Taxable</th><th class="r">Tax (ITC)</th><th>Goes to</th></tr></thead><tbody>
+      ${brs.map((x, i) => `<tr><td><b>${esc(x.b)}</b>${x.nt ? `<div class="muted small">${x.nt} with no GST (unregistered / exempt / import)${x.rc0 ? ` · <span class="warn-t">${x.rc0} reverse charge with no tax worked out</span>` : ''}</div>` : ''}</td><td class="r">${x.n}</td><td class="r">${gst$(x.t)}</td><td class="r">${gst$(x.tax)}</td><td><select data-bi="${i}" style="width:270px;max-width:100%" aria-label="Company for ${esc(x.b)}">${opts(x.to)}</select></td></tr>`).join('')}</tbody></table></div>
+    <div data-bsum class="small" style="margin-top:8px"></div>
+    <p class="muted small">Each company's purchase register for ${monthLabel(month)} is replaced with its own bills. Its client rules are applied and its 2B reconciliation runs as usual.</p>`, {
+    saveText: 'Save to companies', wide: true,
+    onSave: async el => {
+      brs.forEach((x, i) => { x.to = $(`[data-bi="${i}"]`, el).value; });
+      const grpBy = {}; brs.forEach(x => { if (x.to) (grpBy[x.to] = grpBy[x.to] || []).push(x.b); });
+      if (!Object.keys(grpBy).length) throw new Error('Pick a company for at least one branch');
+      const map = Object.fromEntries(brs.filter(x => x.to && x.b !== '(no branch)').map(x => [x.b, x.to]));
+      try { localStorage.setItem(key, JSON.stringify({ ...saved, ...map })); } catch { /* ignore */ }
+      if (grp) await safe(sb.from('client_groups').update({ branch_map: { ...(grp.branch_map || {}), ...map } }).eq('id', grp.id));
+      const done = [];
+      for (const [cid, bl] of Object.entries(grpBy)) {
+        const co = comps.find(x => x.id === cid); let mine = rows.filter(x => bl.includes(x.br || '(no branch)'));
+        const rules = await loadClientRules(cid).catch(() => []), RP = RULES.applyPurch(mine, rules || [], 'purchases'); mine = RP.rows;
+        const val = { rows: mine, file: fname, source, branches: bl, at: new Date().toISOString(), by: me.id };
+        if (cid === homeId && saveHome) await saveHome(val);
+        else { const r = await safe(sb.from('gst_months').upsert({ client_id: cid, period, purchases: val, updated_by: me.id }, { onConflict: 'client_id,period' })); if (r.error) throw new Error(`${co.name}: ${friendly(r.error)}`); }
+        done.push(`${co.name}: ${mine.length} bills`);
+      }
+      if (homeId) await loadClientRules(homeId).catch(() => {});
+      toast('Purchase register saved — ' + done.join(' · ')); if (onDone) onDone(Object.keys(grpBy), done);
+    } });
+  const sumUp = () => { const by = {}; brs.forEach((x, i) => { const to = $(`[data-bi="${i}"]`, m.el).value; if (to) { by[to] = by[to] || { n: 0, tax: 0 }; by[to].n += x.n; by[to].tax += x.tax; } });
+    const left = brs.filter((x, i) => !$(`[data-bi="${i}"]`, m.el).value).reduce((a, x) => a + x.n, 0);
+    $('[data-bsum]', m.el).innerHTML = Object.entries(by).map(([id, v]) => `<b>${esc((comps.find(x => x.id === id) || {}).name || '')}</b>: ${v.n} bills · ITC ${gst$(v.tax)}`).join(' &nbsp;·&nbsp; ') + (left ? ` &nbsp;·&nbsp; <span class="late">${left} bills left out</span>` : ''); };
+  m.el.addEventListener('change', sumUp); sumUp(); const md = $('.modal', m.el); if (md) md.style.maxWidth = '1200px';   // v62: room for the company column
+  return true;
 }
 async function readSheets(file) {
   const X = await loadXlsxFull();
@@ -5753,51 +5815,11 @@ VIEWS.gst = async v => {
       toast(`${label} saved — ${rows.length} documents`); return true;
     } catch (e) { toast('Could not read the file: ' + friendly(e), true); }
   }
-  // v61: one purchase register with a Branch column for several GSTINs of a group (e.g. GGL-CHE → Tamil Nadu GSTIN, GGL-BLR → Karnataka GSTIN)
-  const CITY_STATE = { CHE: '33', CHN: '33', MAA: '33', MAS: '33', CBE: '33', COI: '33', TUT: '33', BLR: '29', BLG: '29', BAN: '29', BNG: '29', MUM: '27', BOM: '27', PUN: '27', PNQ: '27', DEL: '07', NDL: '07', HYD: '36', KOL: '19', CCU: '19', AMD: '24', AHM: '24', COK: '32', KOC: '32', TVM: '32', GOA: '30', JAI: '08', LKO: '09', NOI: '09', GGN: '06', GUR: '06', VTZ: '37', VIZ: '37' };
+  // v61: one purchase register with a Branch column for several GSTINs of a group — shared window (also used from Client mail)
   async function branchSplit(rows, f, given) {
     const mates = c.group_id ? clients.filter(x => x.group_id === c.group_id && x.active !== false && x.gstin) : [c];
-    const comps = mates.some(x => x.id === c.id) ? mates : [c, ...mates];
-    const grp = c.group_id ? (await safe(sb.from('client_groups').select('id,name,branch_map').eq('id', c.group_id).maybeSingle())).data : null;
-    let saved = {}; try { saved = (grp && grp.branch_map) || JSON.parse(localStorage.getItem('jlr-branch-map-' + (c.group_id || c.id)) || '{}'); } catch { saved = {}; }
-    const guess = br => { if (saved[br] && comps.some(x => x.id === saved[br])) return saved[br];
-      const B = br.toUpperCase(), byG = comps.find(x => B.includes(x.gstin)); if (byG) return byG.id;
-      const code = Object.keys(CITY_STATE).find(k => new RegExp(`(^|[^A-Z])${k}([^A-Z]|$)`).test(B)), st = code && CITY_STATE[code];
-      const bySt = st && comps.filter(x => x.gstin.slice(0, 2) === st); if (bySt && bySt.length === 1) return bySt[0].id;
-      const byN = comps.find(x => x.name.toUpperCase().split(/\s+/).some(w => w.length > 3 && B.includes(w))); return byN && comps.length === 1 ? byN.id : ''; };
-    const brs = [...new Set(rows.map(x => x.br || '(no branch)'))].map(b => { const L = rows.filter(x => (x.br || '(no branch)') === b);
-      return { b, n: L.length, t: L.reduce((a, x) => a + (x.t || 0), 0), tax: L.reduce((a, x) => a + gTax(x), 0), nt: L.filter(x => !x.t && !gTax(x)).length, rc0: L.filter(x => x.rc && !gTax(x)).length, to: b === '(no branch)' ? c.id : guess(b) }; });
-    const opts = sel => `<option value="">— leave out —</option>${comps.map(x => `<option value="${x.id}" ${sel === x.id ? 'selected' : ''}>${esc(x.name)} · ${esc(x.gstin)}</option>`).join('')}`;
-    const m = modal(`Purchase register — split by branch · ${monthLabel(grMonth)}`, `<p class="small" style="margin-top:0"><b>${esc(f.name)}</b> has bills for <b>${brs.length}</b> branches. Pick the GSTIN (company) for each branch — the tracker remembers it for next month.${c.group_id ? '' : ' <span class="muted">(This client is not in a group, so only its own branch can be kept. Put both companies in one group under Clients → Groups to save the others too.)</span>'}</p>
-      <div class="table-wrap"><table class="gr-t"><thead><tr><th>Branch in the file</th><th class="r">Bills</th><th class="r">Taxable</th><th class="r">Tax (ITC)</th><th>Goes to</th></tr></thead><tbody>
-        ${brs.map((x, i) => `<tr><td><b>${esc(x.b)}</b>${x.nt ? `<div class="muted small">${x.nt} with no GST (unregistered / exempt / import)${x.rc0 ? ` · <span class="warn-t">${x.rc0} reverse charge with no tax worked out</span>` : ''}</div>` : ''}</td><td class="r">${x.n}</td><td class="r">${gst$(x.t)}</td><td class="r">${gst$(x.tax)}</td><td><select data-bi="${i}" aria-label="Company for ${esc(x.b)}">${opts(x.to)}</select></td></tr>`).join('')}</tbody></table></div>
-      <div data-bsum class="small" style="margin-top:8px"></div>
-      <p class="muted small">Each company's purchase register for ${monthLabel(grMonth)} is replaced with its own bills. Its client rules are applied and its 2B reconciliation runs as usual.</p>`, {
-      saveText: 'Save to companies', wide: true,
-      onSave: async el => {
-        brs.forEach((x, i) => { x.to = $(`[data-bi="${i}"]`, el).value; });
-        const grpBy = {}; brs.forEach(x => { if (x.to) (grpBy[x.to] = grpBy[x.to] || []).push(x.b); });
-        if (!Object.keys(grpBy).length) throw new Error('Pick a company for at least one branch');
-        const map = Object.fromEntries(brs.filter(x => x.to && x.b !== '(no branch)').map(x => [x.b, x.to]));
-        if (grp) { const u = await safe(sb.from('client_groups').update({ branch_map: { ...(grp.branch_map || {}), ...map } }).eq('id', grp.id)); if (u.error) try { localStorage.setItem('jlr-branch-map-' + c.group_id, JSON.stringify({ ...saved, ...map })); } catch { /* ignore */ } }
-        else try { localStorage.setItem('jlr-branch-map-' + (c.group_id || c.id), JSON.stringify({ ...saved, ...map })); } catch { /* ignore */ }
-        const done = [];
-        for (const [cid, bl] of Object.entries(grpBy)) {
-          const co = comps.find(x => x.id === cid); let mine = rows.filter(x => bl.includes(x.br || '(no branch)'));
-          const rules = await loadClientRules(cid).catch(() => []), RP = RULES.applyPurch(mine, rules || [], 'purchases'); mine = RP.rows;
-          const val = { rows: mine, file: f.name, source: given ? 'email' : 'file', branches: bl, ...by() };
-          if (cid === c.id) await save({ purchases: val });
-          else { const r = await safe(sb.from('gst_months').upsert({ client_id: cid, period, purchases: val, updated_by: me.id }, { onConflict: 'client_id,period' })); if (r.error) throw new Error(`${co.name}: ${friendly(r.error)}`); }
-          done.push(`${co.name}: ${mine.length} bills`);
-        }
-        await loadClientRules(c.id).catch(() => {});
-        toast('Purchase register saved — ' + done.join(' · '));
-      } });
-    const sumUp = () => { const by = {}; brs.forEach((x, i) => { const to = $(`[data-bi="${i}"]`, m.el).value; if (to) { by[to] = by[to] || { n: 0, tax: 0 }; by[to].n += x.n; by[to].tax += x.tax; } });
-      const left = brs.filter((x, i) => !$(`[data-bi="${i}"]`, m.el).value).reduce((a, x) => a + x.n, 0);
-      $('[data-bsum]', m.el).innerHTML = Object.entries(by).map(([id, v]) => `<b>${esc((comps.find(x => x.id === id) || {}).name || '')}</b>: ${v.n} bills · ITC ${gst$(v.tax)}`).join(' &nbsp;·&nbsp; ') + (left ? ` &nbsp;·&nbsp; <span class="late">${left} bills left out</span>` : ''); };
-    m.el.addEventListener('change', sumUp); sumUp();
-    return true;
+    return purchaseSplitDialog({ rows, fname: f.name, source: given ? 'email' : 'file', month: grMonth, comps: mates.some(x => x.id === c.id) ? mates : [c, ...mates], groupId: c.group_id || null, homeId: c.id,
+      saveHome: val => save({ purchases: val }), note: c.group_id ? '' : ' <span class="muted">(This client is not in a group, so only its own branch can be kept. Put both companies in one group under Clients → Groups to save the others too.)</span>' });
   }
   // sales file → GSTR-1 entry (check there, Save pushes it to the draft GSTR-3B)
   async function salesToG1(f) {
