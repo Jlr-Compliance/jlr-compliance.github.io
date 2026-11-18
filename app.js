@@ -6620,9 +6620,9 @@ const G1 = (() => {
       if (!o.x) return; const r = o.row, x = o.x, t = r.ty || 'Invoice';
       x.type = t;
       x.table = t !== 'Invoice' ? (has(r.gstin) ? 'CDNR' : 'CDNUR') : has(r.nil) ? 'NIL' : /^SEZ/.test(r.exp || '') ? 'SEZ' : /^Export/.test(r.exp || '') ? 'EXP'
-        : has(r.gstin) ? 'B2B' : (x.inter && invVal[up(r.no)] > 100000 ? 'B2CL' : 'B2CS');
-      const no = String(r.no ?? '');
-      x.check = !has(r.d) ? 'Date missing' : !has(no) ? 'Invoice no missing' : no.length > 16 ? 'Invoice no over 16 characters' : / /.test(no.trim()) ? 'Remove spaces from invoice no'
+        : has(r.gstin) ? 'B2B' : (x.inter && has(r.no) && invVal[up(r.no)] > 100000 ? 'B2CL' : 'B2CS');
+      const no = String(r.no ?? ''), sumOnly = x.table === 'B2CS' || x.table === 'NIL';   // v91: B2C (others) / nil-exempt are reported as totals — invoice no & date optional (series go in table 13)
+      x.check = !sumOnly && !has(r.d) ? 'Date missing' : !sumOnly && !has(no) ? 'Invoice no missing' : no.length > 16 ? 'Invoice no over 16 characters' : / /.test(no.trim()) ? 'Remove spaces from invoice no'
         : !has(r.tx) ? 'Taxable value missing'
         : has(r.gstin) && up(r.gstin).length !== 15 ? 'Customer GSTIN must be 15 characters' : has(r.gstin) && up(r.gstin) === up(ownGstin) ? 'Customer GSTIN = client\'s own GSTIN'
         : x.st === 'CHECK' ? 'Unknown state / GSTIN state code' : !has(r.nil) && !has(r.rate) ? 'GST rate missing' : r.src !== 'portal' && r.nil !== 'Non-GST' && String(r.hsn ?? '').trim().length < 4 ? 'HSN / SAC must be at least 4 digits'
@@ -7674,7 +7674,7 @@ const REV = (() => {
 })();
 
 // v78: this tab's code version — when a newer app is uploaded, offer Reload and block mails from old code
-const APP_VER = 'jlr-shell-v90';
+const APP_VER = 'jlr-shell-v91';
 let appStale = false;
 async function checkAppVer() {
   try { const t = await fetch('sw.js?v=' + Date.now(), { cache: 'no-store' }).then(r => r.text()); const live = (t.match(/jlr-shell-v\d+/) || [])[0];
