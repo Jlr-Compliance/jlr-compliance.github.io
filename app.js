@@ -4596,10 +4596,11 @@ function draft3b(m, sm, client, claim = null) {
   const RC = sm.rcm, credit = add(add(Z(), C), g('cl_open')), so = GR.setoff(L, credit);
   // RCM liability must be paid in cash; RCM ITC is already in 4(A)(3)
   const cashNeed = {}, cashLedger = g('cash_open'), cashUsed = {}, deposit = {};
-  H.forEach(k => { cashNeed[k] = r2(so.cash[k] + (RC[k] || 0)); cashUsed[k] = r2(Math.min(cashNeed[k], Math.max(0, cashLedger[k]))); deposit[k] = r2(cashNeed[k] - cashUsed[k]); });
+  const int51 = g('int'), late51 = g('late');                         // v80: 5.1 interest and late fee — always paid in cash
+  H.forEach(k => { cashNeed[k] = r2(so.cash[k] + (RC[k] || 0) + int51[k] + late51[k]); cashUsed[k] = r2(Math.min(cashNeed[k], Math.max(0, cashLedger[k]))); deposit[k] = r2(cashNeed[k] - cashUsed[k]); });
   const sum = o => r2(H.reduce((s, k) => s + (+o[k] || 0), 0));
   return { from, itcSrc, a, b, c: sm.nilOut, d: RC, e: sm.nonGst, imp, isd, a5, A, B1, B2: B2r, C, D1: g('reclaim'), D2: sm.blocked, L, credit, so, cashNeed, cashUsed, deposit,
-    depositTotal: sum(deposit), cashTotal: sum(cashNeed), w, H, held2b };
+    depositTotal: sum(deposit), cashTotal: sum(cashNeed), w, H, held2b, int51, late51 };
 }
 
 /* =====================================================================
@@ -5693,7 +5694,7 @@ VIEWS.gst = async v => {
     const D = draft3b(row, sm, c, st.ready ? st.cl.claim : null), G3 = row.gstr3b, h4 = ['ig', 'cg', 'sg', 'cs'];
     const tr = (l, x, cls = '', keys = H5) => `<tr class="${cls}"><td>${l}</td>${cells(x, keys)}</tr>`;
     const FROM = { gstr1: 'as per GSTR-1 filed', gstr1w: 'as per GSTR-1 (copied from our working)', sales: 'as per sales register — GSTR-1 filed not added' }[D.from];
-    const anyW = ['rcm_add', 'rev_perm', 'rev_temp', 'reclaim', 'cl_open', 'cash_open'].some(k => D.w[k] && h4.some(h => +D.w[k][h]));
+    const anyW = ['rcm_add', 'int', 'late', 'rev_perm', 'rev_temp', 'reclaim', 'cl_open', 'cash_open'].some(k => D.w[k] && h4.some(h => +D.w[k][h]));
     o.innerHTML = `<div class="rc-head"><div><h3 style="margin:0">Draft GSTR-3B — ${RECO.monthName(period)}</h3><p class="muted small" style="margin:2px 0 0">Laid out like the GSTR-3B form — click a heading to open it.</p></div><span class="spacer"></span>
         <button class="btn sm primary" data-w3b>RCM, reversal &amp; ledger balances${anyW ? ' ✓' : ''}</button><a class="btn sm" href="#/taxpay" data-tpfrom>Payment intimation →</a></div>
       ${D.from === 'sales' ? '<p class="note warn small">3.1 is from the sales register because the filed GSTR-1 is not added. Add it in the GSTR-1 filed tab.</p>' : ''}
@@ -5721,6 +5722,11 @@ VIEWS.gst = async v => {
         ${tr('(1) ITC reclaimed which was reversed under 4(B)(2) earlier', D.D1, '', h4)}${tr('(2) Ineligible ITC under section 16(4) &amp; ITC restricted due to PoS rules / not available in 2B', D.D2, '', h4)}
       </tbody></table></div>
       </details>
+      <details class="gr-fold" ${gTax(D.int51) || gTax(D.late51) ? 'open' : ''}><summary>5.1 Interest and late fee · ${gst$(gTax(D.int51) + gTax(D.late51))}${D.w.int_note ? ` <span class="muted small">(${esc(D.w.int_note)})</span>` : ''}</summary>
+      <div class="table-wrap"><table class="gr-t"><thead><tr><th></th><th class="r">IGST</th><th class="r">CGST</th><th class="r">SGST</th><th class="r">Cess</th></tr></thead><tbody>
+        ${tr('Interest', D.int51, '', h4)}${tr('Late fee', D.late51, '', h4)}</tbody></table></div>
+      <p class="muted small">Paid in cash with the tax (included in 6.1 cash to deposit). Enter or work out in <b>RCM, reversal &amp; ledger balances</b>.</p>
+      </details>
       <details class="gr-fold"><summary>6.1 Payment &amp; ledgers · cash to deposit ${gst$(D.depositTotal)} · credit carried ${gst$(gTax(D.so.balance))}</summary>
       <h4 hidden class="gr-payh">6.1 Payment of tax</h4>
       <div class="table-wrap"><table class="gr-t"><thead><tr><th>Tax</th><th class="r">Tax payable</th><th class="r">Paid through ITC</th><th class="r">Reverse charge (cash)</th><th class="r">Cash needed</th><th class="r">From cash ledger balance</th><th class="r">Cash to deposit</th></tr></thead><tbody>
@@ -5744,13 +5750,35 @@ VIEWS.gst = async v => {
       + blk('rev_temp', '4(B)(2) Temporary reversal', 'e.g. bills not paid within 180 days, ITC held back until a dispute is settled — can be reclaimed later in 4(D)(1).')
       + blk('rev_perm', '4(B)(1) Permanent reversal', 'Rules 38, 42, 43 and section 17(5) (blocked credits) — not reclaimed.')
       + blk('reclaim', '4(D)(1) ITC reclaimed', 'Temporarily reversed ITC taken back this month (added to 4(A)(5)).')
+      + `<h4 style="margin:18px 0 4px">5.1 Interest and late fee</h4><p class="muted small" style="margin:0 0 6px">The portal adds the late fee (and interest) of an earlier GSTR-3B filed late into this month's 5.1. <button type="button" class="btn sm" data-int51>Work out from last month</button> <span class="small" data-int51m></span></p>`
+      + blk('int', 'Interest (Sec 50, 18% a year)', 'On tax paid in cash after the due date.')
+      + blk('late', 'Late fee (Sec 47)', 'CGST and SGST only — ₹25 + ₹25 a day (₹10 + ₹10 for a nil return), capped.')
       + blk('cl_open', 'Electronic credit ledger — opening balance', 'Balance already on the portal before this return; used in set-off.')
       + blk('cash_open', 'Electronic cash ledger — balance', 'Cash already deposited (challans) and not used; reduces the cash to deposit.'),
       { wide: true, saveText: 'Save', onSave: async el => {
-        const out = {}; ['rcm_add', 'rev_temp', 'rev_perm', 'reclaim', 'cl_open', 'cash_open'].forEach(k => { const v = {}; [...(k === 'rcm_add' ? ['t'] : []), ...h4].forEach(h => { const x = num(fv(el, `${k}_${h}`)); if (x) v[h] = x; }); if (Object.keys(v).length) out[k] = v; });
+        const out = {}; const nt = (el.querySelector('[data-int51m]') || {}).dataset; if (nt && nt.note) out.int_note = nt.note;
+        ['rcm_add', 'rev_temp', 'rev_perm', 'reclaim', 'int', 'late', 'cl_open', 'cash_open'].forEach(k => { const v = {}; [...(k === 'rcm_add' ? ['t'] : []), ...h4].forEach(h => { const x = num(fv(el, `${k}_${h}`)); if (x) v[h] = x; }); if (Object.keys(v).length) out[k] = v; });
+        if (!out.int_note && w.int_note && (out.int || out.late)) out.int_note = w.int_note;
         const reco = JSON.parse(JSON.stringify(row.reco || {})); reco.w3b = { ...out, by: me.id, at: new Date().toISOString() };
         await save({ reco }); toast('Saved');
       } });
+    // v80: work out 5.1 from last month's GSTR-3B: filed after its due date → late fee (sec 47) + interest 18% on the cash paid (sec 50)
+    const ib = $('[data-int51]'); if (ib) ib.onclick = async () => {
+      const msg = $('[data-int51m]'), [y, m] = grMonth.split('-').map(Number), pd = new Date(y, m - 2, 1), pm = `${pd.getFullYear()}-${pad(pd.getMonth() + 1)}`, plab = `${MONTHS[pd.getMonth()]} ${pd.getFullYear()}`;
+      const t = gtasks.find(x => REV.kindOf(x.return_name) === 'gstr3b' && periodToMonth(x.period) === pm);
+      if (!t) { msg.innerHTML = `<span class="late">No GSTR-3B work item for ${plab}.</span>`; return; }
+      if (t.status !== 'Filed' || !t.filed_on) { msg.innerHTML = `<span class="late">${plab} GSTR-3B is not marked Filed with a date.</span>`; return; }
+      if (!t.due_date || t.filed_on <= t.due_date) { msg.innerHTML = `<span class="ok-t">${plab} GSTR-3B was filed on time (${esc(t.filed_on)}) — no interest or late fee.</span>`; ['int', 'late'].forEach(k => h4.forEach(h => { const i = $(`[name=${k}_${h}]`); if (i) i.value = ''; })); return; }
+      const q = await safe(sb.from('gst_months').select('summary,reco').eq('client_id', c.id).eq('period', pm + '-01').maybeSingle());
+      const P = (q.data || {}), nil = !!(((P.reco || {}).nil || {}).g3b), cash = ((P.summary || {}).cash) || {};
+      const lf = gstLateFee({ ret: 'GSTR-3B', nil, turnover: c.turnover || 0, due: t.due_date, filed: t.filed_on });
+      const it = {}; h4.forEach(h => { it[h] = gstInterest(+cash[h] || 0, t.due_date, t.filed_on).amount; });
+      const put = (k, h, v) => { const i = $(`[name=${k}_${h}]`); if (i) i.value = v ? GR.r2(v) : ''; };
+      h4.forEach(h => put('int', h, it[h])); put('late', 'ig', 0); put('late', 'cg', lf.cgst); put('late', 'sg', lf.sgst); put('late', 'cs', 0);
+      const note = `${plab} GSTR-3B filed ${t.filed_on}, due ${t.due_date}: ${lf.days} day${lf.days > 1 ? 's' : ''} late${nil ? ' (nil)' : ''}`;
+      msg.dataset.note = note;
+      msg.innerHTML = `<span class="small">${esc(note)} → late fee ${gst$(lf.fee)}${lf.fee >= lf.cap ? ' (cap)' : ''}; interest on cash ${gst$(h4.reduce((a, h) => a + (+cash[h] || 0), 0))} = ${gst$(h4.reduce((a, h) => a + it[h], 0))}${(P.summary || {}).cash ? '' : ' — no cash figure saved for that month, type the interest if any'}. Check against the portal's 5.1, then Save.</span>`;
+    };
   }
   // ===== GSTR-2B reconciliation tab =====
   // step 2: three numbers, five filters, one-click decisions
@@ -7302,6 +7330,7 @@ const REV = (() => {
       b31: [row5('(a) Outward taxable', D3.a), row5('(b) Zero rated', D3.b), row5('(c) Nil / exempt', D3.c), row5('(d) Inward — reverse charge', D3.d), row5('(e) Non-GST', D3.e)],
       b4: [row5('(A)(1) Import of goods', D3.imp), row5('(A)(3) Reverse charge', D3.d), row5('(A)(4) ISD', D3.isd), row5('(A)(5) All other ITC', D3.a5), row5('(B)(1) Reversed — rules 38/42/43, 17(5)', D3.B1),
         row5('(B)(2) Reversed — temporary', D3.B2), row5('(C) Net ITC', D3.C), row5('(D)(2) Not available in 2B (info)', D3.D2)],
+      b51: [['Interest', ...['ig', 'cg', 'sg', 'cs'].map(k => r2((D3.int51 || {})[k] || 0))], ['Late fee', ...['ig', 'cg', 'sg', 'cs'].map(k => r2((D3.late51 || {})[k] || 0))]],
       b61: ['ig', 'cg', 'sg', 'cs'].map(k => [{ ig: 'IGST', cg: 'CGST', sg: 'SGST', cs: 'Cess' }[k], r2((D3.L[k] || 0) + (D3.d[k] || 0)), r2(D3.so.used.ig[k] + D3.so.used.cg[k] + D3.so.used.sg[k] + D3.so.used.cs[k]), r2(D3.d[k] || 0), r2(D3.cashUsed[k]), r2(D3.deposit[k])]),
       cash: r2(D3.depositTotal), credit_cf: tx(D3.so.balance), net_itc: tx(D3.C), tax_sales: r2(tx(D3.a) + tx(D3.b)),
       itc: st && st.ready ? { in2b: tx(sm.itc2b), claim: tx(st.cl.claim), held: tx(st.cl.held), books: tx(sm.itcBooks), matched: L('matched').length, decide: st.decideN, missing: L('books_only').length, notbooks: L('2b_only').length + L('confirm').length } : null,
@@ -7331,6 +7360,7 @@ const REV = (() => {
     else {
     T('GSTR-3B — 3.1 Outward supplies', H5, S.b31);
     T('GSTR-3B — 4 Eligible ITC', H5, S.b4.map(r => r.map((v, i) => i === 1 ? '' : v)));
+    if (S.b51 && S.b51.some(r => r.slice(1).some(v => +v))) T('GSTR-3B — 5.1 Interest and late fee', ['', 'IGST', 'CGST', 'SGST', 'Cess'], S.b51);
     T('GSTR-3B — 6.1 Payment of tax', ['Tax', 'Payable', 'Paid by ITC', 'Reverse charge (cash)', 'From cash ledger', 'Cash to deposit'], S.b61);
     if (S.itc) T('ITC — GSTR-2B vs books', ['', 'Amount / count'], [['ITC in GSTR-2B', S.itc.in2b], ['ITC in books', S.itc.books], ['ITC claimed', S.itc.claim], ['Held back', S.itc.held],
       ['Bills matched', String(S.itc.matched)], ['Bills to decide', String(S.itc.decide)], ['In books, not in 2B', String(S.itc.missing)], ['In 2B, not in books', String(S.itc.notbooks)]]);
@@ -7445,7 +7475,7 @@ const REV = (() => {
 })();
 
 // v78: this tab's code version — when a newer app is uploaded, offer Reload and block mails from old code
-const APP_VER = 'jlr-shell-v79';
+const APP_VER = 'jlr-shell-v80';
 let appStale = false;
 async function checkAppVer() {
   try { const t = await fetch('sw.js?v=' + Date.now(), { cache: 'no-store' }).then(r => r.text()); const live = (t.match(/jlr-shell-v\d+/) || [])[0];
