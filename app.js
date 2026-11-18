@@ -4441,12 +4441,30 @@ const GR = (() => {
   //  1 same GSTIN + same bill no          2 same GSTIN + bill no without FY / punctuation
   //  3 same GSTIN + same digits           4 same PAN, other GSTIN, same bill no and amount → gstin_diff
   //  5 same GSTIN, same amount, dates within 10 days, bill no differs → suggest (staff confirm)
-  function reconcile(books, b2, tol = 10) {
+  function reconcile(books, b2, tol = 10, opts = {}) {
     books = mergeDocs(books.filter(b => tax(b) !== 0 || b.t)); b2 = mergeDocs(b2);     // v61: non-taxable lines (no GST at all) are never in 2B — leave them out of matching
+    const pre = [];
+    // v69: client match rule 'inv_tax' — bill no + tax amount first, GSTIN not needed (books GSTIN may be wrong / another branch);
+    // a bill matched this way with a different GSTIN is flagged "GSTIN differs". Bills left over go through the normal GSTIN steps below.
+    if (opts.match === 'inv_tax') {
+      const byInv = new Map(), put = (k, j) => { if (k) (byInv.get(k) || byInv.set(k, []).get(k)).push(j); };
+      b2.forEach((r, j) => { if (r.src && /IMP|ISD/.test(r.src)) return; const c = r.cn ? '|C' : ''; put('c' + cleanInv(r.i) + c, j); if (digits(r.i).length >= 4) put('d' + digits(r.i) + c, j); });
+      const used = new Set(), left = [];
+      books.forEach(b => {
+        const c = b.cn ? '|C' : '', okTax = j => !used.has(j) && Math.abs(r2(tax(b) - tax(b2[j]))) <= tol;
+        let cand = (byInv.get('c' + cleanInv(b.i) + c) || []).filter(okTax);
+        if (!cand.length && digits(b.i).length >= 4) cand = (byInv.get('d' + digits(b.i) + c) || []).filter(okTax);
+        if (!cleanInv(b.i) || !cand.length) { left.push(b); return; }
+        const j = cand.find(j => b2[j].g === b.g) ?? cand.find(j => panOf(b2[j].g) && panOf(b2[j].g) === panOf(b.g)) ?? cand[0];
+        used.add(j); pre.push({ b, j });
+      });
+      pre.used = used; books = left;
+    }
     const kinds = [['exact', r => r.g + '|' + normInv(r.i)], ['clean', r => r.g + '|' + cleanInv(r.i)], ['loose', r => digits(r.i) ? r.g + '|' + digits(r.i) : '']];
     const idx = kinds.map(() => new Map());
     b2.forEach((r, j) => { if (r.src && /IMP/.test(r.src)) return; kinds.forEach(([, f], n) => { const k = f(r); if (k && !idx[n].has(k + (r.cn ? '|C' : ''))) idx[n].set(k + (r.cn ? '|C' : ''), j); }); });
-    const hit = new Set(), out = [], close = (b, x) => Math.abs(r2(tax(b) - tax(x))) <= tol;   // v65: only the tax amount decides a match — taxable value is not compared
+    const hit = new Set(pre.used || []), out = [], close = (b, x) => Math.abs(r2(tax(b) - tax(x))) <= tol;   // v65: only the tax amount decides a match — taxable value is not compared
+    pre.forEach(({ b, j }) => { const x = b2[j]; out.push({ st: x.na ? 'not_avail' : 'matched', b, x, diff: r2(tax(b) - tax(x)), tdiff: r2((b.t || 0) - (x.t || 0)), how: x.g === b.g ? 'inv_tax' : 'inv_tax_gstin', gdiff: x.g !== b.g || undefined }); });
     const bLeft = [];
     books.forEach(b => {
       let j = null, how = '';
@@ -4517,7 +4535,7 @@ const GR = (() => {
     const credit = { ig: itcBase.ig + rcm.ig, cg: itcBase.cg + rcm.cg, sg: itcBase.sg + rcm.sg, cs: itcBase.cs + rcm.cs };
     const so = setoff({ ig: out.ig, cg: out.cg, sg: out.sg, cs: out.cs }, credit);
     const cash = fix({ ig: so.cash.ig + rcm.ig, cg: so.cash.cg + rcm.cg, sg: so.cash.sg + rcm.sg, cs: so.cash.cs + rcm.cs });
-    const rec = has2b && P.length && method !== '2b_confirm' ? reconcile(P, B) : null;
+    const rec = has2b && P.length && method !== '2b_confirm' ? reconcile(P, B, 10, { match: opts.match }) : null;
     const g1 = m.gstr1 || null, g3 = m.gstr3b || null, checks = [];
     const cmp = (label, a, b) => { if (!a || !b) return; const d = r2(tax(a) - tax(b)), dt = r2((a.t || 0) - (b.t || 0)); checks.push({ label, a: fix({ t: a.t || 0, tax: tax(a) }), b: fix({ t: b.t || 0, tax: tax(b) }), dt, d, ok: Math.abs(d) <= 1 && Math.abs(dt) <= 1 }); };
     const t31 = g3 && g3.t31a ? g3.t31a : null;
@@ -4642,15 +4660,15 @@ const RECO = (() => {
   const findBefore = (before, b) => { for (const k of aliases(b)) if (before.has(k)) return before.get(k); return null; };
 
   // invoices in books but missing from 2B in earlier months: did they come in a later 2B?
-  function carry(hist, cur, before) {
+  function carry(hist, cur, before, match) {
     // per month: the 2B documents that did not match that month's own books (only those can belong to an earlier month)
     const seq = [...(hist || []), cur].map(m => { const P = (m.purchases || {}).rows || [], B = ((m.gstr2b || {}).rows || []).filter(x => !/IMP|ISD/.test(x.src || ''));
-      return { p: m.period, B: P.length ? GR.reconcile(P, B, TOL).items.filter(it => it.st === '2b_only').map(it => it.x) : mergeDocs(B) }; });
+      return { p: m.period, B: P.length ? GR.reconcile(P, B, TOL, { match }).items.filter(it => it.st === '2b_only').map(it => it.x) : mergeDocs(B) }; });
     const last = seq.length - 1, usedNow = new Map(), out = { now: [], missing: [], cleared: [] };
     (hist || []).forEach((m, hi) => {
       const P = (m.purchases || {}).rows || [], B = (m.gstr2b || {}).rows || []; if (!P.length || !B.length) return;
       const dec = (m.reco || {}).dec || {};
-      GR.reconcile(P, B, TOL).items.filter(it => it.st === 'books_only' && !it.b.rc).forEach(it => {
+      GR.reconcile(P, B, TOL, { match }).items.filter(it => it.st === 'books_only' && !it.b.rc).forEach(it => {
         const k = keyOf(it.b), d = dec[k] || {}; if (d.a === 'noclaim') return;
         const bf = before && findBefore(before, it.b); if (bf && bf.from < m.period) return;      // came in an earlier 2B and was claimed then
         let found = null;
@@ -5146,7 +5164,7 @@ VIEWS.gst = async v => {
   const body = $('#grBody', v);
   if (!grClient) { body.innerHTML = '<div class="card"><p class="muted">Add a GSTIN to a client (Clients → Edit) to start.</p></div>'; return; }
   const c = clientById(grClient), period = grMonth + '-01';
-  const meth = () => c.itc_method || 'books_2b', gsum = m => GR.summarise(m, { method: meth() });
+  const meth = () => c.itc_method || 'books_2b', gsum = m => GR.summarise(m, { method: meth(), match: c.reco_match });
   loadClientRules(grClient).catch(() => {});
   const r = await safe(sb.from('gst_months').select('*').eq('client_id', grClient).eq('period', period).maybeSingle());
   if (r.error) { body.innerHTML = '<div class="card"><p class="note">GST review is not set up yet — run <b>update-gst-review.sql</b> in Supabase.</p></div>'; return; }
@@ -5181,6 +5199,8 @@ VIEWS.gst = async v => {
   const ITCM = { books_2b: ['Books matched with 2B', 'Purchase register is matched with GSTR-2B. Bills in 2B but not in books go to the client to mark.'],
     books: ['Credit as per books', 'ITC is taken on the purchase register. GSTR-2B is tracked alongside for missing and late bills.'],
     '2b_confirm': ['2B — client confirms', 'No purchase register. The GSTR-2B list goes to the client, who marks each bill: take credit, not now, or not mine.'] };
+  const MATCHM = { gstin_inv: ['GSTIN + bill no (standard)', 'A bill matches when the supplier GSTIN and bill no are the same and the tax is within ₹10.'],
+    inv_tax: ['Bill no + tax first, then GSTIN', 'First match on bill no and tax amount (within ₹10) even if the GSTIN in books is different or blank — shown as "GSTIN differs". Bills left over are then matched by GSTIN.'] };
   // ===== v34: front view = overview cards (E), workings = 4 steps (D) =====
   const rowNow = () => row;
   const stepOf = k => (((row.reco || {}).steps) || {})[k] || null;
@@ -5203,7 +5223,7 @@ VIEWS.gst = async v => {
     const ready = M === '2b_confirm' ? B2.length > 0 : !!sm.rec;
     if (!ready) return { M, ready, reco, dec, asked, decideN: 0, openN: 0, list: [], undecided: [], toAsk: [], toMiss: [], missed: {}, sup: [], cl: null, cf: { missing: [], now: [], cleared: [] }, lw: { late: [], wait: [] } };
     const before = M === '2b_confirm' ? null : RECO.claimedBefore(recoHist || []);
-    const cf = M === '2b_confirm' ? { missing: [], now: [], cleared: [], nowByKey: new Map() } : RECO.carry(recoHist || [], row, before);
+    const cf = M === '2b_confirm' ? { missing: [], now: [], cleared: [], nowByKey: new Map() } : RECO.carry(recoHist || [], row, before, c.reco_match);
     const eff = k => GR.effA(reco, k);
     const list = (M === '2b_confirm' ? RECO.confirmItems(B2) : RECO.items(sm.rec, cf, before))
       .map(it => it.st === 'confirm' ? { ...it, st2: eff(it.k) ? 'c_' + (GR.ANS_TAKE.includes(eff(it.k)) ? 'take' : eff(it.k) === 'notmine' || eff(it.k) === 'notours' ? 'notmine' : 'skip') : asked[it.k] ? 'c_asked' : 'c_new' } : it);
@@ -5470,11 +5490,19 @@ VIEWS.gst = async v => {
     return todo;
   }
   function itcMethodDialog() {
-    const cur = meth();
+    const cur = meth(), curM = c.reco_match || 'gstin_inv';
     modal(`ITC method — ${c.name}`, `<p class="muted small" style="margin-top:0">How input tax credit is worked out for this client. Applies to every month.</p>
-      <div class="itcm">${Object.entries(ITCM).map(([k, [l, d]]) => `<label class="itcm-o"><input type="radio" name="itcm" value="${k}" ${cur === k ? 'checked' : ''}><span><b>${l}</b><small>${d}</small></span></label>`).join('')}</div>`, {
+      <div class="itcm">${Object.entries(ITCM).map(([k, [l, d]]) => `<label class="itcm-o"><input type="radio" name="itcm" value="${k}" ${cur === k ? 'checked' : ''}><span><b>${l}</b><small>${d}</small></span></label>`).join('')}</div>
+      <h4 style="margin:16px 0 6px">How books are matched with 2B</h4>
+      <div class="itcm">${Object.entries(MATCHM).map(([k, [l, d]]) => `<label class="itcm-o"><input type="radio" name="rmatch" value="${k}" ${curM === k ? 'checked' : ''}><span><b>${l}</b><small>${d}</small></span></label>`).join('')}</div>`, {
       saveText: 'Save', onSave: async el => {
-        const v = ($('[name=itcm]:checked', el) || {}).value; if (!v || v === cur) return;
+        const vm = ($('[name=rmatch]:checked', el) || {}).value;
+        if (vm && vm !== curM) {   // v69
+          const { error } = await safe(sb.rpc('set_reco_match', { p_client: c.id, p_match: vm }));
+          if (error) { toast(/set_reco_match|reco_match/.test(error.message || '') ? 'Run update-reco-match.sql in Supabase first' : friendly(error), true); return false; }
+          c.reco_match = vm; recoHist = null; toast('Matching rule saved');
+        }
+        const v = ($('[name=itcm]:checked', el) || {}).value; if (!v || v === cur) { if (vm !== curM) render(); return; }
         const { error } = await safe(sb.rpc('set_itc_method', { p_client: c.id, p_method: v }));
         if (error) { toast(/set_itc_method|itc_method/.test(error.message || '') ? 'Run update-session16.sql in Supabase first' : friendly(error), true); return false; }
         c.itc_method = v; recoHist = null; toast('ITC method saved'); render();
@@ -5713,9 +5741,9 @@ VIEWS.gst = async v => {
         const rows = cur[2];
         rb.innerHTML = rows.length ? `<div class="table-wrap"><table class="reco-t"><thead><tr><th>Supplier</th><th>Bill</th><th>Why</th>${M === '2b_confirm' ? '' : '<th class="r">Books</th>'}<th class="r">2B</th><th>IMS</th><th>Decide</th></tr></thead><tbody>
           ${rows.slice(0, 500).map(x => { const d = x.b || x.x, s = RECO.ims(x, eff(x.k)), w = WHY[x.st] || ['', ''];
-            return `<tr><td class="wrap"><b>${esc(d.n || (x.x && x.x.n) || '')}</b><div class="muted small">${d.g === 'IMPORT' ? 'Customs (ICEGATE)' : esc(d.g)}</div>${x.st === 'gstin_diff' ? `<div class="small late">2B GSTIN: ${esc(x.x.g)}</div>` : ''}</td>
+            return `<tr><td class="wrap"><b>${esc(d.n || (x.x && x.x.n) || '')}</b><div class="muted small">${d.g === 'IMPORT' ? 'Customs (ICEGATE)' : esc(d.g)}</div>${x.st === 'gstin_diff' || (x.x && x.b && x.x.g !== x.b.g && x.how && /^inv_tax/.test(x.how)) ? `<div class="small late">2B GSTIN: ${esc(x.x.g)}${x.x.n && x.x.n !== x.b.n ? ' · ' + esc(x.x.n) : ''}</div>` : ''}</td>
               <td>${esc(x.b ? x.b.i : x.x.i)}${x.x && x.b && GR.normInv(x.x.i) !== GR.normInv(x.b.i) ? `<div class="muted small">2B: ${esc(x.x.i)}</div>` : ''}<div class="muted small"><span class="tag-ty">${GR.typeOf(x.x || d)}</span> ${dt(d.d)}</div></td>
-              <td><span class="pill ${w[1]} small">${w[0]}</span>${x.st === 'mismatch' && x.b && x.x ? (() => {   // v65: say what differs — taxable value, GST, or the IGST / CGST+SGST split
+              <td><span class="pill ${w[1]} small">${w[0]}</span>${x.how === 'inv_tax_gstin' ? '<div class="tiny late" style="margin-top:3px">GSTIN differs — matched on bill no + tax</div>' : ''}${x.st === 'mismatch' && x.b && x.x ? (() => {   // v65: say what differs — taxable value, GST, or the IGST / CGST+SGST split
                 const tb = x.b.t || 0, t2 = x.x.t || 0, l = [];
                 const dv = GR.r2(gTax(x.b) - gTax(x.x)); l.push(`${dv > 0 ? 'Books' : '2B'} ₹${Math.abs(dv).toLocaleString('en-IN')} more GST`);
                 if ((x.b.ig ? 1 : 0) !== (x.x.ig ? 1 : 0)) l.push(`Books ${x.b.ig ? 'IGST' : 'CGST+SGST'} · 2B ${x.x.ig ? 'IGST' : 'CGST+SGST'}`);
@@ -5876,7 +5904,7 @@ VIEWS.gst = async v => {
       [`Tolerance: ₹${RECO.TOL} per document. Bills match only when the supplier GSTIN (or PAN) agrees.`]], [40, 14, 14, 14, 12, 14]);
     const rec = [['Status', 'Type', 'Supplier GSTIN', 'Supplier', 'Bill (books)', 'Bill (2B)', 'GSTIN (2B)', 'Date', 'Taxable (books)', 'Taxable (2B)', 'Tax (books)', 'Tax (2B)', 'Difference', 'IGST (2B)', 'CGST (2B)', 'SGST (2B)', 'Decision', 'Client answer', 'Note', 'IMS action']];
     list.forEach(x => { const b = x.b || (x.st === 'carried' ? x.eb : null) || {}, y = x.x || (x.st === 'claimed_before' ? x.eb : null) || {}, d = dec[x.k] || {}, a = ans[x.k] || {}, s = RECO.ims(x, eff(x.k));
-      rec.push([lab[x.st] + (x.from ? ` (${RECO.monthName(x.from)})` : ''), GR.typeOf(x.x && x.x.g ? x.x : b), b.g || y.g, b.n || y.n, b.i || '', y.i || '', y.g && y.g !== b.g ? y.g : '', b.d || y.d, b.t ?? '', y.t ?? '', b.g ? gTax(b) : '', y.g ? gTax(y) : '', x.diff ?? '', y.ig ?? '', y.cg ?? '', y.sg ?? '',
+      rec.push([lab[x.st] + (x.how === 'inv_tax_gstin' ? ' (GSTIN differs)' : '') + (x.from ? ` (${RECO.monthName(x.from)})` : ''), GR.typeOf(x.x && x.x.g ? x.x : b), b.g || y.g, b.n || y.n, b.i || '', y.i || '', y.g && y.g !== b.g ? y.g : '', b.d || y.d, b.t ?? '', y.t ?? '', b.g ? gTax(b) : '', y.g ? gTax(y) : '', x.diff ?? '', y.ig ?? '', y.cg ?? '', y.sg ?? '',
         RECO.decLabel(x.st, d.a), a.a ? RECO.ansLabel(a.a) + (a.via === 'staff' ? ' (recorded)' : ' (client)') : (reco.mans || {})[x.k] ? ({ asked: 'Asked supplier', filed: 'Supplier says filed', notours: 'Not our bill / cancelled' }[reco.mans[x.k].a] || reco.mans[x.k].a) + ' (client)' : (reco.miss && reco.miss.items || {})[x.k] ? 'Sent to client' : '', d.note || a.note || '', s ? (s.a === 'NA' ? 'Not in IMS' : s.a) : '']); });
     sheet('Reconciliation', rec, [24, 17, 28, 16, 16, 17, 11, 13, 13, 11, 11, 10, 10, 10, 10, 30, 18, 24, 10]);
     sheet('Earlier months', [['Status', 'Month', 'Supplier GSTIN', 'Supplier', 'Bill', 'Date', 'Taxable', 'Tax', 'Now in 2B of / claim in', 'Last date to claim', 'Note'],
@@ -7188,7 +7216,7 @@ async function autoSendAfterAck(task, file) {
     const period = month + '-01', rev = (await REV.load(c, period))[kind];
     if (!rev || !['approved', 'sent_client'].includes(rev.state)) { toast(`Not sent to ${c.name} automatically — ${REV.KIND[kind].label} ${mLabelOf(period)} is not approved by the senior yet.`, true); return; }
     const gm = await safe(sb.from('gst_months').select('*').eq('client_id', c.id).eq('period', period).maybeSingle()); if (!gm.data) return;
-    const row = gm.data, sm = GR.summarise(row, { method: c.itc_method }), D3 = draft3b(row, sm, c);
+    const row = gm.data, sm = GR.summarise(row, { method: c.itc_method, match: c.reco_match }), D3 = draft3b(row, sm, c);
     const r = await REV.toClient({ kind, c, period, row, sm, st: null, D3, rev, only: file ? { file } : null, auto: true });
     toast(`${r.what} acknowledgement and workings queued to ${c.name} (${r.to})`);
   } catch (e) { toast('Auto-send to client: ' + friendly(e), true); }
@@ -7549,7 +7577,7 @@ VIEWS.taxpay = async v => {
     const need = list.filter(c => gmap.has(c.id) && !cashObj(gmap.get(c.id))).map(c => c.id);
     if (need.length) {
       const full = await safe(sb.from('gst_months').select('client_id,status,sales,purchases,gstr2b,gstr3b,gstr1').eq('period', tpMonth + '-01').in('client_id', need));
-      (full.error ? [] : full.data || []).forEach(r => { const sm = GR.summarise(r, { method: (clientById(r.client_id) || {}).itc_method }); gmap.set(r.client_id, { ...gmap.get(r.client_id), summary: { cash: sm.cash, cash_draft: sm.cashTotal, has: sm.counts.sales + sm.counts.b2b + sm.counts.purchases } }); });
+      (full.error ? [] : full.data || []).forEach(r => { const sm = GR.summarise(r, { method: (clientById(r.client_id) || {}).itc_method, match: (clientById(r.client_id) || {}).reco_match }); gmap.set(r.client_id, { ...gmap.get(r.client_id), summary: { cash: sm.cash, cash_draft: sm.cashTotal, has: sm.counts.sales + sm.counts.b2b + sm.counts.purchases } }); });
     }
     rows = list.map(c => {
       const d = gstPayDue(c, tpMonth); if (!d) return null;
@@ -7918,7 +7946,7 @@ async function buildClientReport(c, ym) {
   let gst = null, missing = [];
   const row = gm.error ? null : gm.data;
   if (row && (row.sales || row.purchases || row.gstr2b || row.gstr3b)) {
-    const sm = GR.summarise(row, { method: (clientById(row.client_id) || {}).itc_method });
+    const sm = GR.summarise(row, { method: (clientById(row.client_id) || {}).itc_method, match: (clientById(row.client_id) || {}).reco_match });
     gst = { sales: Math.round(sm.out.t), out_tax: Math.round(gTax(sm.out)), itc_2b: sm.has2b ? Math.round(gTax(sm.itc2b)) : null, itc_books: sm.counts.purchases ? Math.round(gTax(sm.itcBooks)) : null,
       blocked: Math.round(gTax(sm.blocked)), cash: Math.round(row.gstr3b && row.gstr3b.cash ? gTax(row.gstr3b.cash) : sm.cashTotal), cash_from: row.gstr3b && row.gstr3b.cash ? 'filed GSTR-3B' : 'draft working',
       verified: row.status === 'Verified', has2b: sm.has2b, hasBooks: !!sm.counts.purchases };
