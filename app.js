@@ -6581,9 +6581,9 @@ const G1 = (() => {
       x.check = !has(r.d) ? 'Date missing' : !has(no) ? 'Invoice no missing' : no.length > 16 ? 'Invoice no over 16 characters' : / /.test(no.trim()) ? 'Remove spaces from invoice no'
         : !has(r.tx) ? 'Taxable value missing'
         : has(r.gstin) && up(r.gstin).length !== 15 ? 'Customer GSTIN must be 15 characters' : has(r.gstin) && up(r.gstin) === up(ownGstin) ? 'Customer GSTIN = client\'s own GSTIN'
-        : x.st === 'CHECK' ? 'Unknown state / GSTIN state code' : !has(r.nil) && !has(r.rate) ? 'GST rate missing' : r.nil !== 'Non-GST' && String(r.hsn ?? '').trim().length < 4 ? 'HSN / SAC must be at least 4 digits'
+        : x.st === 'CHECK' ? 'Unknown state / GSTIN state code' : !has(r.nil) && !has(r.rate) ? 'GST rate missing' : r.src !== 'portal' && r.nil !== 'Non-GST' && String(r.hsn ?? '').trim().length < 4 ? 'HSN / SAC must be at least 4 digits'
         : has(r.qty) && !has(r.uqc) ? 'Unit (UQC) needed when quantity is given' : has(r.eco) && up(r.eco).length !== 15 ? 'E-commerce GSTIN must be 15 characters'
-        : t !== 'Invoice' && !has(r.ono) ? 'Original invoice no needed for a note' : 'OK';
+        : t !== 'Invoice' && !has(r.ono) && r.src !== 'portal' ? 'Original invoice no needed for a note' : 'OK';   // v81: e-invoice / portal lines (r.src 'portal') carry no HSN or original no
       x.ok = x.check === 'OK'; x.sign = t === 'Credit Note' ? -1 : 1;
     });
     return out;
@@ -6783,13 +6783,112 @@ const SALESIN = (() => {
     skipped.month.amt = r2(skipped.month.amt);
     return { lines, skipped, fileTax: r2(fileTax), source: 'GST workings (GSTR-1 sheet)' };
   }
+  // ---- v81: GST portal / e-invoice GSTR-1 format sheets (b2b, sez, de · cdnr · cdnur · exp · b2cl · b2cs) ----
+  const P = s => String(s ?? '').toLowerCase().replace(/[^a-z0-9%]+/g, ' ').trim();
+  function portalKind(rows) {
+    for (let r = 0; r < Math.min(rows.length, 12); r++) { const h = (rows[r] || []).map(P);
+      const has2 = (...w) => w.every(x => h.includes(x));
+      if (has2('gstin uin of recipient', 'invoice number', 'taxable value')) return { k: 'b2b', r, h };
+      if (has2('gstin uin of recipient', 'note number', 'taxable value')) return { k: 'cdnr', r, h };
+      if (has2('ur type', 'note number', 'taxable value')) return { k: 'cdnur', r, h };
+      if (has2('export type', 'invoice number', 'taxable value')) return { k: 'exp', r, h };
+      if (has2('invoice number', 'place of supply', 'taxable value') && !h.includes('gstin uin of recipient')) return { k: 'b2cl', r, h };
+      if (has2('type', 'place of supply', 'rate', 'taxable value')) return { k: 'b2cs', r, h };
+    }
+    return null;
+  }
+  const isPortal = sheets => sheets.some(s => portalKind(s.rows || []));
+  function fromPortal(sheets, opts = {}) {
+    const lines = [], skipped = { month: { n: 0, amt: 0 }, void: { n: 0 } }, got = {}; let fileTax = 0;
+    for (const sh of sheets) {
+      const K = portalKind(sh.rows || []); if (!K) continue;
+      const ix = (...names) => { for (const nm of names) { const k = K.h.indexOf(nm); if (k >= 0) return k; } return -1; };
+      const C = { g: ix('gstin uin of recipient'), n: ix('receiver name'), no: ix('invoice number', 'note number'), d: ix('invoice date', 'note date'), pos: ix('place of supply'),
+        rc: ix('reverse charge'), ity: ix('invoice type', 'note supply type'), nty: ix('note type'), ety: ix('export type'), rate: ix('rate'), tx: ix('taxable value'),
+        ig: ix('integrated tax'), cg: ix('central tax'), sg: ix('state ut tax'), cs: ix('cess amount'), st: ix('e invoice status'), ty: ix('type'), ur: ix('ur type') };
+      const get = (row, k) => C[k] >= 0 ? row[C[k]] : '';
+      for (let r = K.r + 1; r < sh.rows.length; r++) {
+        const row = sh.rows[r] || [], tx = n(get(row, 'tx'));
+        if (K.k !== 'b2cs' && !String(get(row, 'no') ?? '').trim()) continue;
+        if (K.k === 'b2cs' && !tx) continue;
+        if (/cancel/i.test(String(get(row, 'st') || ''))) { skipped.void.n++; continue; }
+        const d = K.k === 'b2cs' ? (opts.month ? opts.month + '-01' : '') : xdate(get(row, 'd'));
+        if (opts.month && d && d.slice(0, 7) !== opts.month) { skipped.month.n++; skipped.month.amt += Math.abs(tx); continue; }
+        const ig = n(get(row, 'ig')), cg = n(get(row, 'cg')), sg = n(get(row, 'sg')), cs = n(get(row, 'cs')), tax = ig + cg + sg;
+        const nt = String(get(row, 'nty') || '').trim().toUpperCase(), ity = P(get(row, 'ity')), ety = P(get(row, 'ety'));
+        const isNote = K.k === 'cdnr' || K.k === 'cdnur', sign = isNote && nt !== 'D' ? -1 : 1; fileTax += sign * tax;
+        const o = { src: 'portal', d: d || '', no: K.k === 'b2cs' ? `B2CS-${String(get(row, 'pos') || '').slice(0, 2)}-${n(get(row, 'rate'))}` : String(get(row, 'no')).trim(),
+          ty: isNote ? (nt === 'D' ? 'Debit Note' : 'Credit Note') : 'Invoice', name: String(get(row, 'n') ?? '').trim() || (K.k === 'b2cs' ? 'B2C (others) — summary' : K.k === 'b2cl' ? 'B2C (large)' : K.k === 'exp' ? 'Export' : ''), tx: r2(Math.abs(tx)) };
+        const g = String(get(row, 'g') ?? '').trim().toUpperCase(); if (/^\d{2}[A-Z0-9]{13}$/.test(g)) o.gstin = g;
+        const pos = String(get(row, 'pos') ?? '').match(/^\s*(\d{1,2})/); if (!o.gstin && pos && stateOf(pos[1])) o.state = stateOf(pos[1]).trim();
+        o.rate = nearRate(n(get(row, 'rate')) || (tx ? Math.abs(tax / tx * 100) : 0));
+        if (K.k === 'exp') o.exp = /wopay|without/.test(ety) || !ig ? 'Export - Without GST' : 'Export - With GST';
+        else if (/sez/.test(ity)) o.exp = /without/.test(ity) || !tax ? 'SEZ - Without GST' : 'SEZ - With GST';
+        else if (K.k === 'cdnur' && /exp/i.test(String(get(row, 'ur') || ''))) o.exp = /wopay/i.test(String(get(row, 'ur'))) ? 'Export - Without GST' : 'Export - With GST';
+        if (/^y/i.test(String(get(row, 'rc') ?? '').trim())) o.rc = 'Yes';
+        if (cs) o.cess = r2(Math.abs(cs));
+        lines.push(o); got[K.k] = (got[K.k] || 0) + 1;
+      }
+    }
+    skipped.month.amt = r2(skipped.month.amt);
+    return { lines, skipped, fileTax: r2(Math.abs(fileTax)), source: 'GST portal format — ' + Object.entries(got).map(([k, v]) => `${k} ${v}`).join(', ') };
+  }
+  // ---- v82: ERP sales register with section blocks (B2B / Export / CRN) — DOCUMENT TYPE · DOCUMENT NO · TAXABLE VALUE · EXEMPTED · SEZ · TAX RATE · CGST/SGST/IGST ----
+  const isErpHead = r => { const h = (r || []).map(P); return h.includes('document type') && h.includes('document no') && h.includes('taxable value') && (h.includes('igst') || h.includes('tax rate')); };
+  const erpSheet = sheets => sheets.find(sh => (sh.rows || []).slice(0, 40).some(isErpHead));
+  function fromErp(rows, opts = {}) {
+    const lines = [], skipped = { month: { n: 0, amt: 0 } }; let fileTax = 0, C = null, sec = '';
+    const add = o => lines.push(o);
+    for (let r = 0; r < rows.length; r++) {
+      const row = rows[r] || [];
+      if (isErpHead(row)) { const h = row.map(P), ix = (...nm) => { for (const x of nm) { const k = h.indexOf(x); if (k >= 0) return k; } return -1; };
+        C = { ty: ix('document type'), day: ix('daybook code'), no: ix('document no'), d: ix('document date'), n: ix('customer name'), reg: ix('gst registration status'), g: ix('customer gstin'),
+          pos: ix('place of supply'), tx: ix('taxable value'), ex: ix('exempted'), sez: ix('sez'), sac: ix('sac code'), rate: ix('tax rate'), cg: ix('cgst'), sg: ix('sgst'), ig: ix('igst'),
+          ono: ix('source document reference'), odt: ix('source document date'), rc: ix('is rcm') }; continue; }
+      const a0 = String(row[0] ?? '').trim();
+      if (!C) continue;
+      const dt = String(row[C.ty] ?? '').trim().toUpperCase(), dno = String(row[C.no] ?? '').trim();
+      if (!dt || !dno) { if (a0 && !/^\d+$/.test(a0)) sec = a0.toLowerCase(); continue; }      // section titles: B2B / Export / CRN …
+      const get = k => C[k] >= 0 ? row[C[k]] : '';
+      const d = xdate(get('d'));
+      const tx = Math.abs(n(get('tx'))), ex = Math.abs(n(get('ex'))), cg = Math.abs(n(get('cg'))), sg = Math.abs(n(get('sg'))), ig = Math.abs(n(get('ig')));
+      if (opts.month && d && d.slice(0, 7) !== opts.month) { skipped.month.n++; skipped.month.amt += tx + ex; continue; }
+      const day = String(get('day') ?? '').trim(), no = day && !dno.startsWith(day + '-') ? `${day}-${dno}` : dno;
+      const ty = /^(CRN|CN|CREDIT)/.test(dt) ? 'Credit Note' : /^(DBN|DN|DEBIT)/.test(dt) ? 'Debit Note' : 'Invoice';
+      const g = String(get('g') ?? '').trim().toUpperCase(), pos = String(get('pos') ?? '').match(/^\s*(\d{1,2})/), pc = pos ? pos[1].padStart(2, '0') : '';
+      const foreign = pc === '97' || pc === '96' || /export/.test(sec);
+      const base = { src: 'portal', d: d || '', no, ty, name: String(get('n') ?? '').trim() };
+      if (/^\d{2}[A-Z0-9]{13}$/.test(g)) base.gstin = g; else if (!foreign && pc && stateOf(pc)) base.state = stateOf(pc).trim();
+      const sac = String(get('sac') ?? '').trim().replace(/-0$/, ''); if (sac) base.hsn = sac;
+      if (ty !== 'Invoice' && String(get('ono') ?? '').trim()) { base.ono = String(get('ono')).trim(); const od = xdate(get('odt')); if (od) base.odt = od; }
+      if (/^y/i.test(String(get('rc') ?? '').trim())) base.rc = 'Yes';
+      const sez = /^y/i.test(String(get('sez') ?? '').trim()), tax = cg + sg + ig;
+      if (tx) { const o = { ...base, tx: r2(tx), rate: nearRate(n(get('rate')) || (tax / tx * 100)) };
+        if (foreign) o.exp = ig ? 'Export - With GST' : 'Export - Without GST'; else if (sez) o.exp = ig ? 'SEZ - With GST' : 'SEZ - Without GST';
+        add(o); }
+      if (ex) { const o = { ...base, tx: r2(ex), rate: 0 };
+        if (foreign) o.exp = 'Export - Without GST'; else if (sez) o.exp = 'SEZ - Without GST';
+        add(o); }
+      fileTax += (ty === 'Credit Note' ? -1 : 1) * tax;
+    }
+    skipped.month.amt = r2(skipped.month.amt);
+    return { lines, skipped, fileTax: r2(Math.abs(fileTax)), source: 'Sales register (ERP sections B2B / Export / CRN)' };
+  }
+  // the firm's workings: its GSTR-1 sheet if filled → the ERP Sales sheet → the portal-format sheets
+  function fromWorkbook(sheets, opts) {
+    const w = sheets.find(isWorkings), wr = w ? fromWorkings(w.rows, opts) : null;
+    if (wr && (wr.lines.length || wr.skipped.month.n)) return wr;
+    const e = erpSheet(sheets); if (e) { const er = fromErp(e.rows, opts); if (er.lines.length || er.skipped.month.n) return er; }
+    if (isPortal(sheets)) { const p = fromPortal(sheets, opts); if (p.lines.length || p.skipped.month.n) return p; }
+    return wr;
+  }
   function read(sheets, opts) {
     const z = sheets.find(s => isZoho(s.rows || []));
     if (z) return fromZoho(z.rows, opts);
-    const w = sheets.find(isWorkings); if (w) return fromWorkings(w.rows, opts);
+    const wb = fromWorkbook(sheets, opts); if (wb) return wb;
     return fromRegister((sheets[0] || {}).rows || [], opts);
   }
-  return { isZoho, fromZoho, fromRegister, fromWorkings, isWorkings, read };
+  return { isZoho, fromZoho, fromRegister, fromWorkings, isWorkings, isPortal, fromPortal, fromErp, erpSheet, fromWorkbook, read };
 })();
 
 /* =====================================================================
@@ -7014,9 +7113,9 @@ function renderG1(o, { client: c, getRow, save, filed = null, mode = 'work' }) {
       const f = await new Promise(res => { const i = document.createElement('input'); i.type = 'file'; i.accept = '.xlsx,.xls'; i.onchange = () => res(i.files[0]); i.click(); });
       if (!f) return;
       try {
-        const shs = await readSheets(f), wk = shs.find(SALESIN.isWorkings);
-        if (wk) {   // v72: the firm's GST workings master — take this month's GSTR-1 sheet rows
-          const res = SALESIN.fromWorkings(wk.rows, { month: row.period.slice(0, 7) });
+        const shs = await readSheets(f), wk = shs.find(SALESIN.isWorkings) || SALESIN.erpSheet(shs) || (SALESIN.isPortal(shs) ? {} : null);
+        if (wk) {   // v72: the firm's GST workings — its GSTR-1 sheet, else (v82) the ERP Sales sheet, else (v81) the portal-format sheets
+          const res = SALESIN.fromWorkbook(shs, { month: row.period.slice(0, 7) }) || { lines: [], skipped: { month: { n: 0 } }, error: 'No invoices found in this workings file' };
           if (!res.lines.length) return toast(res.skipped.month && res.skipped.month.n ? `No invoices dated in this month (${res.skipped.month.n} other-month rows in the file)` : res.error || 'No invoices found in the GSTR-1 sheet', true);
           if (D.sales.some(r => Object.keys(r).length) && !confirm('Replace the sales rows already entered here with the rows from this workings file?')) return;
           D.sales = res.lines; dirty(); draw();
@@ -7475,7 +7574,7 @@ const REV = (() => {
 })();
 
 // v78: this tab's code version — when a newer app is uploaded, offer Reload and block mails from old code
-const APP_VER = 'jlr-shell-v80';
+const APP_VER = 'jlr-shell-v82';
 let appStale = false;
 async function checkAppVer() {
   try { const t = await fetch('sw.js?v=' + Date.now(), { cache: 'no-store' }).then(r => r.text()); const live = (t.match(/jlr-shell-v\d+/) || [])[0];
