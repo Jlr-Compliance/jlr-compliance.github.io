@@ -6676,13 +6676,15 @@ const G1 = (() => {
     const payable = Z(); ok.forEach(({ row: r, x }) => { if (x.table === 'NIL') return; add(payable, r.rc === 'Yes' ? { ...x, ig: 0, cg: 0, sg: 0, cs: 0 } : x, x.sign); });
     // documents (Table 13): auto rows from entries
     const first = (list, key) => list.length ? list[0][key] : '', last = (list, key) => list.length ? list[list.length - 1][key] : '';
-    const uniq = arr => arr.filter((o, i) => arr.findIndex(p => up(p.row.no) === up(o.row.no)) === i);
+    const uniq = arr0 => { const arr = arr0.filter(o => has(o.row.no)); return arr.filter((o, i) => arr.findIndex(p => up(p.row.no) === up(o.row.no)) === i); };   // v92: rows without a number (B2C) are not counted
     const inv = uniq(ok.filter(o => o.x.type === 'Invoice')).map(o => o.row), cn = uniq(ok.filter(o => o.x.type === 'Credit Note')).map(o => o.row), dn = uniq(ok.filter(o => o.x.type === 'Debit Note')).map(o => o.row);
     const rv = V.filter(o => o.x && o.x.ok && /11A/.test(o.row.ty) && has(o.row.rv)).map(o => ({ no: o.row.rv }));
     const auto = { 'Invoices for outward supply': inv, 'Credit Note': cn, 'Debit Note': dn, 'Receipt voucher': rv };
     const docs = G1L.docs.map(nat => { const typed = (g1.docs || []).find(d => d.nat === nat) || {};
-      const a = auto[nat]; const from = a ? first(a, 'no') : typed.from || '', to = a ? last(a, 'no') : typed.to || '', total = a ? a.length : n(typed.total), cancelled = n(typed.cancelled);
-      return { nat, from, to, total, cancelled, net: total ? total - cancelled : 0, auto: !!a }; });
+      // v92: typed From / To / Total win over the automatic values (e.g. B2C invoices entered without numbers)
+      const a0 = auto[nat], typedAny = has(typed.from) || has(typed.to) || has(typed.total), a = a0 && !typedAny && a0.length ? a0 : null;
+      const from = a ? first(a, 'no') : typed.from || '', to = a ? last(a, 'no') : typed.to || '', total = a ? a.length : n(typed.total), cancelled = n(typed.cancelled);
+      return { nat, from, to, total, cancelled, net: total ? total - cancelled : 0, auto: !!a0, typed: !!(a0 && typedAny), af: a0 && a0.length ? first(a0, 'no') : '', at: a0 && a0.length ? last(a0, 'no') : '', an: a0 ? a0.length : 0 }; });
     return { S, A, V, tables, rateW, b2cs, t8, hsn, payable, docs, errors, okCount: ok.length };
   }
   // rows for the GST review engine (sales register shape)
@@ -7147,17 +7149,21 @@ function renderG1(o, { client: c, getRow, save, filed = null, mode = 'work' }) {
   // ----- documents -----
   function drawDocs() {
     const s = sm();
-    body.innerHTML = `<p class="muted small">Table 13. Grey rows fill themselves from the entries (first and last number, count). Type the others. Enter cancelled numbers where needed.</p>
+    body.innerHTML = `<p class="muted small">Table 13. Grey rows fill themselves from the entries (first and last number, count) — type over them to change (typed values win; clear them to go back to automatic). Type the others. Enter cancelled numbers where needed.</p>
       <div class="table-wrap"><table class="g1-docs"><thead><tr><th>Nature of document</th><th>From</th><th>To</th><th class="r">Total</th><th class="r">Cancelled</th><th class="r">Net issued</th></tr></thead><tbody>
       ${s.docs.map((d, i) => `<tr class="${d.auto ? 'g1-autorow' : ''}"><td>${esc(d.nat)}</td>
-        ${d.auto ? `<td>${esc(d.from)}</td><td>${esc(d.to)}</td><td class="r">${d.total}</td>` : ['from', 'to', 'total'].map(k => `<td><input data-dn="${i}" data-dk="${k}" value="${esc(d[k] || '')}" ${k === 'total' ? 'inputmode="numeric" class="r"' : ''}></td>`).join('')}
+        ${['from', 'to', 'total'].map(k => { const tv = ((D.docs || []).find(x => x.nat === d.nat) || {})[k], ph = d.auto ? { from: d.af, to: d.at, total: d.an ? String(d.an) : '' }[k] : '';
+          return `<td><input data-dn="${i}" data-dk="${k}" value="${esc(tv ?? '')}" placeholder="${esc(ph || '')}" title="${d.auto ? 'Automatic: ' + esc(ph || '—') + ' — type to change' : ''}" ${k === 'total' ? 'inputmode="numeric" class="r"' : ''}></td>`; }).join('')}
         <td><input data-dn="${i}" data-dk="cancelled" value="${esc(d.cancelled || '')}" inputmode="numeric" class="r" style="width:80px"></td><td class="r">${d.net || ''}</td></tr>`).join('')}</tbody></table></div>`;
     body.oninput = null;
   }
   body.addEventListener('input', e => {
     const el = e.target; if (el.dataset.dn == null) return;
     const nat = G1L.docs[+el.dataset.dn]; let d = D.docs.find(x => x.nat === nat); if (!d) { d = { nat }; D.docs.push(d); }
-    d[el.dataset.dk] = el.dataset.dk === 'total' || el.dataset.dk === 'cancelled' ? GR.amt(el.value) : el.value.trim(); dirty();
+    if (!String(el.value).trim()) delete d[el.dataset.dk];   // v92: empty box → back to automatic
+    else d[el.dataset.dk] = el.dataset.dk === 'total' || el.dataset.dk === 'cancelled' ? GR.amt(el.value) : el.value.trim();
+    dirty();
+    const tr = el.closest('tr'); if (tr) { const v = k => { const i = $(`[data-dk="${k}"]`, tr); return i ? (String(i.value).trim() || i.placeholder || '') : ''; }, tot = GR.amt(v('total')), cn = GR.amt(v('cancelled')), cell = tr.lastElementChild; if (cell) cell.textContent = tot ? tot - cn : ''; }
   });
 
   // ----- summary -----
@@ -7674,7 +7680,7 @@ const REV = (() => {
 })();
 
 // v78: this tab's code version — when a newer app is uploaded, offer Reload and block mails from old code
-const APP_VER = 'jlr-shell-v91';
+const APP_VER = 'jlr-shell-v92';
 let appStale = false;
 async function checkAppVer() {
   try { const t = await fetch('sw.js?v=' + Date.now(), { cache: 'no-store' }).then(r => r.text()); const live = (t.match(/jlr-shell-v\d+/) || [])[0];
