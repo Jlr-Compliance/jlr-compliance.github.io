@@ -1182,8 +1182,8 @@ function editTask(task, refresh) {
   if (akb) akb.onclick = () => ackForTask(task, () => { m.close(); refresh(); });
   if (!isNew) safe(sb.from('filing_acks').select('*').eq('task_id', task.id).order('created_at', { ascending: false }).limit(3)).then(r => {
     const row = $('[data-ackrow]', m.el); if (!row || r.error || !r.data.length) return;
-    row.insertAdjacentHTML('beforeend', `<div class="small" style="margin-top:6px">Saved acknowledgement: ${r.data.map(a => `${a.file_path ? `<button type="button" class="link" data-akopen="${a.id}">${esc(a.file_name || 'PDF')}</button>` : esc(a.arn || '')} <span class="muted">${a.filed_on ? fmtDate(a.filed_on) : ''}</span>`).join(' · ')}</div>`);
-    row.onclick = e => { const id = e.target.dataset.akopen; if (id) ACK.open(r.data.find(a => a.id === id)); };
+    row.insertAdjacentHTML('beforeend', `<div class="small" style="margin-top:6px">Saved acknowledgement: ${r.data.map(a => `${a.file_path ? `<button type="button" class="link" data-akopen="${a.id}">${esc(a.file_name || 'PDF')}</button>` : esc(a.arn || '')} <span class="muted">${a.filed_on ? fmtDate(a.filed_on) : ''}</span>`).join(' · ')}${isManager() ? ' <button type="button" class="link danger-t" data-akundo>Undo filing</button>' : ''}</div>`);
+    row.onclick = e => { const id = e.target.dataset.akopen; if (id) ACK.open(r.data.find(a => a.id === id)); if ('akundo' in e.target.dataset) undoFiling(task, () => { m.close(); refresh(); }); };
   });
   if ($('[data-hist]', m.el)) $('[data-hist]', m.el).onclick = () => showHistory('tasks', task.id, `${clientName(task.client_id)} · ${task.return_name} ${task.period || ''}`);
   const del = $('[data-del]', m.el);
@@ -5453,7 +5453,7 @@ VIEWS.gst = async v => {
     const locked = kind === 'gstr3b' && !G3gate.ok, tk = taskOf(kind), filed = tk && tk.status === 'Filed';
     const btn = (a, label, cls = '') => a === 'send' && locked ? `<button class="btn" data-rev="send" data-rk="${kind}" aria-disabled="true" title="${esc(G3gate.why.join(' · '))}">Locked until 2B is complete</button>`
       : `<button class="btn ${cls}" data-rev="${a}" data-rk="${kind}" ${a === 'send' && !sr ? 'disabled' : ''}>${label}</button>`;
-    const ackBtn = tk ? (filed ? `<span class="ok-t small">Filed${tk.arn ? ' · ARN ' + esc(tk.arn) : ''}${tk.filed_on ? ' · ' + esc(tk.filed_on) : ''}</span>` : btn('ack', `Upload ${K.label} acknowledgement`, 'primary')) : `<span class="muted small">No ${K.label} work item for this month — upload the acknowledgement from Work.</span>`;
+    const ackBtn = tk ? (filed ? `<span class="ok-t small">Filed${tk.arn ? ' · ARN ' + esc(tk.arn) : ''}${tk.filed_on ? ' · ' + esc(tk.filed_on) : ''}</span>${isManager() ? `<button class="link small danger-t" data-rev="unfile" data-rk="${kind}" title="Wrong acknowledgement? Remove it and go back to Ready to file">Undo filing</button>` : ''}` : btn('ack', `Upload ${K.label} acknowledgement`, 'primary')) : `<span class="muted small">No ${K.label} work item for this month — upload the acknowledgement from Work.</span>`;
     const rem = ((rev && rev.remarks) || []).slice().reverse().map(x => `<li><b>${esc(x.by || '')}</b> <span class="muted small">${sh(x.at)} · ${x.via === 'link' ? 'by link' : x.via === 'email' ? 'by email reply' : 'in tracker'}</span><div>${esc(x.text)}</div></li>`).join('');
     const sent = ((rev && rev.client_sent) || []).slice().reverse().map(x => `<li>${esc(x.what || 'Workings')} → ${esc(x.to)} <span class="muted small">${sh(x.at)}${x.auto ? ' · automatic' : ''} · ${esc(profName(x.by) || '')}</span></li>`).join('');
     const dr = rev && rev.draft;
@@ -5491,6 +5491,7 @@ VIEWS.gst = async v => {
       const txt = `Dear ${c.contact_person || c.name}, your ${K.label} for ${REV.mon(period)} is filed. The acknowledgement and workings have been emailed to you, and you can also download them from your client portal: ${new URL('portal.html', location.href).href} — ${settings.firm_name || cfg.FIRM_NAME || ''}`;
       tgSendOrOpen(txt, c.phone); return;
     }
+    if (act === 'unfile') { const tk = taskOf(kind); if (tk) undoFiling(tk, async () => { gtasks = await loadGT().catch(() => gtasks); render(); }); return; }
     if (act === 'ack') { const tk = taskOf(kind); if (tk) ackForTask(tk, async () => { gtasks = await loadGT().catch(() => gtasks); revs = await REV.load(c, period).catch(() => revs); render(); }); return; }
     if (act === 'send' && kind === 'gstr3b' && !G3gate.ok) { toast(`GSTR-3B can go for verification only after 2B is complete — ${G3gate.why.join('; ')}`, true); return; }
     if (act === 'fetch') { gstPortalFetch(c, grMonth, async patch => { await save(patch); }, kind === 'gstr1' ? 'g1' : ''); return; }
@@ -11512,6 +11513,20 @@ const ACK = {
 };
 
 /* one work item: button in the work window */
+// v73: a wrong acknowledgement was uploaded — remove it and take the work back to Ready to file (Manager / Admin; the database allows only them)
+async function undoFiling(task, after) {
+  if (!isManager()) return toast('Only a Manager or Admin can undo a filing. Ask them, or upload the correct acknowledgement over it.', true);
+  const c = clientById(task.client_id) || {};
+  if (!confirm(`Undo filing — ${task.return_name} ${task.period || ''} · ${c.name || ''}${task.arn ? '\nARN ' + task.arn : ''}${task.filed_on ? ' · ' + task.filed_on : ''}\n\nThe acknowledgement PDF and ARN are removed from the tracker and the work goes back to "Ready to file".\nNothing changes on the GST portal. If the client was already mailed, tell them separately.\n\nContinue?`)) return;
+  try {
+    const r = await safe(sb.from('filing_acks').select('id,file_path').eq('task_id', task.id));
+    const paths = (r.data || []).map(a => a.file_path).filter(Boolean);
+    if (paths.length) { const rm = await sb.storage.from('filing-acks').remove(paths); if (rm.error) console.warn(rm.error); }
+    if ((r.data || []).length) await must(sb.from('filing_acks').delete().eq('task_id', task.id));
+    await must(sb.from('tasks').update({ status: 'Ready to file', ready_by: 'us', arn: null, filed_on: null, updated_by: me.id }).eq('id', task.id));
+    toast(`Filing undone — ${task.return_name} is back to Ready to file`); after && after();
+  } catch (e) { toast(friendly(e), true); }
+}
 async function ackForTask(task, after) {
   const gate = await payGateMsg(task).catch(() => null);
   if (gate) { toast(gate, true); return; }
