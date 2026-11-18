@@ -4311,13 +4311,21 @@ const GR = (() => {
     d: ['vendor ref date', 'vendor invoice date', 'vendor inv date', 'supplier invoice date', 'supplier inv date', 'party invoice date', 'party bill date'] };
   // v68: a rate / % column ("CGSTRATE", "CGST %", "IGST Rate") is never a tax-amount or taxable-value column
   const RATE_COL = /rate(?![a-z])|%|percent|\bpct\b/i, AMT_KEYS = new Set(['ig', 'cg', 'sg', 'cs', 't', 'v', 'nt']);
+  const C = x => String(x).replace(/[^a-z0-9]/g, '');
+  const SHORT = { i: ['invno', 'invnum', 'billno', 'suppinvno', 'supinvno', 'partyinvno', 'refno', 'vchno'],
+    d: ['invdt', 'invdate', 'billdt', 'billdate', 'suppinvdt', 'supinvdt', 'partyinvdt', 'docdt', 'vchdt'],
+    n: ['suplnm', 'msuplnm', 'supnm', 'suppnm', 'suppname', 'suplname', 'supname', 'supplier', 'vendor', 'vendorname', 'vendornm', 'partynm', 'custnm', 'ledgernm', 'acname', 'accountname'],
+    v: ['netamt', 'invamt', 'invoiceamt', 'billamt', 'billvalue', 'invvalue', 'totalamt', 'grandtotal', 'nettotal', 'netvalue'],
+    t: ['taxableamt', 'taxablevalue', 'assessableamt'], g: ['gstno', 'gstinno', 'suppgstin', 'partygstin'] };
   function mapHeader(cells) {
     const h = cells.map(H), raw = cells.map(c => String(c ?? '')), used = new Set(), map = {};
     const ok = (k, j) => !used.has(j) && !(AMT_KEYS.has(k) && RATE_COL.test(raw[j]));
     for (const [k, list] of Object.entries(PREF)) { const ix = h.findIndex((x, j) => !used.has(j) && list.includes(x)); if (ix >= 0) { map[k] = ix; used.add(ix); } }
     for (const [k, ex, cont] of FIELDS) {
       if (map[k] != null) continue;
+      const exC = ex.map(C).concat(SHORT[k] || []);   // v68: run-together headings (INVOICENO, INVDT, MSUPLNM …)
       let ix = h.findIndex((x, j) => ok(k, j) && ex.includes(x));
+      if (ix < 0) ix = h.findIndex((x, j) => ok(k, j) && x && exC.includes(C(x)));
       if (ix < 0) ix = h.findIndex((x, j) => ok(k, j) && x && cont.some(w => x.includes(w)));
       if (ix >= 0) { map[k] = ix; used.add(ix); }
     }
