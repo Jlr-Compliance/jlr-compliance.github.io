@@ -4895,6 +4895,9 @@ function rulesDialog(c, onChange) {
       <p class="muted small" style="margin-top:0">Applied every time a sales register, purchase register or GSTR-2B is loaded for ${esc(c.name)}. The client's own rules win over office-wide rules. Rows changed by a rule are listed in the check before saving.</p>
       <h4 style="margin:12px 0 6px">Matching purchase register with GSTR-2B</h4>
       <div class="itcm">${Object.entries(MATCHM).map(([k, [l, d]]) => `<label class="itcm-o"><input type="radio" name="rmatch" value="${k}" ${(c.reco_match || 'gstin_inv') === k ? 'checked' : ''}><span><b>${l}</b><small>${d}</small></span></label>`).join('')}</div>
+      <h4 style="margin:16px 0 6px">Missing in 2B</h4>
+      <label class="check small"><input type="checkbox" data-showmiss ${c.hide_missing2b ? '' : 'checked'}> Show <b>Missing in 2B</b> (bills in books, not in GSTR-2B) — its tab, supplier follow-up and the "tell the client" mails</label>
+      <p class="muted small" style="margin:2px 0 0">Switching it off only hides them; their ITC is still not claimed until they come in 2B.</p>
       <h4 style="margin:16px 0 6px">${esc(c.name)} rules</h4>${tbl(mine, 'No rules yet. They are also offered automatically when you correct the same thing on several invoices.')}
       <h4 style="margin:16px 0 6px">Office-wide rules</h4>${tbl(office, 'None.')}
       <h4 style="margin:16px 0 6px">Add a rule</h4>
@@ -4908,6 +4911,11 @@ function rulesDialog(c, onChange) {
       </div><div class="toolbar" style="margin-top:8px"><button class="btn primary" data-radd>Add rule</button></div>`;
     const el = m.el, fa = () => { const s = $('[name=applies]', el).value, cur = $('[name=action]', el).value; $('[name=action]', el).innerHTML = Object.entries(RULES.ACT[s]).map(([k, l]) => `<option value="${k}" ${cur === k ? 'selected' : ''}>${esc(l)}</option>`).join(''); };
     fa(); $('[name=applies]', el).onchange = fa;
+    const sm0 = $('[data-showmiss]', el); if (sm0) sm0.onchange = async () => {   // v88
+      const hide = !sm0.checked, { error } = await safe(sb.rpc('set_hide_missing2b', { p_client: c.id, p_hide: hide }));
+      if (error) { sm0.checked = hide; return toast(/hide_missing2b/.test(error.message || '') ? 'Run update-hide-missing2b.sql in Supabase first' : friendly(error), true); }
+      c.hide_missing2b = hide; const k = clients.find(x => x.id === c.id); if (k) k.hide_missing2b = hide; toast(hide ? 'Missing in 2B hidden for ' + c.name : 'Missing in 2B shown for ' + c.name); onChange && onChange();
+    };
     $$('[name=rmatch]', el).forEach(r => r.onchange = async () => { const prev = c.reco_match || 'gstin_inv'; if (!await setRecoMatch(c, r.value)) { const p = $(`[name=rmatch][value=${prev}]`, el); if (p) p.checked = true; return; } onChange && onChange(); });
     $('[name=op]', el).onchange = e => { $('[name=val]', el).disabled = e.target.value === 'blank'; };
     $('[data-radd]', el).onclick = async () => {
@@ -5280,10 +5288,12 @@ VIEWS.gst = async v => {
     const eff = k => GR.effA(reco, k);
     const list = (M === '2b_confirm' ? RECO.confirmItems(B2) : RECO.items(sm.rec, cf, before))
       .map(it => it.st === 'confirm' ? { ...it, st2: eff(it.k) ? 'c_' + (GR.ANS_TAKE.includes(eff(it.k)) ? 'take' : eff(it.k) === 'notmine' || eff(it.k) === 'notours' ? 'notmine' : 'skip') : asked[it.k] ? 'c_asked' : 'c_new' } : it);
-    const lw = RECO.lateAndWaiting(recoHist || [], period), cl = RECO.claim(list, reco, B2, { method: M, late: lw.late }), sup = RECO.suppliers(list, dec, cf);
+    const lw = RECO.lateAndWaiting(recoHist || [], period), cl = RECO.claim(list, reco, B2, { method: M, late: lw.late }), hideM = !!c.hide_missing2b;
+    // v88: client setting "Missing in 2B" off → no missing-bill follow-up (suppliers keep only amount-differs documents); ITC is unchanged (still as per 2B)
+    const sup = RECO.suppliers(list, dec, cf).map(s0 => hideM ? { ...s0, docs: s0.docs.filter(d => d.why === 'differs') } : s0).filter(s0 => s0.docs.length).map(s0 => hideM ? { ...s0, tax: GR.r2(s0.docs.reduce((a, d) => a + gTax(d), 0)) } : s0);
     const toAsk = RECO.askable(list, reco).filter(it => !asked[it.k]);
     // v63: bills in books but missing in 2B — tell the client so they chase their suppliers
-    const missed = (reco.miss && reco.miss.items) || {}, toMiss = M === '2b_confirm' ? [] : list.filter(it => it.st === 'books_only' && it.b && !missed[it.k] && (dec[it.k] || {}).a !== 'noclaim');
+    const missed = (reco.miss && reco.miss.items) || {}, toMiss = M === '2b_confirm' || hideM ? [] : list.filter(it => it.st === 'books_only' && it.b && !missed[it.k] && (dec[it.k] || {}).a !== 'noclaim');
     const decideN = cl.undecided.filter(x => ['mismatch', 'suggest', 'gstin_diff'].includes(x.st)).length, openN = cl.undecided.length - decideN;
     return { M, ready, reco, dec, asked, eff, list, cf, lw, cl, sup, toAsk, toMiss, missed, undecided: cl.undecided, decideN, openN };
   }
@@ -5816,9 +5826,9 @@ VIEWS.gst = async v => {
     // five simple filters
     const F = M === '2b_confirm'
       ? [['waiting', 'Waiting for answer', list.filter(x => x.st2 === 'c_new' || x.st2 === 'c_asked')], ['take', 'Take credit', list.filter(x => x.st2 === 'c_take')], ['nottaken', 'Not taken', list.filter(x => x.st2 === 'c_skip' || x.st2 === 'c_notmine')], ['earlier', 'Earlier months', null]]
-      : [['decide', 'To decide', list.filter(x => ['mismatch', 'suggest', 'gstin_diff'].includes(x.st))], ['missing', 'Missing in 2B', list.filter(x => x.st === 'books_only')], ['notbooks', 'Not in books', list.filter(x => x.st === '2b_only' || x.st === 'imp_2b')],
-         ['earlier', 'Earlier months', null], ['matched', 'Matched', list.filter(x => ['matched', 'not_avail', 'imp_matched', 'imp_diff'].includes(x.st))]];
-    const earlier = [...list.filter(x => x.st === 'carried' || x.st === 'claimed_before').map(x => ({ kind: x.st, it: x })), ...cf.missing.map(e => ({ kind: 'cf_missing', e })), ...lw.wait.map(e => ({ kind: 'cf_wait', e })), ...lw.late.map(e => ({ kind: 'late', e }))];
+      : [['decide', 'To decide', list.filter(x => ['mismatch', 'suggest', 'gstin_diff'].includes(x.st))], !c.hide_missing2b && ['missing', 'Missing in 2B', list.filter(x => x.st === 'books_only')], ['notbooks', 'Not in books', list.filter(x => x.st === '2b_only' || x.st === 'imp_2b')],
+         ['earlier', 'Earlier months', null], ['matched', 'Matched', list.filter(x => ['matched', 'not_avail', 'imp_matched', 'imp_diff'].includes(x.st))]].filter(Boolean);
+    const earlier = [...list.filter(x => x.st === 'carried' || x.st === 'claimed_before').map(x => ({ kind: x.st, it: x })), ...(c.hide_missing2b ? [] : cf.missing.map(e => ({ kind: 'cf_missing', e }))), ...lw.wait.map(e => ({ kind: 'cf_wait', e })), ...lw.late.map(e => ({ kind: 'late', e }))];
     const cnt = f => f[2] ? f[2].length : earlier.length;
     if (!F.some(f => f[0] === grRecFilter)) grRecFilter = (F.find(f => cnt(f)) || F[0])[0];
     const box = (l, v, cls = '', sub = '') => `<div class="rc-b ${cls}"><small>${l}</small><b>${gst$(v)}</b>${sub ? `<small class="muted">${sub}</small>` : ''}</div>`;
@@ -7647,7 +7657,7 @@ const REV = (() => {
 })();
 
 // v78: this tab's code version — when a newer app is uploaded, offer Reload and block mails from old code
-const APP_VER = 'jlr-shell-v87';
+const APP_VER = 'jlr-shell-v88';
 let appStale = false;
 async function checkAppVer() {
   try { const t = await fetch('sw.js?v=' + Date.now(), { cache: 'no-store' }).then(r => r.text()); const live = (t.match(/jlr-shell-v\d+/) || [])[0];
