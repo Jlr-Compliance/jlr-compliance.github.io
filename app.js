@@ -4529,7 +4529,9 @@ const GR = (() => {
       waiting = docs.filter(r => !/IMP|ISD/.test(r.src || '') && !effA(m.reco, r.g + '|' + normInv(r.i))).length;
       itcBase = fix(sum(ok)); itcFrom = 'confirmed';
     }
-    const rcm = has2b ? rcm2b : rcmBooks;
+    // v79: RCM = 2B RCM + books RCM from unregistered / foreign suppliers (never in 2B) + typed in GSTR-3B workings (reco.w3b.rcm_add)
+    const rcmUnreg = fix(sum(P, r => r.rc && !gstinOk(r.g))), wr = ((((m.reco || {}).w3b) || {}).rcm_add) || {};
+    const rcm = fix({ t: 0, ig: 0, cg: 0, sg: 0, cs: 0 }); [has2b ? rcm2b : rcmBooks, has2b ? rcmUnreg : null, { t: +wr.t || 0, ig: +wr.ig || 0, cg: +wr.cg || 0, sg: +wr.sg || 0, cs: +wr.cs || 0 }].forEach(x => { if (x) for (const k in rcm) rcm[k] = r2((rcm[k] || 0) + (+x[k] || 0)); });
     // RCM: tax is paid in cash, and the same amount becomes ITC
     const liab = { ig: out.ig + rcm.ig, cg: out.cg + rcm.cg, sg: out.sg + rcm.sg, cs: out.cs + rcm.cs };
     const credit = { ig: itcBase.ig + rcm.ig, cg: itcBase.cg + rcm.cg, sg: itcBase.sg + rcm.sg, cs: itcBase.cs + rcm.cs };
@@ -5691,9 +5693,9 @@ VIEWS.gst = async v => {
     const D = draft3b(row, sm, c, st.ready ? st.cl.claim : null), G3 = row.gstr3b, h4 = ['ig', 'cg', 'sg', 'cs'];
     const tr = (l, x, cls = '', keys = H5) => `<tr class="${cls}"><td>${l}</td>${cells(x, keys)}</tr>`;
     const FROM = { gstr1: 'as per GSTR-1 filed', gstr1w: 'as per GSTR-1 (copied from our working)', sales: 'as per sales register — GSTR-1 filed not added' }[D.from];
-    const anyW = ['rev_perm', 'rev_temp', 'reclaim', 'cl_open', 'cash_open'].some(k => D.w[k] && h4.some(h => +D.w[k][h]));
+    const anyW = ['rcm_add', 'rev_perm', 'rev_temp', 'reclaim', 'cl_open', 'cash_open'].some(k => D.w[k] && h4.some(h => +D.w[k][h]));
     o.innerHTML = `<div class="rc-head"><div><h3 style="margin:0">Draft GSTR-3B — ${RECO.monthName(period)}</h3><p class="muted small" style="margin:2px 0 0">Laid out like the GSTR-3B form — click a heading to open it.</p></div><span class="spacer"></span>
-        <button class="btn sm primary" data-w3b>Reversal &amp; ledger balances${anyW ? ' ✓' : ''}</button><a class="btn sm" href="#/taxpay" data-tpfrom>Payment intimation →</a></div>
+        <button class="btn sm primary" data-w3b>RCM, reversal &amp; ledger balances${anyW ? ' ✓' : ''}</button><a class="btn sm" href="#/taxpay" data-tpfrom>Payment intimation →</a></div>
       ${D.from === 'sales' ? '<p class="note warn small">3.1 is from the sales register because the filed GSTR-1 is not added. Add it in the GSTR-1 filed tab.</p>' : ''}
       ${!sm.has2b && sm.itcFrom === 'books' && sm.method !== 'books' ? '<p class="note warn small">GSTR-2B not added — ITC below is from the purchase register. Claim only what appears in 2B.</p>' : ''}
       ${sm.method === 'books' && sm.over2b > RECO.TOL ? `<p class="note warn small">Credit as per books is ${gst$(sm.over2b)} more than GSTR-2B.</p>` : ''}
@@ -5736,14 +5738,16 @@ VIEWS.gst = async v => {
   function w3bDialog() {
     const w = ((row.reco || {}).w3b) || {}, h4 = ['ig', 'cg', 'sg', 'cs'], L = { ig: 'IGST', cg: 'CGST', sg: 'SGST', cs: 'Cess' };
     const blk = (k, title, help) => `<h4 style="margin:14px 0 4px">${title}</h4><p class="muted small" style="margin:0 0 6px">${help}</p><div class="form-grid g4">${h4.map(h => `<label>${L[h]}<input type="number" step="0.01" min="0" name="${k}_${h}" value="${esc((w[k] || {})[h] ?? '')}"></label>`).join('')}</div>`;
-    modal(`Reversal & ledger balances — ${c.name} · ${RECO.monthName(period)}`,
-      blk('rev_temp', '4(B)(2) Temporary reversal', 'e.g. bills not paid within 180 days, ITC held back until a dispute is settled — can be reclaimed later in 4(D)(1).')
+    const blkT = (k, title, help) => `<h4 style="margin:14px 0 4px">${title}</h4><p class="muted small" style="margin:0 0 6px">${help}</p><div class="form-grid g5"><label>Taxable value<input type="number" step="0.01" min="0" name="${k}_t" value="${esc((w[k] || {}).t ?? '')}"></label>${h4.map(h => `<label>${L[h]}<input type="number" step="0.01" min="0" name="${k}_${h}" value="${esc((w[k] || {})[h] ?? '')}"></label>`).join('')}</div>`;
+    modal(`RCM, reversal & ledger balances — ${c.name} · ${RECO.monthName(period)}`,
+      blkT('rcm_add', '3.1(d) Reverse charge — not in GSTR-2B', 'RCM you pay that the 2B does not show: e.g. legal fees / GTA / rent from unregistered persons, import of services, sponsorship. Goes to 3.1(d), paid in cash, and the same tax comes back as ITC in 4(A)(3). (RCM bills in 2B, and RCM lines of unregistered suppliers in the purchase register, are already counted.)')
+      + blk('rev_temp', '4(B)(2) Temporary reversal', 'e.g. bills not paid within 180 days, ITC held back until a dispute is settled — can be reclaimed later in 4(D)(1).')
       + blk('rev_perm', '4(B)(1) Permanent reversal', 'Rules 38, 42, 43 and section 17(5) (blocked credits) — not reclaimed.')
       + blk('reclaim', '4(D)(1) ITC reclaimed', 'Temporarily reversed ITC taken back this month (added to 4(A)(5)).')
       + blk('cl_open', 'Electronic credit ledger — opening balance', 'Balance already on the portal before this return; used in set-off.')
       + blk('cash_open', 'Electronic cash ledger — balance', 'Cash already deposited (challans) and not used; reduces the cash to deposit.'),
       { wide: true, saveText: 'Save', onSave: async el => {
-        const out = {}; ['rev_temp', 'rev_perm', 'reclaim', 'cl_open', 'cash_open'].forEach(k => { const v = {}; h4.forEach(h => { const x = num(fv(el, `${k}_${h}`)); if (x) v[h] = x; }); if (Object.keys(v).length) out[k] = v; });
+        const out = {}; ['rcm_add', 'rev_temp', 'rev_perm', 'reclaim', 'cl_open', 'cash_open'].forEach(k => { const v = {}; [...(k === 'rcm_add' ? ['t'] : []), ...h4].forEach(h => { const x = num(fv(el, `${k}_${h}`)); if (x) v[h] = x; }); if (Object.keys(v).length) out[k] = v; });
         const reco = JSON.parse(JSON.stringify(row.reco || {})); reco.w3b = { ...out, by: me.id, at: new Date().toISOString() };
         await save({ reco }); toast('Saved');
       } });
@@ -7441,7 +7445,7 @@ const REV = (() => {
 })();
 
 // v78: this tab's code version — when a newer app is uploaded, offer Reload and block mails from old code
-const APP_VER = 'jlr-shell-v78';
+const APP_VER = 'jlr-shell-v79';
 let appStale = false;
 async function checkAppVer() {
   try { const t = await fetch('sw.js?v=' + Date.now(), { cache: 'no-store' }).then(r => r.text()); const live = (t.match(/jlr-shell-v\d+/) || [])[0];
