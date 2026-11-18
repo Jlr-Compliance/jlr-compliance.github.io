@@ -4864,6 +4864,13 @@ async function offerRule(c, sug, side, action) {
   if (!confirm(`You did the same thing to ${sug.n} ${side === 'sales' ? 'invoices' : 'bills'}.\n\nSave this as a rule for ${c.name} so it happens automatically next month?\n\n${text}`)) return;
   if (await saveRule(rule)) { toast('Rule saved for ' + c.name); await loadClientRules(c.id); }
 }
+const MATCHM = { gstin_inv: ['GSTIN + bill no (standard)', 'A bill matches when the supplier GSTIN and bill no are the same and the tax is within ₹10.'],
+  inv_tax: ['Bill no + tax first, then GSTIN', 'First match on bill no and tax amount (within ₹10) even if the GSTIN in books is different or blank — shown as "GSTIN differs". Bills left over are then matched by GSTIN.'] };
+async function setRecoMatch(c, vm) {   // v69
+  const { error } = await safe(sb.rpc('set_reco_match', { p_client: c.id, p_match: vm }));
+  if (error) { toast(/set_reco_match|reco_match/.test(error.message || '') ? 'Run update-reco-match.sql in Supabase first' : friendly(error), true); return false; }
+  c.reco_match = vm; const k = clients.find(x => x.id === c.id); if (k) k.reco_match = vm; toast('Matching rule saved'); return true;
+}
 function rulesDialog(c, onChange) {
   const sel = (name, obj, v) => `<select name="${name}">${Object.entries(obj).map(([k, l]) => `<option value="${k}" ${v === k ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>`;
   const draw = m => {
@@ -4874,7 +4881,9 @@ function rulesDialog(c, onChange) {
     const tbl = (rs, empty) => rs.length ? `<div class="table-wrap"><table><thead><tr><th>Rule</th><th>For</th><th>Added</th><th></th></tr></thead><tbody>${rs.map(line).join('')}</tbody></table></div>` : `<p class="muted small">${empty}</p>`;
     $('.modal-body', m.el).innerHTML = `${grRulesOk ? '' : '<p class="note warn small">Rules are not set up yet — run <b>update-session16.sql</b> in Supabase.</p>'}
       <p class="muted small" style="margin-top:0">Applied every time a sales register, purchase register or GSTR-2B is loaded for ${esc(c.name)}. The client's own rules win over office-wide rules. Rows changed by a rule are listed in the check before saving.</p>
-      <h4 style="margin:12px 0 6px">${esc(c.name)} rules</h4>${tbl(mine, 'No rules yet. They are also offered automatically when you correct the same thing on several invoices.')}
+      <h4 style="margin:12px 0 6px">Matching purchase register with GSTR-2B</h4>
+      <div class="itcm">${Object.entries(MATCHM).map(([k, [l, d]]) => `<label class="itcm-o"><input type="radio" name="rmatch" value="${k}" ${(c.reco_match || 'gstin_inv') === k ? 'checked' : ''}><span><b>${l}</b><small>${d}</small></span></label>`).join('')}</div>
+      <h4 style="margin:16px 0 6px">${esc(c.name)} rules</h4>${tbl(mine, 'No rules yet. They are also offered automatically when you correct the same thing on several invoices.')}
       <h4 style="margin:16px 0 6px">Office-wide rules</h4>${tbl(office, 'None.')}
       <h4 style="margin:16px 0 6px">Add a rule</h4>
       <div class="form-grid g5 rule-form">
@@ -4887,6 +4896,7 @@ function rulesDialog(c, onChange) {
       </div><div class="toolbar" style="margin-top:8px"><button class="btn primary" data-radd>Add rule</button></div>`;
     const el = m.el, fa = () => { const s = $('[name=applies]', el).value, cur = $('[name=action]', el).value; $('[name=action]', el).innerHTML = Object.entries(RULES.ACT[s]).map(([k, l]) => `<option value="${k}" ${cur === k ? 'selected' : ''}>${esc(l)}</option>`).join(''); };
     fa(); $('[name=applies]', el).onchange = fa;
+    $$('[name=rmatch]', el).forEach(r => r.onchange = async () => { const prev = c.reco_match || 'gstin_inv'; if (!await setRecoMatch(c, r.value)) { const p = $(`[name=rmatch][value=${prev}]`, el); if (p) p.checked = true; return; } onChange && onChange(); });
     $('[name=op]', el).onchange = e => { $('[name=val]', el).disabled = e.target.value === 'blank'; };
     $('[data-radd]', el).onclick = async () => {
       const v = n => ($(`[name=${n}]`, el) || {}).value, val = (v('val') || '').trim();
@@ -5211,8 +5221,6 @@ VIEWS.gst = async v => {
   const ITCM = { books_2b: ['Books matched with 2B', 'Purchase register is matched with GSTR-2B. Bills in 2B but not in books go to the client to mark.'],
     books: ['Credit as per books', 'ITC is taken on the purchase register. GSTR-2B is tracked alongside for missing and late bills.'],
     '2b_confirm': ['2B — client confirms', 'No purchase register. The GSTR-2B list goes to the client, who marks each bill: take credit, not now, or not mine.'] };
-  const MATCHM = { gstin_inv: ['GSTIN + bill no (standard)', 'A bill matches when the supplier GSTIN and bill no are the same and the tax is within ₹10.'],
-    inv_tax: ['Bill no + tax first, then GSTIN', 'First match on bill no and tax amount (within ₹10) even if the GSTIN in books is different or blank — shown as "GSTIN differs". Bills left over are then matched by GSTIN.'] };
   // ===== v34: front view = overview cards (E), workings = 4 steps (D) =====
   const rowNow = () => row;
   const stepOf = k => (((row.reco || {}).steps) || {})[k] || null;
@@ -5510,9 +5518,7 @@ VIEWS.gst = async v => {
       saveText: 'Save', onSave: async el => {
         const vm = ($('[name=rmatch]:checked', el) || {}).value;
         if (vm && vm !== curM) {   // v69
-          const { error } = await safe(sb.rpc('set_reco_match', { p_client: c.id, p_match: vm }));
-          if (error) { toast(/set_reco_match|reco_match/.test(error.message || '') ? 'Run update-reco-match.sql in Supabase first' : friendly(error), true); return false; }
-          c.reco_match = vm; recoHist = null; toast('Matching rule saved');
+          if (!await setRecoMatch(c, vm)) return false; recoHist = null;
         }
         const v = ($('[name=itcm]:checked', el) || {}).value; if (!v || v === cur) { if (vm !== curM) render(); return; }
         const { error } = await safe(sb.rpc('set_itc_method', { p_client: c.id, p_method: v }));
