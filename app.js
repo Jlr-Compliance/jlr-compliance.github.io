@@ -4538,7 +4538,7 @@ const GR = (() => {
     const so = setoff({ ig: out.ig, cg: out.cg, sg: out.sg, cs: out.cs }, credit);
     const cash = fix({ ig: so.cash.ig + rcm.ig, cg: so.cash.cg + rcm.cg, sg: so.cash.sg + rcm.sg, cs: so.cash.cs + rcm.cs });
     const rec = has2b && P.length && method !== '2b_confirm' ? reconcile(P, B, 10, { match: opts.match }) : null;
-    const g1 = m.gstr1 || null, g3 = m.gstr3b || null, checks = [];
+    const g1 = normG1(m.gstr1) || null, g3 = m.gstr3b || null, checks = [];
     const cmp = (label, a, b) => { if (!a || !b) return; const d = r2(tax(a) - tax(b)), dt = r2((a.t || 0) - (b.t || 0)); checks.push({ label, a: fix({ t: a.t || 0, tax: tax(a) }), b: fix({ t: b.t || 0, tax: tax(b) }), dt, d, ok: Math.abs(d) <= 1 && Math.abs(dt) <= 1 }); };
     const t31 = g3 && g3.t31a ? g3.t31a : null;
     if (S.length) { cmp('Books (sales register) vs GSTR-1' + (g1 && g1.source === 'working' ? ' (GSTR-1 copied from working — fetch or type the filed figures to really check)' : ''), out, g1); cmp('Books (sales register) vs GSTR-3B 3.1(a)', out, t31); }
@@ -4573,11 +4573,12 @@ function draft3b(m, sm, client, claim = null) {
   const r2 = GR.r2, Z = () => ({ t: 0, ig: 0, cg: 0, sg: 0, cs: 0 }), H = ['ig', 'cg', 'sg', 'cs'];
   const add = (a, x, s = 1) => { if (x) for (const k in a) a[k] = r2(a[k] + s * (+x[k] || 0)); return a; };
   const w = ((m.reco || {}).w3b) || {}, g = k => ({ ig: +((w[k] || {}).ig) || 0, cg: +((w[k] || {}).cg) || 0, sg: +((w[k] || {}).sg) || 0, cs: +((w[k] || {}).cs) || 0 });
-  const G1f = m.gstr1, a = Z(), b = Z();
+  const G1f = normG1(m.gstr1), a = Z(), b = Z();
   let from = 'sales';
   if (G1f && G1f.secs && G1f.secs.length) {                     // filed, section-wise (fetched from the portal)
     from = 'gstr1';
-    G1f.secs.forEach(s => { if (!s.sign) return; const zr = ['EXP', 'SEZWP', 'SEZWOP'].includes(s.nm); add(zr ? b : a, s, s.sign); });
+    G1f.secs.forEach(s => { if (!s.sign) return; const zr = ['EXP', 'SEZWP', 'SEZWOP'].includes(s.nm) || (s.nm === 'CDNUR' && !(+s.ig || +s.cg || +s.sg));   // v85: tax-free unregistered notes = export notes → 3.1(b)
+      add(zr ? b : a, s, s.sign); });
   } else if (G1f) { from = G1f.source === 'working' ? 'gstr1w' : 'gstr1'; add(a, G1f); }
   else if (m.g1 && (m.g1.sales || []).length && typeof G1 !== 'undefined') {
     const T = G1.summary(m.g1, client).tables, pick = k => T[k] ? { t: T[k].t, ig: T[k].ig, cg: T[k].cg, sg: T[k].sg, cs: T[k].cs } : null;
@@ -5543,7 +5544,7 @@ VIEWS.gst = async v => {
       const sales = ((row.sales || {}).rows || []).length + (((row.g1 || {}).sales) || []).filter(r => Object.keys(r).length).length;
       if (k === 'gstr1' && sales) return toast(`GSTR-1 can't be nil — this month has ${sales} sales line(s). Remove the sales register / GSTR-1 entry rows first.`, true);
       if (k === 'gstr3b') {
-        const salesTax = T(sm.out) || T(row.gstr1), itc2b = T(sm.itc2b), itcB = T(sm.itcBooks), rcm = T(sm.rcm);
+        const salesTax = T(sm.out) || T(normG1(row.gstr1)), itc2b = T(sm.itc2b), itcB = T(sm.itcBooks), rcm = T(sm.rcm);
         if (salesTax || (sales && !nilOf('gstr1'))) return toast(`GSTR-3B can't be nil — there is tax on sales (${gst$(salesTax)}) for this month.`, true);
         if (itc2b || itcB || rcm) return toast(`GSTR-3B can't be nil — ${itc2b ? `GSTR-2B has ITC of ${gst$(itc2b)}` : itcB ? `the purchase register has ITC of ${gst$(itcB)}` : `there is reverse charge of ${gst$(rcm)}`}. File GSTR-3B with the ITC: 3.1 stays zero and the credit goes to the ledger (carried forward). Only GSTR-1 can be nil.`, true);
         if (!row.gstr2b && !confirm(`GSTR-2B is not added for ${REV.mon(period)}.\n\nCheck on the portal that 2B has no ITC (and there is no reverse charge) before marking GSTR-3B as nil.\n\nMark GSTR-3B as NIL?`)) return;
@@ -5621,7 +5622,7 @@ VIEWS.gst = async v => {
   const H5 = ['t', 'ig', 'cg', 'sg', 'cs'];
   const cells = (x, keys = H5) => keys.map(k => `<td class="r">${x && x[k] != null && k in x ? gst$(x[k]) : ''}</td>`).join('');
   function renderG1Filed(o) {
-    const F = row.gstr1, W = row.g1 && (row.g1.sales || []).length ? G1.summary(row.g1, c).tables : null;
+    const F = normG1(row.gstr1), W = row.g1 && (row.g1.sales || []).length ? G1.summary(row.g1, c).tables : null;
     const ROWS = [['b2b', '4A, 4B, 6B, 6C — B2B, SEZ, Deemed exports', ['B2B', 'SEZWP', 'SEZWOP', 'DE'], ['B2B', 'SEZ']], ['b2cl', '5 — B2C (Large) invoices', ['B2CL'], ['B2CL']],
       ['exp', '6A — Exports', ['EXP'], ['EXP']], ['b2cs', '7 — B2C (Others)', ['B2CS'], ['B2CS']], ['cdnr', '9B — Credit / debit notes (registered)', ['CDNR'], ['CDNR'], -1],
       ['cdnur', '9B — Credit / debit notes (unregistered)', ['CDNUR'], ['CDNUR'], -1], ['at', '11A — Tax liability on advances', ['AT'], ['AT']], ['txpd', '11B — Advances adjusted', ['TXPD', 'ATADJ'], ['AT_ADJ'], -1]];
@@ -5636,7 +5637,10 @@ VIEWS.gst = async v => {
       <div class="table-wrap"><table class="gr-t"><thead><tr><th>Table</th><th class="r">Taxable</th><th class="r">IGST</th><th class="r">CGST</th><th class="r">SGST</th><th class="r">Cess</th>${W ? '<th class="r">Our working — tax</th><th class="r">Difference</th>' : ''}</tr></thead><tbody>
         ${ROWS.map(r => { const f = secs ? sumOf(secs, r[2]) : null, wv = wOf(r[3]); if (!f && !wv) return '';
           const d = diff(f, wv); return `<tr><td>${r[1]}${r[4] ? ' <span class="muted small">(less)</span>' : ''}</td>${f ? cells(f) : `<td class="muted small" colspan="5">${secs ? '—' : 'filed figures are totals only'}</td>`}${W ? `<td class="r">${wv ? gst$(gTax(wv)) : '—'}</td><td class="r ${d ? 'late' : ''}">${d != null ? gst$(d) : ''}</td>` : ''}</tr>`; }).join('')}
-        ${secs ? secs.filter(s => !s.sign).map(s => `<tr class="warn-row"><td>${esc(s.nm)} — amendment (check on the portal)</td>${cells(s)}${W ? '<td></td><td></td>' : ''}</tr>`).join('') : ''}
+        ${secs ? secs.filter(s => !s.sign).map(s => { const nm = s.nm, amend = /^(B2BA|B2CLA|B2CSA|EXPA|CDNRA|CDNURA|ATA|TXPDA|SEZWPA|SEZWOPA|DEA|B2BA_4A)$/.test(nm);
+          const lab = nm === 'TTL_LIAB' ? 'Total liability as per the portal (check)' : /^HSN/.test(nm) ? `HSN summary (table 12)${nm === 'HSN_B2B' ? ' — B2B' : nm === 'HSN_B2C' ? ' — B2C' : ''} · info` : nm === 'B2B_4A' ? 'B2B — table 4A part · info' : amend ? `${esc(nm)} — amendment (check on the portal)` : `${esc(nm)} · info`;
+          const ok = nm === 'TTL_LIAB' && fTot ? Math.abs(gTax(s) - gTax(fTot)) < 1 && Math.abs((+s.t || 0) - (+fTot.t || 0)) < 1 : null;
+          return `<tr class="${amend ? 'warn-row' : 'muted'}"><td>${lab}${ok === true ? ' <span class="ok-t small">✓ matches the total below</span>' : ok === false ? ' <span class="late small">differs from the total below</span>' : ''}</td>${cells(s)}${W ? '<td></td><td></td>' : ''}</tr>`; }).join('') : ''}
         <tr class="tot"><td><b>Total liability (net of notes)</b></td>${fTot ? cells(fTot) : '<td class="muted small" colspan="5">Not added</td>'}${W ? `<td class="r"><b>${gst$(gTax(wTot))}</b></td><td class="r ${diff(fTot, wTot) ? 'late' : ''}"><b>${fTot ? gst$(diff(fTot, wTot)) : ''}</b></td>` : ''}</tr>
       </tbody></table></div>
       <p class="muted small">${secs ? 'Section-wise figures as fetched from the GST portal.' : F ? 'Only totals were entered — fetch from the portal to see it table-wise.' : 'Fetch the filed GSTR-1 from the portal (client OTP), copy our working, or type the totals.'} “Our working” is the Sales register (GSTR-1 entry) tab.</p>`;
@@ -6275,6 +6279,15 @@ VIEWS.gst = async v => {
 
 // ----- GST portal fetch (OTP) through the "gst-data" server function -----
 // GSTR-1 summary from the portal (GSTN RETSUM: sec_sum[] with ttl_tax = taxable, ttl_igst …). Notes and adjusted advances reduce, amendments are shown but not added.
+// v85: the portal's sec_sum gives credit / debit notes (CDNR, CDNUR) and advances adjusted as signed net figures (debit − credit, usually negative).
+// The tracker keeps those "less" sections as positive amounts that are subtracted; normG1 converts once (norm: 1) and recomputes the totals.
+function normG1(F) {
+  if (!F || !Array.isArray(F.secs) || F.norm) return F;
+  const H = ['t', 'ig', 'cg', 'sg', 'cs'], r2 = GR.r2;
+  const secs = F.secs.map(s => s.sign === -1 ? { ...s, ...Object.fromEntries(H.map(k => [k, r2(-(+s[k] || 0))])) } : s);
+  const tot = Object.fromEntries(H.map(k => [k, 0])); secs.forEach(s => { if (s.sign) H.forEach(k => { tot[k] = r2(tot[k] + s.sign * (+s[k] || 0)); }); });
+  return { ...F, ...tot, secs, norm: 1 };
+}
 function gstr1FromApi(j) {
   let d = j; for (let k = 0; k < 3 && d && !d.sec_sum && d.data; k++) d = d.data;
   if (!d || !Array.isArray(d.sec_sum)) return null;
@@ -6285,9 +6298,9 @@ function gstr1FromApi(j) {
     if (!v.t && !v.ig && !v.cg && !v.sg && !v.cs) return;
     const sign = ADD.includes(nm) ? 1 : SUB.includes(nm) ? -1 : 0;
     secs.push({ nm, n: s.ttl_rec || s.ttl_doc || '', ...v, sign });
-    if (sign) for (const k in tot) tot[k] = GR.r2(tot[k] + sign * v[k]);
   });
-  return { tot, secs, period: d.ret_period || '' };
+  const N = normG1({ secs });
+  return { tot: { t: N.t, ig: N.ig, cg: N.cg, sg: N.sg, cs: N.cs }, secs: N.secs, period: d.ret_period || '' };
 }
 /* v55 JLR GST helper (Chrome add-on): staff log in to the GST portal themselves (password + captcha), the add-on sends the data here — no client OTP */
 const GSTH_ZIP = 'addon/jlr-gst-helper.zip';
@@ -6359,7 +6372,7 @@ async function gsthBox(el, c, month, onData) {
       if (k === 'gstr2b') { const p = GR.parse2BJson(d.data); if (p.error) { msg(`<span class="late">${esc(p.error)}</span>`); return; }
         await onData({ gstr2b: { rows: p.rows, source: 'portal', at, by: me.id } }); msg(`<span class="ok-t">GSTR-2B saved — ${p.rows.length} documents.</span>`); }
       if (k === 'gstr1') { const g = gstr1FromApi(d.data); if (!g) { msg('<span class="late">GSTR-1 summary is empty for this month (not filed yet?)</span>'); return; }
-        await onData({ gstr1: { ...g.tot, secs: g.secs, source: 'portal', at, by: me.id } }); msg('<span class="ok-t">Filed GSTR-1 totals saved.</span>'); }
+        await onData({ gstr1: { ...g.tot, secs: g.secs, norm: 1, source: 'portal', at, by: me.id } }); msg('<span class="ok-t">Filed GSTR-1 totals saved.</span>'); }
       if (k === 'gstr3b') { const g = gstr3bFromApi(d.data); if (!g) { msg('<span class="late">No 3B figures in this copy.</span>'); return; }
         await onData({ gstr3b: { ...g, source: 'portal', at, by: me.id } }); msg('<span class="ok-t">Filed GSTR-3B figures saved.</span>'); }
       if (k === 'gstr2a' || k === 'gstr1_b2b') { const blob = new Blob([JSON.stringify(d.data, null, 1)], { type: 'application/json' }), a = document.createElement('a');
@@ -6509,7 +6522,7 @@ async function gstPortalFetch(c, month, onData, only = '') {
           ${g.secs.map(s => `<tr><td>${esc(s.nm)}</td><td class="r">${esc(String(s.n))}</td><td class="r">${gst$(s.t)}</td><td class="r">${gst$(s.ig)}</td><td class="r">${gst$(s.cg)}</td><td class="r">${gst$(s.sg)}</td><td class="r">${gst$(s.cs)}</td><td class="small muted">${s.sign > 0 ? 'added' : s.sign < 0 ? 'less' : 'not added (amendment) — check'}</td></tr>`).join('')}
           <tr class="tot"><td><b>Total</b></td><td></td>${['t', 'ig', 'cg', 'sg', 'cs'].map(k => `<td class="r"><b>${gst$(g.tot[k])}</b></td>`).join('')}<td></td></tr></tbody></table></div>
           <div class="toolbar" style="margin-top:8px"><button class="btn primary" data-f1save>Save as filed GSTR-1</button></div>`);
-        $('[data-f1save]', box).onclick = async () => { await onData({ gstr1: { ...g.tot, secs: g.secs, source: 'api', at: new Date().toISOString(), by: me.id } }); msg('<span class="ok-t">Filed GSTR-1 totals saved.</span>'); };
+        $('[data-f1save]', box).onclick = async () => { await onData({ gstr1: { ...g.tot, secs: g.secs, norm: 1, source: 'api', at: new Date().toISOString(), by: me.id } }); msg('<span class="ok-t">Filed GSTR-1 totals saved.</span>'); };
       }
       if ('f3b' in b.dataset) { msg('Fetching GSTR-3B…'); const r = await fnCall('gst-data', 'fetch_3b', { client_id: c.id, year: yy, month: mm });
         const g = gstr3bFromApi(r.data); if (!g) { msg(`<span class="late">${esc(r.message || 'GSTR-3B not available for this month (not filed yet?)')}</span>`); return; }
@@ -7286,7 +7299,7 @@ async function fillGstWorkings(XP, templateBytes, data) {
         ig: Math.abs(s.ig), cg: Math.abs(s.cg), sg: Math.abs(s.sg), te: 'Taxable', tms: '', rc: 'No', reg: s.g ? 'Registered' : 'Unregistered',
         sales: s.cn ? 'Sales Return' : 'Sales', doc: s.cn ? 'Credit Note' : 'Invoice', st: s.g ? 'B2B' : 'B2C', signedTx: s.t }));
     } else if (m.gstr1) {                                          // v77: no invoice lines — only the filed GSTR-1 totals (fetched / typed): one line per portal table
-      const F = m.gstr1, secs = (F.secs || []).filter(x => x.sign && (x.t || x.ig || x.cg || x.sg));
+      const F = normG1(m.gstr1), secs = (F.secs || []).filter(x => x.sign && (x.t || x.ig || x.cg || x.sg));
       const NAME = { B2B: 'B2B invoices', B2CL: 'B2C large', B2CS: 'B2C others', EXP: 'Exports', SEZWP: 'SEZ with payment', SEZWOP: 'SEZ without payment', DE: 'Deemed exports', AT: 'Advances received', CDNR: 'Credit / debit notes (registered)', CDNUR: 'Credit / debit notes (unregistered)', ATADJ: 'Advances adjusted', TXPD: 'Advances adjusted' };
       const src = F.source === 'api' || secs.length ? 'filed GSTR-1, portal' : F.source === 'working' ? 'filed GSTR-1, as per working' : 'filed GSTR-1, typed';
       const one = (nm, x, sign) => ({ no: `${NAME[nm] || nm || 'Outward supplies'} — total (${src})${x.n ? ` · ${x.n} doc${x.n > 1 ? 's' : ''}` : ''}`, d: null, gstin: '', name: '', hsn: '', qty: null, uqc: '', pos: '',
@@ -7481,7 +7494,7 @@ const REV = (() => {
     const brief = x => { const d = x.b || x.x; return [d.n || '', d.g || '', d.i || '', tx(x.b || null) || null, tx(x.x || null) || null]; };
     return {
       client: c.name, gstin: c.gstin, period, prepared_by: me.full_name || me.email, at: new Date().toISOString(), method: (c.itc_method || 'books_2b'),
-      g1, g1_total: row5('Total liability (net of notes)', g1tot), g1_from: W ? 'GSTR-1 entry (our working)' : 'sales register', g1_filed: row.gstr1 ? row5('Filed GSTR-1 (' + (row.gstr1.source === 'api' ? 'portal' : row.gstr1.source === 'working' ? 'copied from working' : 'typed') + ')', row.gstr1) : null,
+      g1, g1_total: row5('Total liability (net of notes)', g1tot), g1_from: W ? 'GSTR-1 entry (our working)' : 'sales register', g1_filed: row.gstr1 ? row5('Filed GSTR-1 (' + (row.gstr1.source === 'api' ? 'portal' : row.gstr1.source === 'working' ? 'copied from working' : 'typed') + ')', normG1(row.gstr1)) : null,
       b31: [row5('(a) Outward taxable', D3.a), row5('(b) Zero rated', D3.b), row5('(c) Nil / exempt', D3.c), row5('(d) Inward — reverse charge', D3.d), row5('(e) Non-GST', D3.e)],
       b4: [row5('(A)(1) Import of goods', D3.imp), row5('(A)(3) Reverse charge', D3.d), row5('(A)(4) ISD', D3.isd), row5('(A)(5) All other ITC', D3.a5), row5('(B)(1) Reversed — rules 38/42/43, 17(5)', D3.B1),
         row5('(B)(2) Reversed — temporary', D3.B2), row5('(C) Net ITC', D3.C), row5('(D)(2) Not available in 2B (info)', D3.D2)],
@@ -7630,7 +7643,7 @@ const REV = (() => {
 })();
 
 // v78: this tab's code version — when a newer app is uploaded, offer Reload and block mails from old code
-const APP_VER = 'jlr-shell-v84';
+const APP_VER = 'jlr-shell-v85';
 let appStale = false;
 async function checkAppVer() {
   try { const t = await fetch('sw.js?v=' + Date.now(), { cache: 'no-store' }).then(r => r.text()); const live = (t.match(/jlr-shell-v\d+/) || [])[0];
