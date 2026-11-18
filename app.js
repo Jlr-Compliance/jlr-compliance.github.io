@@ -7082,6 +7082,52 @@ async function fillGstWorkings(XP, templateBytes, data) {
     set(ns, `D${row}`, n.status === 'Hearing' ? `Hearing${n.hearing_date ? ' on ' + n.hearing_date.split('-').reverse().join('-') : ''}` : n.status);
   });
 
+  // ---------- v71: the copy that goes to the senior / client — current month only, invoice-wise breakup, no Home / Reconciliation ----------
+  if (data.send) {
+    const sel = months.find(m => monthName(m.period) === data.month), i0 = GW_MONTHS.indexOf(data.month), yr = i0 >= 9 ? fyStart + 1 : fyStart;
+    const sm = wb.sheet('Summary(1&3B)');                                          // Name / GSTIN / FY were formulas on Home
+    sm.cell('B1').value(data.client.name || ''); sm.cell('B2').value(data.client.gstin || ''); sm.cell('B4').value(data.fy);
+    // MonthlyInputs: keep only this month, in column C (Summary finds the month by name in C3:N3)
+    for (let rr = 3; rr <= 74; rr++) {
+      const v = i0 >= 0 ? mi.cell(`${col(i0)}${rr}`).value() : undefined;
+      mi.cell(`C${rr}`).value(rr === 3 ? data.month : v);
+      for (let k = 1; k < 12; k++) mi.cell(`${col(k)}${rr}`).value(undefined);
+    }
+    mi.cell('A1').value(`MONTHLY INPUTS – ${data.month} ${yr}`);
+    mi.cell('A2').value(`Figures for ${data.month} ${yr} only. The invoice-wise breakup of each figure is below.`);
+    // invoice-wise breakup under the inputs
+    const B = GR.mergeDocs((sel && sel.gstr2b && sel.gstr2b.rows) || []), P = GR.mergeDocs(((sel && sel.purchases && sel.purchases.rows) || []).filter(x => !x.rc));
+    const isCdn = x => /CDN/.test(x.src || ''), isImp = x => /IMP/.test(x.src || ''), A = v => r2(Math.abs(v || 0));
+    const groups = [
+      ['Actual 2B – invoices (rows 11–13, 43–46)', B.filter(x => !isCdn(x) && !isImp(x) && !x.na && !x.rc)],
+      ['Debit notes in 2B (rows 14–16, 62–65)', B.filter(x => isCdn(x) && !x.cn && !x.na)],
+      ['Credit notes in 2B (rows 32–34, 58–61)', B.filter(x => isCdn(x) && x.cn && !x.na)],
+      ['Import of goods – IMPG (rows 20–22, 47–50)', B.filter(x => isImp(x))],
+      ['Ineligible – ITC not available (rows 23–25)', B.filter(x => x.na)],
+      ['Reverse charge in 2B (rows 29–31, 5)', B.filter(x => x.rc && !x.na)],
+      ['As per workings – purchase register (rows 35–37) – credit notes shown minus', P, true]];
+    const hd = mi.cell('A4')._styleId, th = mi.cell('A3')._styleId, bold = (a, b) => { for (let k = a.charCodeAt(0); k <= b.charCodeAt(0); k++) mi.cell(`${String.fromCharCode(k)}${rr}`)._styleId = th; };   // template's own heading styles (no new styles)
+    let rr = 77;
+    mi.cell(`A${rr}`).value(`INVOICE-WISE BREAKUP – ${data.month} ${yr}`)._styleId = hd; rr += 1;
+    const head = ['Supplier name', 'GSTIN', 'Invoice / note no', 'Date', 'Type', 'Taxable', 'IGST', 'CGST', 'SGST', 'Cess', 'Total tax'];
+    for (const [title, docs, signed] of groups) {
+      if (!docs.length) continue;
+      rr += 1; mi.cell(`A${rr}`).value(`${title} – ${docs.length} document${docs.length > 1 ? 's' : ''}`)._styleId = hd; rr += 1;
+      head.forEach((h, k) => mi.cell(`${String.fromCharCode(65 + k)}${rr}`).value(h)); bold('A', 'K'); rr += 1;
+      const tot = { t: 0, ig: 0, cg: 0, sg: 0, cs: 0 };
+      const rows = docs.slice().sort((a, b) => (!a.n - !b.n) || String(a.n || '').localeCompare(String(b.n || '')) || String(a.d || '').localeCompare(String(b.d || ''))).map(x => {
+        const v = signed ? { t: r2(x.t), ig: r2(x.ig), cg: r2(x.cg), sg: r2(x.sg), cs: r2(x.cs) } : { t: A(x.t), ig: A(x.ig), cg: A(x.cg), sg: A(x.sg), cs: A(x.cs) }; Object.keys(tot).forEach(k => tot[k] += v[k]);
+        return [x.n || '', x.g || '', x.i || '', x.d ? String(x.d).split('-').reverse().join('-') : '', GR.docWord(x), v.t, v.ig, v.cg, v.sg, v.cs, r2(v.ig + v.cg + v.sg + v.cs)]; });
+      mi.cell(`A${rr}`).value(rows); rr += rows.length;
+      mi.cell(`A${rr}`).value([['Total', '', '', '', '', r2(tot.t), r2(tot.ig), r2(tot.cg), r2(tot.sg), r2(tot.cs), r2(tot.ig + tot.cg + tot.sg + tot.cs)]]);
+      bold('A', 'K'); rr += 1;
+    }
+    if (!B.length && !P.length) mi.cell(`A${rr + 1}`).value('No GSTR-2B or purchase register saved for this month.');
+    // sheets not sent (Reconciliation will be added back later)
+    wb.activeSheet('Summary(1&3B)');
+    ['Home', 'Reconciliation'].forEach(n => { if (wb.sheet(n)) wb.deleteSheet(n); });
+  }
+
   // Excel recalculates every formula when the file is opened
   const calc = wb._node.children.find(c => c.name === 'calcPr');
   if (calc) calc.attributes.fullCalcOnLoad = '1'; else wb._node.children.push({ name: 'calcPr', attributes: { fullCalcOnLoad: '1' }, children: [] });
@@ -7201,7 +7247,7 @@ const REV = (() => {
     const months = (gm.data || []).map(r => ({ period: r.period, g1: r.g1, sales: r.sales, purchases: r.purchases, gstr2b: r.gstr2b, gstr3b: r.gstr3b, status: r.status }));
     const sel = (gm.data || []).find(r => r.period === period);
     const out = await fillGstWorkings(XP, new Uint8Array(tpl), { client: { name: c.name, gstin: c.gstin, trade: c.trade_name || '' }, fy, month: GW_MONTHS[(m + 8) % 12], months, notices: [], g1tasks: [],
-      preparedBy: me.full_name || me.email, verifiedBy: sel && sel.verified_by ? profName(sel.verified_by) : '' });
+      preparedBy: me.full_name || me.email, verifiedBy: sel && sel.verified_by ? profName(sel.verified_by) : '', send: true });
     return { blob: new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), name: `GST Workings - ${c.name} - FY ${fy}.xlsx` };
   }
   // ===== v36: two rounds a month — GSTR-1 (before the 11th) and GSTR-3B (after 2B) =====
