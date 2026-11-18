@@ -6895,6 +6895,7 @@ const SALESIN = (() => {
    GSTR-1 ENTRY (tab inside GST review)
    ===================================================================== */
 const g1Drafts = {};
+const g1Flt = {};   // v83: GSTR-1 entry filters per tab (sales / amend / adv)
 // v70: undo for GSTR-1 entry edits not yet saved — one step per burst of typing / paste / upload / row delete
 const G1U = {
   snap: D => JSON.stringify({ sales: D.sales, amend: D.amend, adv: D.adv, docs: D.docs }),
@@ -7006,11 +7007,31 @@ function renderG1(o, { client: c, getRow, save, filed = null, mode = 'work' }) {
         : tab === 'amend' ? 'Corrections to invoices / notes reported in an EARLIER month. Enter the full corrected values (not the difference).'
         : 'Amount = advance EXCLUDING GST. 11A = received, invoice not yet issued · 11B = adjusted against an invoice this month.'}
       <b>Tip:</b> copy rows from Excel and paste into the first cell — they fill across.</p>
+      <div class="toolbar g1-fbar" style="margin:0 0 6px"><span class="small" data-g1fc></span><button class="link small" data-g1fclr hidden>Clear filters</button></div>
       <div class="table-wrap g1-wrap"><table class="g1-grid"><thead><tr><th>#</th>${cols.map(([, l, , w]) => `<th style="min-width:${w}px">${esc(l)}</th>`).join('')}
-        ${AUTO[tab].map(([, l]) => `<th class="g1-auto">${esc(l)}</th>`).join('')}<th class="g1-auto">Check</th><th></th></tr></thead>
+        ${AUTO[tab].map(([, l]) => `<th class="g1-auto">${esc(l)}</th>`).join('')}<th class="g1-auto">Check</th><th></th></tr>
+        <tr class="g1-flt"><th></th>${cols.map(([k]) => `<th><input data-flt="${k}" value="${esc(((g1Flt[tab] || {})[k]) || '')}" placeholder="Filter…" aria-label="Filter ${esc(k)}" style="width:100%;min-width:0;font-size:12px;padding:3px 5px"></th>`).join('')}
+        ${AUTO[tab].map(() => '<th></th>').join('')}<th><select data-flt="_chk" aria-label="Filter by check" style="font-size:12px;padding:2px"><option value="">All</option><option value="err" ${((g1Flt[tab] || {})._chk) === 'err' ? 'selected' : ''}>Errors</option><option value="ok" ${((g1Flt[tab] || {})._chk) === 'ok' ? 'selected' : ''}>OK</option></select></th><th></th></tr></thead>
       <tbody>${rows.map((r, i) => `<tr data-row="${i}"><td class="muted small">${i + 1}</td>${cols.map(col => `<td>${cellHtml(col, r[col[0]], i)}</td>`).join('')}${autoCells(tab, C[i] && C[i].x)}
         <td><button class="link small danger-t" data-g1del="${i}" title="Remove row" aria-label="Remove row">×</button></td></tr>`).join('')}</tbody></table></div>
       <div class="toolbar" style="margin-top:8px"><button class="btn sm" data-g1add>+ 20 rows</button><span class="muted small">Blank rows are ignored.</span></div>`;
+    applyFlt(tab);
+  }
+  // v83: filters in the GSTR-1 entry sheet — one box per column (contains, any case; dates also as dd-mm-yyyy) + Check: Errors / OK. Rows are only hidden; their numbers stay.
+  function applyFlt(tab) {
+    const F = g1Flt[tab] || {}, keys = Object.keys(F).filter(k => String(F[k]).trim()), C = keys.includes('_chk') ? calc()[tab] : null;
+    const show = (r, i) => keys.every(k => {
+      if (k === '_chk') { const x = C && C[i] && C[i].x; if (!x) return false; return F._chk === 'err' ? !x.ok : x.ok; }
+      const v = r[k]; if (v == null || v === '') return false;
+      const sv = String(v).toLowerCase(), q = String(F[k]).trim().toLowerCase(), dmy = /^\d{4}-\d{2}-\d{2}$/.test(sv) ? sv.split('-').reverse().join('-') : '';
+      return sv.includes(q) || (dmy && dmy.includes(q));
+    });
+    let n = 0, tot = 0;
+    $$('tbody tr[data-row]', body).forEach(tr => { const i = +tr.dataset.row, r = D[tab][i] || {}, blank = !Object.keys(r).length; if (!blank) tot++;
+      const vis = !keys.length || (!blank && show(r, i)); tr.hidden = !vis; if (vis && !blank) n++; });
+    const fc = $('[data-g1fc]', body), clr = $('[data-g1fclr]', body);
+    if (fc) fc.textContent = keys.length ? `Showing ${n} of ${tot} rows` : '';
+    if (clr) clr.hidden = !keys.length;
   }
   let t;
   const refreshAuto = tab => {
@@ -7018,7 +7039,7 @@ function renderG1(o, { client: c, getRow, save, filed = null, mode = 'work' }) {
       const C = calc()[tab];
       $$('tbody tr', body).forEach(tr => { const i = +tr.dataset.row; const cells = $$('.g1-auto', tr); const tmp = document.createElement('tr'); tmp.innerHTML = autoCells(tab, C[i] && C[i].x);
         $$('td', tmp).forEach((td, j) => { if (cells[j]) { cells[j].className = td.className; cells[j].textContent = td.textContent; } }); });
-      status();
+      status(); if (Object.keys(g1Flt[tab] || {}).length) applyFlt(tab);
     }, 250);
   };
   const setVal = (tab, i, k, v) => {
@@ -7033,8 +7054,8 @@ function renderG1(o, { client: c, getRow, save, filed = null, mode = 'work' }) {
     while (D[tab].length <= i) D[tab].push({});
     if (x === '' || x == null) delete D[tab][i][k]; else D[tab][i][k] = x;
   };
-  body.addEventListener('input', e => { const el = e.target; if (!el.dataset.k) return; setVal(g1Tab, +el.dataset.r, el.dataset.k, el.value); dirty(); refreshAuto(g1Tab); });
-  body.addEventListener('change', e => { const el = e.target; if (!el.dataset.k) return; setVal(g1Tab, +el.dataset.r, el.dataset.k, el.value); if (el.classList.contains('up')) el.value = el.value.toUpperCase(); dirty(); refreshAuto(g1Tab); });
+  body.addEventListener('input', e => { const el = e.target; if (el.dataset && el.dataset.flt) { (g1Flt[g1Tab] = g1Flt[g1Tab] || {})[el.dataset.flt] = el.value; applyFlt(g1Tab); return; } if (!el.dataset.k) return; setVal(g1Tab, +el.dataset.r, el.dataset.k, el.value); dirty(); refreshAuto(g1Tab); });
+  body.addEventListener('change', e => { const el = e.target; if (el.dataset && el.dataset.flt) { (g1Flt[g1Tab] = g1Flt[g1Tab] || {})[el.dataset.flt] = el.value; applyFlt(g1Tab); return; } if (!el.dataset.k) return; setVal(g1Tab, +el.dataset.r, el.dataset.k, el.value); if (el.classList.contains('up')) el.value = el.value.toUpperCase(); dirty(); refreshAuto(g1Tab); });
   body.addEventListener('paste', e => {
     const el = e.target; if (!el.dataset || !el.dataset.k || !COLS[g1Tab]) return;
     const text = (e.clipboardData || window.clipboardData).getData('text');
@@ -7106,6 +7127,7 @@ function renderG1(o, { client: c, getRow, save, filed = null, mode = 'work' }) {
     const b = e.target.closest('button'); if (!b) return; const d = b.dataset;
     if (d.g1t) { g1Tab = d.g1t; $$('[data-g1t]', o).forEach(x => x.classList.toggle('on', x === b)); draw(); }
     if ('g1undo' in d) { if (G1U.undo(D)) { draw(); toast('Undone'); } return; }   // v70
+    if ('g1fclr' in d) { g1Flt[g1Tab] = {}; draw(); return; }   // v83
     if (d.g1add) { for (let i = 0; i < 20; i++) D[g1Tab].push({}); drawGrid(g1Tab); }
     if (d.g1del != null) { D[g1Tab].splice(+d.g1del, 1); dirty(); drawGrid(g1Tab); }
     if ('g1dl' in d) { const a = document.createElement('a'); a.href = 'gstr1-entry-template.xlsx'; a.download = `GSTR1-entry-${slug(c.name)}-${row.period.slice(0, 7)}.xlsx`; document.body.appendChild(a); a.click(); a.remove(); }
@@ -7574,7 +7596,7 @@ const REV = (() => {
 })();
 
 // v78: this tab's code version — when a newer app is uploaded, offer Reload and block mails from old code
-const APP_VER = 'jlr-shell-v82';
+const APP_VER = 'jlr-shell-v83';
 let appStale = false;
 async function checkAppVer() {
   try { const t = await fetch('sw.js?v=' + Date.now(), { cache: 'no-store' }).then(r => r.text()); const live = (t.match(/jlr-shell-v\d+/) || [])[0];
