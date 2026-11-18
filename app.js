@@ -4309,16 +4309,19 @@ const GR = (() => {
   // v61: the supplier's own invoice no / date (needed to match 2B) win over our voucher no / date when both are there
   const PREF = { i: ['vendor ref', 'vendor ref no', 'vendor invoice no', 'vendor inv no', 'supplier invoice no', 'supplier inv no', 'supplier ref', 'party invoice no', 'party inv no', 'party bill no', 'party ref no'],
     d: ['vendor ref date', 'vendor invoice date', 'vendor inv date', 'supplier invoice date', 'supplier inv date', 'party invoice date', 'party bill date'] };
+  // v68: a rate / % column ("CGSTRATE", "CGST %", "IGST Rate") is never a tax-amount or taxable-value column
+  const RATE_COL = /rate(?![a-z])|%|percent|\bpct\b/i, AMT_KEYS = new Set(['ig', 'cg', 'sg', 'cs', 't', 'v', 'nt']);
   function mapHeader(cells) {
-    const h = cells.map(H), used = new Set(), map = {};
+    const h = cells.map(H), raw = cells.map(c => String(c ?? '')), used = new Set(), map = {};
+    const ok = (k, j) => !used.has(j) && !(AMT_KEYS.has(k) && RATE_COL.test(raw[j]));
     for (const [k, list] of Object.entries(PREF)) { const ix = h.findIndex((x, j) => !used.has(j) && list.includes(x)); if (ix >= 0) { map[k] = ix; used.add(ix); } }
     for (const [k, ex, cont] of FIELDS) {
       if (map[k] != null) continue;
-      let ix = h.findIndex((x, j) => !used.has(j) && ex.includes(x));
-      if (ix < 0) ix = h.findIndex((x, j) => !used.has(j) && x && cont.some(w => x.includes(w)));
+      let ix = h.findIndex((x, j) => ok(k, j) && ex.includes(x));
+      if (ix < 0) ix = h.findIndex((x, j) => ok(k, j) && x && cont.some(w => x.includes(w)));
       if (ix >= 0) { map[k] = ix; used.add(ix); }
     }
-    if (map.t == null) { const ix = h.findIndex((x, j) => !used.has(j) && x === 'value'); if (ix >= 0) { map.t = ix; used.add(ix); } }
+    if (map.t == null) { const ix = h.findIndex((x, j) => ok('t', j) && x === 'value'); if (ix >= 0) { map.t = ix; used.add(ix); } }
     return map;
   }
   const score = m => (m.t != null) * 3 + (m.i != null) * 2 + ['ig', 'cg', 'sg', 'g', 'd'].filter(k => m[k] != null).length;
