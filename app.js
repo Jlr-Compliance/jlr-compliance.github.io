@@ -7223,7 +7223,8 @@ async function fillGstWorkings(XP, templateBytes, data) {
     if (!B.length && !P.length) mi.cell(`A${rr + 1}`).value('No GSTR-2B or purchase register saved for this month.');
     // sheets not sent (Reconciliation will be added back later)
     wb.activeSheet('Summary(1&3B)');
-    ['Home', 'Reconciliation'].forEach(n => { if (wb.sheet(n)) wb.deleteSheet(n); });
+    // v78: also ReadMe, GSTR-9 (Coming Soon) and Macro Code are not sent
+    wb.sheets().map(x => x.name()).filter(n => /^(Home|Reconciliation|ReadMe|Read Me|Macro Code)$/i.test(n) || /^GSTR-?9/i.test(n)).forEach(n => wb.deleteSheet(n));
   }
 
   // Excel recalculates every formula when the file is opened
@@ -7387,6 +7388,7 @@ const REV = (() => {
     : [['Tax on sales', inr(S.tax_sales)], ['Net ITC', inr(S.net_itc)], ['Cash to deposit', inr(S.cash)], ...(S.itc ? [['ITC in 2B / claimed / held back', `${inr(S.itc.in2b)} / ${inr(S.itc.claim)} / ${inr(S.itc.held)}`]] : [])];
   const sigHtml = () => `<!--SIG--><div style="color:#444">${signature().split('\n').map(htmlEsc).join('<br>')}</div><!--/SIG-->`;
   async function send({ kind = 'gstr3b', c, period, row, sm, st, D3, rev }) {
+    await freshOrStop();
     const sr = senior();
     if (!sr || !sr.email) throw new Error('Choose the senior first: Settings → Senior verification & filing mails');
     const K = KIND[kind], S = { ...summary({ c, period, row, sm, st, D3 }), kind }, fl = await files(c, period, S, kind, rev);
@@ -7421,6 +7423,7 @@ const REV = (() => {
     return blob ? [{ name: `${KIND[kind].label} ${mon(period)} acknowledgement${a.arn ? ' ' + a.arn : ''}.pdf`.replace(/[\\/:*?"<>|]+/g, '-'), mime: 'application/pdf', b64: await b64(blob) }] : [];
   }
   async function toClient({ kind = 'gstr3b', c, period, row, sm, st, D3, rev, only, auto }) {
+    await freshOrStop();
     const K = KIND[kind], to = String(c.email || '').split(/[,;\s]+/).filter(Boolean).join(',');
     if (!to) throw new Error(`${c.name} has no email address — add it on the client first`);
     const S = rev && rev.summary && ['approved', 'sent_client'].includes(rev.state) ? { ...rev.summary, kind } : { ...summary({ c, period, row, sm, st, D3 }), kind }, acks = await ackFiles(c, period, only, kind);
@@ -7436,6 +7439,22 @@ const REV = (() => {
   }
   return { STATE, KIND, KINDS, kindOf, summary, pdf, excel, files, load, send, toClient, setDraft, clearDraft, senior, mon, monShort, rand, sha };
 })();
+
+// v78: this tab's code version — when a newer app is uploaded, offer Reload and block mails from old code
+const APP_VER = 'jlr-shell-v78';
+let appStale = false;
+async function checkAppVer() {
+  try { const t = await fetch('sw.js?v=' + Date.now(), { cache: 'no-store' }).then(r => r.text()); const live = (t.match(/jlr-shell-v\d+/) || [])[0];
+    if (live && live !== APP_VER && !appStale) { appStale = true;
+      const b = document.createElement('div'); b.id = 'appStale'; b.setAttribute('role', 'alert');
+      b.style.cssText = 'position:fixed;left:50%;transform:translateX(-50%);bottom:18px;z-index:9999;background:#1f2937;color:#fff;padding:10px 14px;border-radius:10px;box-shadow:0 6px 24px rgba(0,0,0,.3);font-size:14px;display:flex;gap:12px;align-items:center';
+      b.innerHTML = 'A new version of the tracker is available. <button class="btn sm primary" type="button">Reload now</button>';
+      b.querySelector('button').onclick = () => location.reload(); document.body.appendChild(b); }
+    return !appStale;
+  } catch (e) { return true; }
+}
+setInterval(checkAppVer, 5 * 60 * 1000); addEventListener('focus', () => { checkAppVer(); });
+const freshOrStop = async () => { if (await checkAppVer()) return; throw new Error('A newer version of the tracker was uploaded — click "Reload now" (or press Ctrl+Shift+R), then send again'); };
 
 // after an acknowledgement is saved: send that return's workings + acknowledgement to the client when switched on and approved
 async function autoSendAfterAck(task, file) {
