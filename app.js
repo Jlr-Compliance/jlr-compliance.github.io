@@ -4416,6 +4416,9 @@ const GR = (() => {
     use('cg', 'cg'); use('cg', 'ig'); use('sg', 'sg'); use('sg', 'ig'); use('cs', 'cs');
     return { cash: fix(L), balance: fix(C), used: Object.fromEntries(Object.entries(used).map(([k, v]) => [k, fix(v)])) };
   }
+  // v86: the key a decision / client answer is saved under. A document with no bill no (e.g. a reconciliation sheet pasted as 2B)
+  // gets date + tax in its key, so two bills of one supplier no longer share one decision.
+  const docKey = d => { const g = (d && d.g) || '', i = normInv(d && d.i); return i ? `${g}|${i}` : `${g}|~${(d && d.d) || ''}~${Math.round(Math.abs(tax(d || {})) * 100)}`; };
   // ---------- 2B vs books ----------
   // one line per document (registers and portal Excel often have one line per item / tax rate)
   function mergeDocs(rows) {
@@ -4460,7 +4463,7 @@ const GR = (() => {
       });
       pre.used = used; books = left;
     }
-    const kinds = [['exact', r => r.g + '|' + normInv(r.i)], ['clean', r => r.g + '|' + cleanInv(r.i)], ['loose', r => digits(r.i) ? r.g + '|' + digits(r.i) : '']];
+    const kinds = [['exact', r => normInv(r.i) ? r.g + '|' + normInv(r.i) : ''], ['clean', r => cleanInv(r.i) ? r.g + '|' + cleanInv(r.i) : ''], ['loose', r => digits(r.i) ? r.g + '|' + digits(r.i) : '']];
     const idx = kinds.map(() => new Map());
     b2.forEach((r, j) => { if (r.src && /IMP/.test(r.src)) return; kinds.forEach(([, f], n) => { const k = f(r); if (k && !idx[n].has(k + (r.cn ? '|C' : ''))) idx[n].set(k + (r.cn ? '|C' : ''), j); }); });
     const hit = new Set(pre.used || []), out = [], close = (b, x) => Math.abs(r2(tax(b) - tax(x))) <= tol;   // v65: only the tax amount decides a match — taxable value is not compared
@@ -4525,8 +4528,8 @@ const GR = (() => {
     if (method === 'books' && P.length) { itcBase = itcBooks; itcFrom = 'books'; }
     if (method === '2b_confirm' && has2b) {
       const docs = mergeDocs(B.filter(r => !r.na && !r.rc));
-      const ok = docs.filter(r => /IMP|ISD/.test(r.src || '') || ANS_TAKE.includes(effA(m.reco, r.g + '|' + normInv(r.i))));
-      waiting = docs.filter(r => !/IMP|ISD/.test(r.src || '') && !effA(m.reco, r.g + '|' + normInv(r.i))).length;
+      const ok = docs.filter(r => /IMP|ISD/.test(r.src || '') || ANS_TAKE.includes(effA(m.reco, docKey(r))));
+      waiting = docs.filter(r => !/IMP|ISD/.test(r.src || '') && !effA(m.reco, docKey(r))).length;
       itcBase = fix(sum(ok)); itcFrom = 'confirmed';
     }
     // v79: RCM = 2B RCM + books RCM from unregistered / foreign suppliers (never in 2B) + typed in GSTR-3B workings (reco.w3b.rcm_add)
@@ -4564,7 +4567,7 @@ const GR = (() => {
     if (/B2BA/.test(s)) return 'B2B-A';
     return 'B2B';
   }
-  return { amt, normInv, cleanInv, panOf, digits, toDate, mapHeader, parseTable, parse2BJson, mergeDocs, setoff, reconcile, summarise, effA, ANS_TAKE, tax, gstinOk, r2, typeOf, docWord, impHeld };
+  return { amt, normInv, cleanInv, panOf, digits, toDate, mapHeader, parseTable, parse2BJson, mergeDocs, setoff, reconcile, summarise, effA, ANS_TAKE, tax, gstinOk, r2, typeOf, docWord, impHeld, docKey };
 })();
 
 /* v33.3: Draft GSTR-3B in the portal's format. 3.1 from the filed GSTR-1 when there is one, else from the sales working.
@@ -4611,7 +4614,7 @@ const RECO = (() => {
   const { r2, tax, normInv, mergeDocs } = GR;
   const TOL = 10;                                                               // ₹10 per document = rounding
   const dig = s => String(s ?? '').replace(/\D/g, '').replace(/^0+(?=.)/, '');
-  const keyOf = d => `${(d && d.g) || ''}|${normInv(d && d.i)}`;
+  const keyOf = d => GR.docKey(d || {});
   const MN = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
   const monthName = p => p ? `${MN[+p.slice(5, 7) - 1]} ${p.slice(0, 4)}` : '';
   const DEC = {
@@ -4631,7 +4634,7 @@ const RECO = (() => {
   // return month a decision belongs to: the month before the one it was made in, never earlier than the bill's own month
   const claimIn = (period, at) => { if (!at) return period; const d = new Date(at); d.setDate(1); d.setMonth(d.getMonth() - 1); const p = iso(d).slice(0, 8) + '01'; return p > period ? p : period; };
   const effRec = (reco, k) => { const d = ((reco || {}).dec || {})[k], a = ((reco || {}).ans || {})[k]; return d && d.a ? d : a && a.a ? a : null; };
-  const aliases = d => { const g = (d && d.g) || '', out = new Set([g + '|' + normInv(d.i), g + '|' + GR.cleanInv(d.i)]); if (GR.digits(d.i).length >= 3) out.add(g + '|#' + GR.digits(d.i)); return [...out]; };
+  const aliases = d => { const g = (d && d.g) || '', out = new Set([GR.docKey(d), g + '|' + GR.cleanInv(d.i)]); if (GR.digits(d.i).length >= 3) out.add(g + '|#' + GR.digits(d.i)); return [...out]; };
 
   // suggested IMS action for a 2B document (d = decision record or answer string)
   function ims(it, d) {
@@ -7643,7 +7646,7 @@ const REV = (() => {
 })();
 
 // v78: this tab's code version — when a newer app is uploaded, offer Reload and block mails from old code
-const APP_VER = 'jlr-shell-v85';
+const APP_VER = 'jlr-shell-v86';
 let appStale = false;
 async function checkAppVer() {
   try { const t = await fetch('sw.js?v=' + Date.now(), { cache: 'no-store' }).then(r => r.text()); const live = (t.match(/jlr-shell-v\d+/) || [])[0];
