@@ -4329,6 +4329,8 @@ const GR = (() => {
       if (ix < 0) ix = h.findIndex((x, j) => ok(k, j) && x && cont.some(w => x.includes(w)));
       if (ix >= 0) { map[k] = ix; used.add(ix); }
     }
+    // v68: our own voucher / purchase / return no — used only when the bill no cell is blank (e.g. purchase returns)
+    if (map.i != null) { const ix = h.findIndex((x, j) => !used.has(j) && ['purchaseno', 'purchno', 'voucherno', 'vchno', 'vouchernumber', 'grnno', 'returnno', 'docno', 'documentno', 'entryno'].includes(C(x))); if (ix >= 0) { map.i2 = ix; used.add(ix); } }
     if (map.t == null) { const ix = h.findIndex((x, j) => ok('t', j) && x === 'value'); if (ix >= 0) { map.t = ix; used.add(ix); } }
     return map;
   }
@@ -4364,7 +4366,7 @@ const GR = (() => {
       if (isImp) { const pc = portIx >= 0 ? String(row[portIx] ?? '').trim() : '';
         out.push({ g: String(get(row, 'g') || '').trim().toUpperCase() || 'IMPORT', n: String(get(row, 'n') || '').trim() || ('Import of goods' + (pc ? ' · port ' + pc : '')), i: String(get(row, 'i') ?? '').trim(), d: toDate(get(row, 'd')),
           t: r2(t), ig: r2(ig), cg: r2(cg), sg: r2(sg), cs: r2(cs), v: r2(Math.abs(v)), src: section.toUpperCase() }); continue; }
-      out.push({ g: String(get(row, 'g') || '').trim().toUpperCase(), n: String(get(row, 'n') || '').trim(), i: String(get(row, 'i') ?? '').trim(), d: toDate(get(row, 'd')),
+      out.push({ g: String(get(row, 'g') || '').trim().toUpperCase(), n: String(get(row, 'n') || '').trim(), i: String(get(row, 'i') ?? '').trim() || String(get(row, 'i2') ?? '').trim(), d: toDate(get(row, 'd')),
         t: r2(sign * t), ig: r2(sign * ig), cg: r2(sign * cg), sg: r2(sign * sg), cs: r2(sign * cs), v: r2(sign * Math.abs(v)),
         cn: cn || undefined, rc: /^y/i.test(String(get(row, 'rc'))) || undefined, na: /^n/i.test(String(get(row, 'na'))) || undefined, src: section || undefined, br: br || undefined, nt: nt ? r2(sign * nt) : undefined });
     }
@@ -5947,7 +5949,7 @@ VIEWS.gst = async v => {
       const shs = meta.startsWith('sheets: ') ? `\nRead from ${meta.slice(8)}` : '';
       const old = kind === 'purchases' && row.purchases && (row.purchases.rows || []).length ? row.purchases : null;
       if (old) {   // v64: second register for the same month (e.g. Bills + Expenses) → add to it, or replace
-        const keys = new Set(old.rows.map(BILL.dupKey)), fresh = rows.filter(x => !keys.has(BILL.dupKey(x))), dup = rows.length - fresh.length;
+        const keys = new Set(old.rows.map(BILL.dupKey)), fresh = rows.filter(x => !GR.normInv(x.i) || !keys.has(BILL.dupKey(x))), dup = rows.length - fresh.length;
         const ft = fresh.reduce((a, x) => a + gTax(x), 0), ot = old.rows.reduce((a, x) => a + gTax(x), 0);
         const pick = await new Promise(res => {
           const m = modal(`Purchase register already saved for ${monthLabel(grMonth)}`, `<p style="margin-top:0"><b>${esc(f.name)}</b> — ${rows.length} documents · taxable ${gst$(tx)} · tax ${gst$(t)}${esc(shs).replace('\n', ' · ')}</p>
@@ -8750,7 +8752,7 @@ const BILL = (() => {
     if (+row.ig && (+row.cg || +row.sg)) add('err', 'Both IGST and CGST/SGST');
     if (row.g && own && gstinCheck(row.g)) { const intra = row.g.slice(0, 2) === own.slice(0, 2); if (intra && +row.ig) add('warn', 'Same state supplier but IGST charged'); if (!intra && (+row.cg || +row.sg)) add('warn', 'Other state supplier but CGST/SGST charged'); }
     if (+row.t && tax) { const rate = ((+row.ig || 0) + (+row.cg || 0) + (+row.sg || 0)) / +row.t; if (!RATES.some(r => Math.abs(rate - r) < 0.0015)) add('warn', `Tax is ${(rate * 100).toFixed(2)}% of taxable — mixed rates or a misread figure?`); }
-    if (dupKeys.has(dupKey(row))) add('err', 'Already in this month’s purchase register');
+    if (GR.normInv(row.i) && dupKeys.has(dupKey(row))) add('err', 'Already in this month’s purchase register');
     return out;
   }
   const isoToday = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
