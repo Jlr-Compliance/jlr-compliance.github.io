@@ -7010,18 +7010,51 @@ function renderG1(o, { client: c, getRow, save, filed = null, mode = 'work' }) {
       <div class="toolbar g1-fbar" style="margin:0 0 6px"><span class="small" data-g1fc></span><button class="link small" data-g1fclr hidden>Clear filters</button></div>
       <div class="table-wrap g1-wrap"><table class="g1-grid"><thead><tr><th>#</th>${cols.map(([, l, , w]) => `<th style="min-width:${w}px">${esc(l)}</th>`).join('')}
         ${AUTO[tab].map(([, l]) => `<th class="g1-auto">${esc(l)}</th>`).join('')}<th class="g1-auto">Check</th><th></th></tr>
-        <tr class="g1-flt"><th></th>${cols.map(([k]) => `<th><input data-flt="${k}" value="${esc(((g1Flt[tab] || {})[k]) || '')}" placeholder="Filter…" aria-label="Filter ${esc(k)}" style="width:100%;min-width:0;font-size:12px;padding:3px 5px"></th>`).join('')}
+        <tr class="g1-flt"><th></th>${cols.map(([k, l]) => { const on = Array.isArray((g1Flt[tab] || {})[k]); return `<th><button type="button" class="g1-fbtn${on ? ' on' : ''}" data-fcol="${k}" aria-haspopup="true" aria-label="Filter ${esc(l)}" title="Filter ${esc(l)}" style="width:100%;min-width:0;font-size:12px;padding:2px 6px;border:1px solid ${on ? 'var(--primary,#1f5fd6)' : '#cbd5e1'};border-radius:6px;background:${on ? '#e8efff' : '#fff'};text-align:left;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${on ? `▾ ${(g1Flt[tab][k]).length} selected` : '▾ All'}</button></th>`; }).join('')}
         ${AUTO[tab].map(() => '<th></th>').join('')}<th><select data-flt="_chk" aria-label="Filter by check" style="font-size:12px;padding:2px"><option value="">All</option><option value="err" ${((g1Flt[tab] || {})._chk) === 'err' ? 'selected' : ''}>Errors</option><option value="ok" ${((g1Flt[tab] || {})._chk) === 'ok' ? 'selected' : ''}>OK</option></select></th><th></th></tr></thead>
       <tbody>${rows.map((r, i) => `<tr data-row="${i}"><td class="muted small">${i + 1}</td>${cols.map(col => `<td>${cellHtml(col, r[col[0]], i)}</td>`).join('')}${autoCells(tab, C[i] && C[i].x)}
         <td><button class="link small danger-t" data-g1del="${i}" title="Remove row" aria-label="Remove row">×</button></td></tr>`).join('')}</tbody></table></div>
       <div class="toolbar" style="margin-top:8px"><button class="btn sm" data-g1add>+ 20 rows</button><span class="muted small">Blank rows are ignored.</span></div>`;
     applyFlt(tab);
   }
+  const fDisp = v => v == null || v === '' ? '(Blanks)' : /^\d{4}-\d{2}-\d{2}$/.test(String(v)) ? String(v).split('-').reverse().join('-') : String(v);
+  // v84: Excel-style dropdown filter for one column — tick the values to show
+  function openFlt(btn, tab, k) {
+    $$('.g1-fpop').forEach(x => x.remove());
+    const label = (COLS[tab].find(c => c[0] === k) || [])[1] || k, rows = D[tab].filter(r => Object.keys(r).length);
+    const cnt = new Map(); rows.forEach(r => { const d = fDisp(r[k]); cnt.set(d, (cnt.get(d) || 0) + 1); });
+    const vals = [...cnt.keys()].sort((a, b) => a === '(Blanks)' ? 1 : b === '(Blanks)' ? -1 : (isFinite(+a) && isFinite(+b) ? +a - +b : /^\d{2}-\d{2}-\d{4}$/.test(a) && /^\d{2}-\d{2}-\d{4}$/.test(b) ? a.split('-').reverse().join('').localeCompare(b.split('-').reverse().join('')) : a.localeCompare(b, 'en', { numeric: true })));
+    const cur = (g1Flt[tab] || {})[k], sel = new Set(Array.isArray(cur) ? cur : vals);
+    const pop = document.createElement('div'); pop.className = 'g1-fpop'; pop.setAttribute('role', 'dialog'); pop.setAttribute('aria-label', 'Filter ' + label);
+    const rc = btn.getBoundingClientRect();
+    pop.style.cssText = `position:fixed;z-index:9999;top:${Math.min(rc.bottom + 4, innerHeight - 380)}px;left:${Math.min(rc.left, innerWidth - 300)}px;width:280px;max-height:370px;display:flex;flex-direction:column;background:#fff;color:#111;border:1px solid #cbd5e1;border-radius:10px;box-shadow:0 10px 30px rgba(0,0,0,.18);padding:10px;font-size:13px`;
+    pop.innerHTML = `<b style="margin-bottom:6px">${esc(label)}</b><input type="search" placeholder="Search" style="margin-bottom:6px;padding:5px 7px;border:1px solid #cbd5e1;border-radius:6px">
+      <label style="display:flex;gap:6px;align-items:center;padding:3px 0;border-bottom:1px solid #eee"><input type="checkbox" data-all> <b>(Select all)</b></label>
+      <div data-list style="overflow:auto;flex:1;min-height:60px">${vals.slice(0, 1000).map((v, i) => `<label style="display:flex;gap:6px;align-items:center;padding:2px 0" data-v="${i}"><input type="checkbox" ${sel.has(v) ? 'checked' : ''}> <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(v)}</span><span class="muted small">${cnt.get(v)}</span></label>`).join('')}${vals.length > 1000 ? '<p class="muted small">First 1,000 values — use Search.</p>' : ''}</div>
+      <div style="display:flex;gap:6px;justify-content:flex-end;margin-top:8px"><button type="button" class="btn sm" data-clr>Clear</button><button type="button" class="btn sm" data-x>Cancel</button><button type="button" class="btn sm primary" data-ok>OK</button></div>`;
+    document.body.appendChild(pop);
+    const boxes = () => $$('[data-list] label[data-v]', pop), all = $('[data-all]', pop), q = $('input[type=search]', pop);
+    const sync = () => { const vis = boxes().filter(l => !l.hidden), c = vis.filter(l => $('input', l).checked).length; all.checked = vis.length && c === vis.length; all.indeterminate = c > 0 && c < vis.length; };
+    sync(); q.focus();
+    q.oninput = () => { const t = q.value.trim().toLowerCase(); boxes().forEach(l => { l.hidden = !!t && !vals[+l.dataset.v].toLowerCase().includes(t); }); if (t) boxes().forEach(l => { $('input', l).checked = !l.hidden; }); sync(); };
+    all.onchange = () => { boxes().filter(l => !l.hidden).forEach(l => { $('input', l).checked = all.checked; }); sync(); };
+    $('[data-list]', pop).addEventListener('change', sync);
+    const close = () => { pop.remove(); document.removeEventListener('mousedown', out, true); document.removeEventListener('keydown', esc1, true); };
+    const out = e => { if (!pop.contains(e.target) && e.target !== btn) close(); };
+    const esc1 = e => { if (e.key === 'Escape') close(); if (e.key === 'Enter' && document.activeElement === q) $('[data-ok]', pop).click(); };
+    setTimeout(() => { document.addEventListener('mousedown', out, true); document.addEventListener('keydown', esc1, true); });
+    const F = g1Flt[tab] = g1Flt[tab] || {};
+    $('[data-x]', pop).onclick = close;
+    $('[data-clr]', pop).onclick = () => { delete F[k]; close(); draw(); };
+    $('[data-ok]', pop).onclick = () => { const picked = boxes().filter(l => $('input', l).checked).map(l => vals[+l.dataset.v]);
+      if (picked.length === vals.length) delete F[k]; else F[k] = picked; close(); draw(); };
+  }
   // v83: filters in the GSTR-1 entry sheet — one box per column (contains, any case; dates also as dd-mm-yyyy) + Check: Errors / OK. Rows are only hidden; their numbers stay.
   function applyFlt(tab) {
-    const F = g1Flt[tab] || {}, keys = Object.keys(F).filter(k => String(F[k]).trim()), C = keys.includes('_chk') ? calc()[tab] : null;
+    const F = g1Flt[tab] || {}, keys = Object.keys(F).filter(k => Array.isArray(F[k]) || String(F[k] ?? '').trim()), C = keys.includes('_chk') ? calc()[tab] : null;
     const show = (r, i) => keys.every(k => {
       if (k === '_chk') { const x = C && C[i] && C[i].x; if (!x) return false; return F._chk === 'err' ? !x.ok : x.ok; }
+      if (Array.isArray(F[k])) return F[k].includes(fDisp(r[k]));
       const v = r[k]; if (v == null || v === '') return false;
       const sv = String(v).toLowerCase(), q = String(F[k]).trim().toLowerCase(), dmy = /^\d{4}-\d{2}-\d{2}$/.test(sv) ? sv.split('-').reverse().join('-') : '';
       return sv.includes(q) || (dmy && dmy.includes(q));
@@ -7128,6 +7161,7 @@ function renderG1(o, { client: c, getRow, save, filed = null, mode = 'work' }) {
     if (d.g1t) { g1Tab = d.g1t; $$('[data-g1t]', o).forEach(x => x.classList.toggle('on', x === b)); draw(); }
     if ('g1undo' in d) { if (G1U.undo(D)) { draw(); toast('Undone'); } return; }   // v70
     if ('g1fclr' in d) { g1Flt[g1Tab] = {}; draw(); return; }   // v83
+    if (d.fcol) { openFlt(b, g1Tab, d.fcol); return; }   // v84
     if (d.g1add) { for (let i = 0; i < 20; i++) D[g1Tab].push({}); drawGrid(g1Tab); }
     if (d.g1del != null) { D[g1Tab].splice(+d.g1del, 1); dirty(); drawGrid(g1Tab); }
     if ('g1dl' in d) { const a = document.createElement('a'); a.href = 'gstr1-entry-template.xlsx'; a.download = `GSTR1-entry-${slug(c.name)}-${row.period.slice(0, 7)}.xlsx`; document.body.appendChild(a); a.click(); a.remove(); }
@@ -7596,7 +7630,7 @@ const REV = (() => {
 })();
 
 // v78: this tab's code version — when a newer app is uploaded, offer Reload and block mails from old code
-const APP_VER = 'jlr-shell-v83';
+const APP_VER = 'jlr-shell-v84';
 let appStale = false;
 async function checkAppVer() {
   try { const t = await fetch('sw.js?v=' + Date.now(), { cache: 'no-store' }).then(r => r.text()); const live = (t.match(/jlr-shell-v\d+/) || [])[0];
