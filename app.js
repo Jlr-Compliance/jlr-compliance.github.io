@@ -6757,7 +6757,7 @@ function grUndoLabel(before, patch) {
   if (k.includes('purchases')) return patch.purchases ? 'purchase register change' : 'purchase register removed';
   if (k.includes('gstr2b')) return patch.gstr2b ? 'GSTR-2B change' : 'GSTR-2B removed';
   if (k.includes('g1')) return 'GSTR-1 entry save';
-  if (k.includes('sales')) return 'sales register change';
+  if (k.includes('sales')) return patch.sales ? 'sales register change' : 'sales register removed';
   if (k.includes('gstr3b')) return 'GSTR-3B figures';
   if (k.includes('gstr1')) return 'GSTR-1 totals';
   if (k.includes('reco')) { const a = before.reco || {}, b = patch.reco || {}, ch = [...new Set([...Object.keys(a), ...Object.keys(b)])].filter(x => grSig(a[x]) !== grSig(b[x]));
@@ -7013,8 +7013,9 @@ function renderG1(o, { client: c, getRow, save, filed = null, mode = 'work' }) {
       if (!cur || cur.source === 'g1' || confirm('Also use these entries as the sales register for the draft GSTR-3B? (This replaces the uploaded sales register.)'))
         patch.sales = reg.length ? { rows: reg, file: 'GSTR-1 entry', source: 'g1', at: g1.at, by: me.id } : null;
       b.disabled = true;
-      try { await save(patch); D.dirty = false; G1U.saved(D); toast('GSTR-1 entry saved'); learnSales(c, D); }
-      catch (err) { toast(friendly(err), true); }
+      const wasDirty = D.dirty; D.dirty = false;   // v73: clear before save() redraws the page, so it shows "✓ Saved" (not "Unsaved changes")
+      try { await save(patch); G1U.saved(D); $$('[data-g1undo]').forEach(u => { u.disabled = true; }); toast('GSTR-1 entry saved'); learnSales(c, D); }
+      catch (err) { D.dirty = wasDirty; toast(friendly(err), true); }
       finally { b.disabled = false; }
     }
   });
