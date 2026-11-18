@@ -5156,8 +5156,19 @@ let grOv = true, gr3Last = 's2', grClient = '', grMonth = prevMonth(), grTab = '
 VIEWS.gst = async v => {
   const gClients = clients.filter(c => c.active && c.gstin && (isManager() || c.default_staff === me.id || c.id === grClient));
   if (!grClient || !gClients.some(c => c.id === grClient)) grClient = (gClients[0] || {}).id || '';
-  v.innerHTML = `<div class="page-head"><h2>GST review</h2></div>
+  v.innerHTML = `<div class="page-head"><h2>GST review</h2><span class="spacer" style="flex:1"></span>
+      <span class="muted small" id="grLoadedAt"></span><button class="btn sm ghost" id="grRefresh" title="Load the latest data saved by anyone in the office and match again">↻ Refresh</button></div>
     <div id="grBody"><div class="loading">Loading…</div></div>`;
+  // v69: Refresh — reload this client's settings (ITC method, matching rule), the month's data, earlier months, reviews and tasks, then work everything out again
+  $('#grRefresh', v).onclick = async e => {
+    const key = grClient + '|' + grMonth + '-01', d = g1Drafts[key];
+    if (d && d.dirty && !confirm('You have unsaved changes in GSTR-1 entry. Refresh will throw them away. Continue?')) return;
+    if (d) delete g1Drafts[key];
+    e.target.disabled = true; e.target.textContent = 'Refreshing…';
+    const q = await safe(sb.from('clients').select('*').eq('id', grClient).maybeSingle());
+    if (q.data) { const i = clients.findIndex(x => x.id === grClient); if (i >= 0) clients[i] = q.data; }
+    route();
+  };
   const pickers = () => `<label>Client<select id="grC">${gClients.length ? opts(gClients, grClient, c => `${c.name} · ${c.gstin}`, c => c.id) : '<option value="">No GST clients</option>'}</select></label>
       <label>Month<input type="month" id="grM" value="${esc(grMonth)}"></label>`;
   const bindPickers = el => { const a = $('#grC', el), b = $('#grM', el); if (a) a.onchange = e => { grClient = e.target.value; grRecFilter = ''; grOv = true; grPos = null; grLastStep = {}; route(); }; if (b) b.onchange = e => { grMonth = e.target.value || prevMonth(); grRecFilter = ''; grOv = true; grPos = null; grLastStep = {}; route(); }; };
@@ -5168,6 +5179,7 @@ VIEWS.gst = async v => {
   loadClientRules(grClient).catch(() => {});
   const r = await safe(sb.from('gst_months').select('*').eq('client_id', grClient).eq('period', period).maybeSingle());
   if (r.error) { body.innerHTML = '<div class="card"><p class="note">GST review is not set up yet — run <b>update-gst-review.sql</b> in Supabase.</p></div>'; return; }
+  { const la = $('#grLoadedAt', v); if (la) la.textContent = 'Updated ' + new Date().toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit' }); }
   let row = r.data || { client_id: grClient, period, status: 'Draft' }, recoHist = null, revs = await REV.load(c, period).catch(() => ({ gstr1: null, gstr3b: null }));
   // v38: this month's GSTR-1 / GSTR-3B work items (to know Filed and to upload the acknowledgement from here)
   const loadGT = async () => { const q = await safe(sb.from('tasks').select('id,client_id,return_name,period,status,due_date,arn,filed_on').eq('client_id', c.id).limit(800)); return (q.data || []).filter(t => REV.kindOf(t.return_name) && periodToMonth(t.period) === grMonth); };
