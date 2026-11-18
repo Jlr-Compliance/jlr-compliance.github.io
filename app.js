@@ -5154,7 +5154,16 @@ async function purchaseSplitDialog({ rows, fname, source = 'file', month, comps,
 async function readSheets(file) {
   const X = await loadXlsxFull();
   const wb = /\.csv$/i.test(file.name) ? X.read(await file.text(), { type: 'string', raw: false }) : X.read(new Uint8Array(await file.arrayBuffer()), { type: 'array', cellDates: false });
-  return wb.SheetNames.map(n => ({ name: n, rows: X.utils.sheet_to_json(wb.Sheets[n], { header: 1, raw: true, defval: '' }) }));
+  return wb.SheetNames.map(n => { trimSheet(X, wb.Sheets[n]); return { name: n, rows: X.utils.sheet_to_json(wb.Sheets[n], { header: 1, raw: true, defval: '' }) }; });
+}
+// v72: a sheet whose range runs to row 4,46,465 because a formula was copied down — read only up to the last row with real data
+function trimSheet(X, ws) {
+  if (!ws || !ws['!ref']) return; const R = X.utils.decode_range(ws['!ref']); if (R.e.r < 5000) return;
+  let last = 0;
+  for (const k in ws) { if (k[0] === '!') continue; const c = ws[k]; if (c == null) continue;
+    const empty = c.v === '' || c.v == null || (c.f != null && (c.v === 0 || c.v === '')); if (empty) continue;
+    const rr = X.utils.decode_cell(k).r; if (rr > last) last = rr; }
+  R.e.r = Math.max(last, R.s.r); ws['!ref'] = X.utils.encode_range(R);
 }
 const prevMonth = () => { const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() - 1); return iso(d).slice(0, 7); };
 const periodToMonth = p => { const m = String(p || '').match(/([A-Za-z]{3})[a-z]*[\s-]+(\d{4})/); if (!m) return ''; const i = MONTHS.findIndex(x => x.toLowerCase() === m[1].toLowerCase()); return i < 0 ? '' : `${m[2]}-${pad(i + 1)}`; };
@@ -6672,11 +6681,52 @@ const SALESIN = (() => {
     skipped.month.amt = r2(skipped.month.amt);
     return { lines, skipped, fileTax: r2(fileTax), source: 'sales register' };
   }
+  // ---- v72: the firm's GST workings master — sheet "GSTR-1" (old layout: S.No, Invoice No, … ; new layout: Month, S.No, …) ----
+  const W = s => String(s ?? '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  function wkHead(rows) {
+    for (let r = 0; r < Math.min(rows.length, 10); r++) { const h = (rows[r] || []).map(W);
+      if (h.includes('invoice no') && h.some(x => /^taxable( invoice)? value$/.test(x))) return { r, h }; }
+    return null;
+  }
+  const isWorkings = sh => /gstr ?-?1/i.test(sh.name || '') && !!wkHead(sh.rows || []);
+  function fromWorkings(rows, opts = {}) {
+    const H0 = wkHead(rows); if (!H0) return { lines: [], error: 'No "Invoice No" / "Taxable Invoice Value" heading found in the GSTR-1 sheet', skipped: {} };
+    const ix = (...names) => { for (const nm of names) { const k = H0.h.indexOf(nm); if (k >= 0) return k; } return -1; };
+    const C = { mon: ix('month'), no: ix('invoice no'), d: ix('invoice date'), g: ix('gstinnumber', 'gstin number', 'gstin'), name: ix('name of the buyer', 'buyer name', 'customer name'),
+      hsn: ix('hsn sac code', 'hsn sac', 'hsn'), qty: ix('qty', 'quantity'), uqc: ix('units', 'unit', 'uqc'), pos: ix('place of supply'), tx: ix('taxable invoice value', 'taxable value'),
+      rate: ix('rate of tax', 'rate'), ig: ix('igst'), cg: ix('cgst'), sg: ix('sgst'), te: ix('taxable exempted', 'taxable nil exempted'), rc: ix('reverse charge'),
+      out: ix('outward supplies'), doc: ix('type of the document', 'document type'), sup: ix('supply type') };
+    const get = (row, k) => C[k] >= 0 ? row[C[k]] : '';
+    const skipped = { month: { n: 0, amt: 0 } }; let fileTax = 0; const lines = [];
+    for (let r = H0.r + 1; r < rows.length; r++) {
+      const row = rows[r] || [], no = String(get(row, 'no') ?? '').trim(), tx = n(get(row, 'tx'));
+      if (!no || /^total/i.test(no)) continue;
+      const d = xdate(get(row, 'd'));
+      if (opts.month && d && d.slice(0, 7) !== opts.month) { skipped.month.n++; skipped.month.amt += Math.abs(tx); continue; }
+      const ig = n(get(row, 'ig')), cg = n(get(row, 'cg')), sg = n(get(row, 'sg')), tax = ig + cg + sg; fileTax += Math.abs(tax);
+      const doc = W(get(row, 'doc')), out = W(get(row, 'out')), sup = W(get(row, 'sup')), te = W(get(row, 'te'));
+      const o = { d: d || '', no, ty: /debit/.test(doc) ? 'Debit Note' : /credit/.test(doc) || /return/.test(out) ? 'Credit Note' : 'Invoice', name: String(get(row, 'name') ?? '').trim(), tx: r2(Math.abs(tx)) };
+      const g = String(get(row, 'g') ?? '').trim().toUpperCase(); if (/^\d{2}[A-Z0-9]{13}$/.test(g)) o.gstin = g;
+      const pos = String(get(row, 'pos') ?? '').match(/^\s*(\d{1,2})/); if (!o.gstin && pos && stateOf(pos[1])) o.state = stateOf(pos[1]).trim();
+      if (has(get(row, 'hsn'))) o.hsn = String(get(row, 'hsn')).trim();
+      if (n(get(row, 'qty'))) o.qty = n(get(row, 'qty')); const u = uqcOf(get(row, 'uqc')); if (u) o.uqc = u;
+      let rate = n(get(row, 'rate')); if (rate > 0 && rate < 1) rate *= 100; if (!rate && tx && tax) rate = Math.abs(tax / tx * 100);
+      if (/nil/.test(te)) o.nil = 'Nil rated'; else if (/exempt/.test(te)) o.nil = 'Exempted'; else if (/non ?gst/.test(te)) o.nil = 'Non-GST';
+      if (!o.nil) o.rate = nearRate(rate);
+      if (/sez/.test(sup)) o.exp = tax ? 'SEZ - With GST' : 'SEZ - Without GST'; else if (/exp/.test(sup)) o.exp = tax ? 'Export - With GST' : 'Export - Without GST';
+      if (/^y/i.test(String(get(row, 'rc') ?? '').trim())) o.rc = 'Yes';
+      lines.push(o);
+    }
+    skipped.month.amt = r2(skipped.month.amt);
+    return { lines, skipped, fileTax: r2(fileTax), source: 'GST workings (GSTR-1 sheet)' };
+  }
   function read(sheets, opts) {
     const z = sheets.find(s => isZoho(s.rows || []));
-    return z ? fromZoho(z.rows, opts) : fromRegister((sheets[0] || {}).rows || [], opts);
+    if (z) return fromZoho(z.rows, opts);
+    const w = sheets.find(isWorkings); if (w) return fromWorkings(w.rows, opts);
+    return fromRegister((sheets[0] || {}).rows || [], opts);
   }
-  return { isZoho, fromZoho, fromRegister, read };
+  return { isZoho, fromZoho, fromRegister, fromWorkings, isWorkings, read };
 })();
 
 /* =====================================================================
@@ -6901,7 +6951,15 @@ function renderG1(o, { client: c, getRow, save, filed = null, mode = 'work' }) {
       const f = await new Promise(res => { const i = document.createElement('input'); i.type = 'file'; i.accept = '.xlsx,.xls'; i.onchange = () => res(i.files[0]); i.click(); });
       if (!f) return;
       try {
-        const g = G1.fromWorkbook(await readSheets(f));
+        const shs = await readSheets(f), wk = shs.find(SALESIN.isWorkings);
+        if (wk) {   // v72: the firm's GST workings master — take this month's GSTR-1 sheet rows
+          const res = SALESIN.fromWorkings(wk.rows, { month: row.period.slice(0, 7) });
+          if (!res.lines.length) return toast(res.skipped.month && res.skipped.month.n ? `No invoices dated in this month (${res.skipped.month.n} other-month rows in the file)` : res.error || 'No invoices found in the GSTR-1 sheet', true);
+          if (D.sales.some(r => Object.keys(r).length) && !confirm('Replace the sales rows already entered here with the rows from this workings file?')) return;
+          D.sales = res.lines; dirty(); draw();
+          toast(`${res.lines.length} invoice${res.lines.length > 1 ? 's' : ''} loaded from the workings${res.skipped.month.n ? ` (${res.skipped.month.n} of other months left out)` : ''} — check and Save`); return;
+        }
+        const g = G1.fromWorkbook(shs);
         if (g.error) return toast(g.error, true);
         if (g.gstin && g.gstin !== c.gstin && !confirm(`The template's Setup sheet has GSTIN ${g.gstin}, but this client is ${c.gstin}. Use it anyway?`)) return;
         if ((D.sales.some(r => Object.keys(r).length) || D.amend.some(r => Object.keys(r).length)) && !confirm('Replace the rows already entered here with the rows from this file?')) return;
