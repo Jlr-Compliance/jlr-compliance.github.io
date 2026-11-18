@@ -5826,7 +5826,8 @@ VIEWS.gst = async v => {
       ? box('ITC in GSTR-2B', gTax(sm.itc2b)) + box('Client said take credit', gTax(cl.claim), 'ok', gTax(cl.late) ? `incl. ${gst$(gTax(cl.late))} from earlier months` : '') + box('Held back / waiting', gTax(cl.held), gTax(cl.held) ? 'warn' : '')
       : M === 'books'
       ? box('ITC as per books (claimed)', gTax(cl.claim), 'ok') + box('ITC in GSTR-2B', gTax(sm.itc2b)) + box('Books above 2B', Math.max(0, sm.over2b), sm.over2b > RECO.TOL ? 'bad' : '')
-      : box('ITC in GSTR-2B', gTax(sm.itc2b)) + box('ITC to claim now', gTax(cl.claim), 'ok', gTax(cl.carried) || gTax(cl.late) ? `incl. ${gst$(gTax(cl.carried) + gTax(cl.late))} from earlier months` : '') + box('Held back', gTax(cl.held), gTax(cl.held) ? 'warn' : '');
+      : box('ITC in GSTR-2B', gTax(sm.itc2b)) + box('ITC to claim now', gTax(cl.claim), 'ok', [gTax(cl.carried) || gTax(cl.late) ? `incl. ${gst$(gTax(cl.carried) + gTax(cl.late))} from earlier months` : '', Math.abs(gTax(cl.claim) - gTax(sm.itc2b)) < 1 ? 'all of 2B is claimed' : ''].filter(Boolean).join(' · ')) + box('Held back', gTax(cl.held), gTax(cl.held) ? 'warn' : '', (() => { const bo = GR.r2(list.filter(x => x.st === 'books_only' && !(x.b && x.b.rc)).reduce((a, x) => a + gTax(x.b), 0)), rest = GR.r2(gTax(cl.held) - bo);   // v87: what the held amount is made of
+          return [bo ? `${gst$(bo)} in books, not yet in 2B` : '', rest > 0.5 ? `${gst$(rest)} in 2B not taken` : ''].filter(Boolean).join(' · '); })());
     const decBtns = it => {
       if (it.st === 'imp_2b') {   // v67: import in 2B, not in books — claimed in 4(A)(1) unless kept pending / not ours
         const cur4 = (dec[it.k] || {}).a || '', ca = (ans[it.k] || {}).a, held = GR.impHeld(reco, it.x);
@@ -5851,7 +5852,7 @@ VIEWS.gst = async v => {
     o.innerHTML = `<div class="rc-sum">${three}</div>
       ${cl.undecided.length ? `<p class="note warn small" style="margin:10px 0 0">${cl.undecided.length} bill${cl.undecided.length > 1 ? 's need' : ' needs'} a decision. ${M === 'books_2b' ? 'Until then the lower of books and 2B is counted for differences, and other bills are held back.' : 'Until then they are not claimed.'}</p>` : ''}
       ${M === 'books' && sm.over2b > RECO.TOL ? `<p class="note warn small" style="margin:10px 0 0">Credit as per books is ${gst$(sm.over2b)} more than GSTR-2B. ITC needs the bill in 2B (Sec 16(2)(aa)).</p>` : ''}
-      ${grRecView === 'inv' ? `<div class="rc-f" role="tablist">${F.map(f => `<button role="tab" aria-selected="${grRecFilter === f[0]}" class="rc-fb ${grRecFilter === f[0] ? 'on' : ''}" data-rf="${f[0]}">${f[1]} · ${cnt(f)}</button>`).join('')}
+      ${grRecView === 'inv' ? `<div class="rc-f" role="tablist">${F.map(f => `<button role="tab" aria-selected="${grRecFilter === f[0]}" class="rc-fb ${grRecFilter === f[0] ? 'on' : ''}" data-rf="${f[0]}">${f[1]} · ${cnt(f)}${(() => { if (!f[2] || !['decide', 'notbooks', 'missing'].includes(f[0]) || !f[2].length) return ''; const dn = f[2].filter(x => GR.effA(reco, x.k)).length; return dn ? ` <span class="small" style="opacity:.8">· ✓ ${dn === f[2].length ? 'all' : dn} decided</span>` : ''; })()}</button>`).join('')}
         <span class="spacer"></span>${['missing', 'notbooks'].includes(grRecFilter) && toMiss.length && toAsk.length ? `<button class="btn sm primary" id="grBoth" title="One message and one Excel with both lists">Send both to client · ${toMiss.length} missing in 2B + ${toAsk.length} not in books</button>` : ''}${grRecFilter === 'missing' ? (toMiss.length ? `<button class="btn sm primary" id="grMiss" title="Tell the client these bills are not in GSTR-2B so they can ask their suppliers to upload them">Send ${toMiss.length} missing bill${toMiss.length > 1 ? 's' : ''} to client</button>` : Object.keys(missed).length ? `<span class="small muted">Missing bills sent to client ${sh(reco.miss.at)}</span>` : '') : toAsk.length ? `<button class="btn sm primary" id="grAsk">Send ${toAsk.length} bill${toAsk.length > 1 ? 's' : ''} to client</button>` : ''}<button class="btn sm" id="grXl">Excel</button></div>` : ''}
       <div id="rcBody"></div>
       ${grRecView === 'inv' ? `<p class="muted small">Bills match only when the supplier agrees (same GSTIN, or same PAN for “other GSTIN”) — a bill number alone never matches. Up to ₹${RECO.TOL} per bill is rounding.</p>` : ''}`;
@@ -7646,7 +7647,7 @@ const REV = (() => {
 })();
 
 // v78: this tab's code version — when a newer app is uploaded, offer Reload and block mails from old code
-const APP_VER = 'jlr-shell-v86';
+const APP_VER = 'jlr-shell-v87';
 let appStale = false;
 async function checkAppVer() {
   try { const t = await fetch('sw.js?v=' + Date.now(), { cache: 'no-store' }).then(r => r.text()); const live = (t.match(/jlr-shell-v\d+/) || [])[0];
