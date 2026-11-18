@@ -5167,7 +5167,7 @@ VIEWS.gst = async v => {
   const gClients = clients.filter(c => c.active && c.gstin && (isManager() || c.default_staff === me.id || c.id === grClient));
   if (!grClient || !gClients.some(c => c.id === grClient)) grClient = (gClients[0] || {}).id || '';
   v.innerHTML = `<div class="page-head"><h2>GST review</h2><span class="spacer" style="flex:1"></span>
-      <span class="muted small" id="grLoadedAt"></span><button class="btn sm ghost" id="grRefresh" title="Load the latest data saved by anyone in the office and match again">↻ Refresh</button></div>
+      <span class="muted small" id="grLoadedAt"></span><button class="btn sm ghost" id="grUndo" disabled title="Nothing to undo yet">↶ Undo</button><button class="btn sm ghost" id="grRefresh" title="Load the latest data saved by anyone in the office and match again">↻ Refresh</button></div>
     <div id="grBody"><div class="loading">Loading…</div></div>`;
   // v69: Refresh — reload this client's settings (ITC method, matching rule), the month's data, earlier months, reviews and tasks, then work everything out again
   $('#grRefresh', v).onclick = async e => {
@@ -5195,13 +5195,23 @@ VIEWS.gst = async v => {
   const loadGT = async () => { const q = await safe(sb.from('tasks').select('id,client_id,return_name,period,status,due_date,arn,filed_on').eq('client_id', c.id).limit(800)); return (q.data || []).filter(t => REV.kindOf(t.return_name) && periodToMonth(t.period) === grMonth); };
   let gtasks = await loadGT().catch(() => []), G3gate = { ok: true, why: [] }, FL = { gstr1: [], gstr3b: [] };
   const taskOf = k => gtasks.filter(t => REV.kindOf(t.return_name) === k).sort((a, b) => (a.status === 'Filed') - (b.status === 'Filed'))[0] || null;
-  const save = async patch => {
+  const g1FiledTk = () => { const t = taskOf('gstr1'); return t && t.status === 'Filed' ? t : null; };
+  const filedOk = keys => {   // v70: GSTR-1 already filed — warn (user's choice: warning only, still editable)
+    const t = g1FiledTk(); if (!t || !keys.some(x => ['sales', 'g1'].includes(x))) return true;
+    return confirm(`GSTR-1 for ${REV.mon(period)} is already FILED${t.arn ? ' (ARN ' + t.arn + ')' : ''}${t.filed_on ? ' on ' + t.filed_on : ''}.\n\nThis changes the GSTR-1 workings in the tracker (and the draft GSTR-3B). It does NOT change the filed return — corrections go into next month's amendments.\n\nSave anyway?`);
+  };
+  const ukey = grClient + '|' + period;
+  const pushUndo = (before, patch, label) => { const st = GRUNDO[ukey] = GRUNDO[ukey] || []; st.push({ label: label || grUndoLabel(before, patch), before, after: Object.fromEntries(Object.keys(before).map(k => [k, grSig(patch[k])])), at: new Date(), by: me.full_name || me.email }); if (st.length > 20) st.shift(); };
+  const save = async (patch, o = {}) => {
+    if (!o.undo && !filedOk(Object.keys(patch))) throw new Error('Not saved');
+    const before = o.undo ? null : Object.fromEntries(Object.keys(patch).filter(k => k !== 'summary').map(k => [k, row[k] === undefined ? null : JSON.parse(JSON.stringify(row[k]))]));
     const next = { ...row, ...patch };
     const sm = gsum(next);
     const st2 = recoHist ? itcState(sm, next) : null, d3s = draft3b(next, sm, c, st2 && st2.ready ? st2.cl.claim : null);
     patch.summary = { ...sm.trend, sales_n: sm.counts.sales, b2b_n: sm.counts.b2b, cash_draft: d3s.cashTotal, cash: { ...d3s.cashNeed }, cash_total: next.gstr3b && next.gstr3b.cash ? sm.trend.cash : d3s.cashTotal, deposit: d3s.depositTotal, at: new Date().toISOString(), t3b: t3bOf(d3s) };
     const { data } = await must(sb.from('gst_months').upsert({ client_id: grClient, period, ...patch }, { onConflict: 'client_id,period' }).select().single());
     row = data || { ...next, ...patch };
+    if (before && Object.keys(before).length) pushUndo(before, patch);
     const HIT = { gstr1: ['sales', 'g1'], gstr3b: ['sales', 'purchases', 'gstr2b', 'g1'] }, back = [];
     for (const k of REV.KINDS) {
       const rv = revs[k];
@@ -5280,7 +5290,27 @@ VIEWS.gst = async v => {
   const flowHtml = (k, small) => `<ol class="rf ${small ? 'rf-sm' : ''}" aria-label="${REV.KIND[k].label} status">${FL[k].map((x, i) => `<li class="${x.d ? 'done' : ''} ${x.cur ? 'cur' : ''} ${x.bad ? 'bad' : ''}" ${x.cur ? 'aria-current="step"' : ''}><span class="rf-n">${x.d ? '✓' : x.bad ? '!' : i + 1}</span>${esc(x.l)}</li>`).join('')}</ol>`;
   const retTabs = on => { const t = k => { const [l, tone] = flowNow(k); return `<span class="grt-p ${tone}">${esc(l)}</span>`; };
     return `<nav class="grt grt2" aria-label="Returns">${['gstr1', 'gstr3b'].map(k => `<button class="grt-b ${on === k ? 'on' : ''}" data-ret="${k}" ${on === k ? 'aria-current="page"' : ''}><b>${REV.KIND[k].label}</b>${t(k)}</button>`).join('')}</nav>`; };
+  const undoBtn = () => {   // v70
+    const b = $('#grUndo', v); if (!b) return; const st = GRUNDO[ukey] || [], u = st[st.length - 1];
+    b.disabled = !u; b.title = u ? `Undo ${u.label} (${u.at.toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit' })}, ${u.by})${st.length > 1 ? ` · ${st.length} steps can be undone` : ''}` : 'Nothing to undo yet';
+    b.textContent = u ? `↶ Undo ${u.label}` : '↶ Undo';
+  };
+  const undoBtnEl = $('#grUndo', v);
+  if (undoBtnEl) undoBtnEl.onclick = async () => {
+    const st = GRUNDO[ukey] || [], u = st[st.length - 1]; if (!u) return;
+    const keys = Object.keys(u.before);
+    const q = await safe(sb.from('gst_months').select(keys.join(',')).eq('client_id', grClient).eq('period', period).maybeSingle());
+    if (q.error) return toast(friendly(q.error), true);
+    const changed = keys.filter(k => grSig(q.data ? q.data[k] : null) !== u.after[k]);
+    const when = u.at.toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit' });
+    if (!confirm(`Undo "${u.label}" (${when}, ${u.by})?\n\nThis puts back what was there before that change.` + (changed.length ? `\n\n⚠ It has been changed again since then (maybe by someone else). Undo will also remove that later change.` : ''))) return;
+    if (!filedOk(keys)) return;
+    undoBtnEl.disabled = true;
+    try { const g1k = keys.some(k => ['g1', 'sales'].includes(k)); if (g1k && g1Drafts[ukey] && g1Drafts[ukey].dirty && !confirm('GSTR-1 entry has unsaved changes. Undo will throw them away. Continue?')) { undoBtn(); return; } if (g1k) delete g1Drafts[ukey]; await save({ ...u.before }, { undo: true }); st.pop(); toast('Undone: ' + u.label); undoBtn(); }
+    catch (e) { toast(friendly(e), true); undoBtn(); }
+  };
   async function render() {
+    undoBtn();
     if (!recoHist) { body.innerHTML = '<div class="loading">Loading…</div>'; await loadHist(); }
     const sm = gsum(row), M = meth(), st = itcState(sm), D3 = draft3b(row, sm, c, st.ready ? st.cl.claim : null), mLabel = (() => { const [y, m] = grMonth.split('-'); return `${MONTHS_FULL[+m - 1]} ${y}`; })();
     const S = row.sales, P = row.purchases, B = row.gstr2b, G3 = row.gstr3b, G1f = row.gstr1;
@@ -5528,7 +5558,7 @@ VIEWS.gst = async v => {
   }
   function renderOut(sm, st) {
     const o0 = $('#grOut', body); if (!o0) return;
-    if (grTab === 'g1d' || grTab === 'g1') { renderG1(o0, { client: c, getRow: () => row, save, mode: grTab === 'g1d' ? 'data' : 'work' }); return; }
+    if (grTab === 'g1d' || grTab === 'g1') { renderG1(o0, { client: c, getRow: () => row, save, filed: g1FiledTk(), mode: grTab === 'g1d' ? 'data' : 'work' }); return; }
     if (grTab === 'g1v') { renderG1Portal(o0); return; }
     if (grTab === 'sup' || grTab === 'ims') { grRecView = grTab; renderReco($('#grOut', body), sm, st); return; }
     const o = $('#grOut', body), row4 = (l, x, cls = '') => `<tr class="${cls}"><td>${l}</td><td class="r">${gst$(x.t)}</td><td class="r">${gst$(x.ig)}</td><td class="r">${gst$(x.cg)}</td><td class="r">${gst$(x.sg)}</td><td class="r">${gst$(x.cs)}</td></tr>`;
@@ -5810,10 +5840,10 @@ VIEWS.gst = async v => {
     if ($('#grXl', o)) $('#grXl', o).onclick = () => recoExcel({ list, reco, cf, cl, sup, sm, fu, lw, M }).catch(e => toast(friendly(e), true));
 
     async function saveReco(fn) {
-      const r0 = JSON.parse(JSON.stringify(row.reco || {})); fn(r0);
+      const was = JSON.parse(JSON.stringify(row.reco || {})), r0 = JSON.parse(JSON.stringify(row.reco || {})); fn(r0);
       const { error } = await safe(sb.from('gst_months').update({ reco: r0 }).eq('client_id', grClient).eq('period', period));
       if (error) { toast(/reco/.test(error.message || '') ? 'Run update-gstr2b-reco.sql in Supabase first' : friendly(error), true); return false; }
-      row.reco = r0; render(); return true;
+      pushUndo({ reco: was }, { reco: r0 }); row.reco = r0; render(); return true;
     }
     async function saveDec(k, patch) {
       const ok = await saveReco(r => { r.dec = r.dec || {}; const cur = { ...(r.dec[k] || {}), ...patch, by: me.id, at: new Date().toISOString() };
@@ -6050,8 +6080,10 @@ VIEWS.gst = async v => {
       + `${left.length ? `\n\nLeft out:\n• ${left.join('\n• ')}` : ''}${bad ? `\n\n${bad} row(s) need a correction — shown in red in GSTR-1 entry.` : ''}\n\nLoad into GSTR-1 entry? Check the rows there, then Save to update the draft GSTR-3B.`)) return false;
     const key = c.id + '|' + period, g = row.g1 || {};
     const cur = g1Drafts[key] || { sales: (g.sales || []).map(x => ({ ...x })), amend: (g.amend || []).map(x => ({ ...x })), adv: (g.adv || []).map(x => ({ ...x })), docs: (g.docs || []).map(x => ({ ...x })), dirty: false };
+    G1U.init(cur);
     if (cur.sales.some(r => Object.keys(r).length) && !confirm('Replace the sales rows already in GSTR-1 entry with these?')) return false;
-    cur.sales = res.lines.map(x => ({ ...x })); cur.dirty = true; cur.up = res.lines.map(x => ({ no: x.no, name: x.name, nil: x.nil || '', exp: x.exp || '' })); g1Drafts[key] = cur;
+    clearTimeout(cur.tm); cur.burst = false; cur.hist.push(G1U.snap(cur));   // v70: the upload can be undone in GSTR-1 entry
+    cur.sales = res.lines.map(x => ({ ...x })); cur.dirty = true; cur.last = G1U.snap(cur); cur.up = res.lines.map(x => ({ no: x.no, name: x.name, nil: x.nil || '', exp: x.exp || '' })); g1Drafts[key] = cur;
     grTab = 'g1'; grOv = false; grPos = null; g1Tab = 'sales'; render();
     toast(`${C.length} lines loaded into GSTR-1 entry — check, then Save`); return true;
   }
@@ -6650,7 +6682,39 @@ const SALESIN = (() => {
 /* =====================================================================
    GSTR-1 ENTRY (tab inside GST review)
    ===================================================================== */
-const g1Drafts = {};             // unsaved work per client|month, survives tab switches
+const g1Drafts = {};
+// v70: undo for GSTR-1 entry edits not yet saved — one step per burst of typing / paste / upload / row delete
+const G1U = {
+  snap: D => JSON.stringify({ sales: D.sales, amend: D.amend, adv: D.adv, docs: D.docs }),
+  init(D) { if (!D.hist) { D.hist = []; D.last = this.snap(D); D.saved = D.last; } },
+  mark(D) {   // call after a change; keeps the state from before this burst
+    this.init(D); if (!D.burst) { D.hist.push(D.last); if (D.hist.length > 30) D.hist.shift(); D.burst = true; }
+    clearTimeout(D.tm); D.tm = setTimeout(() => { D.last = this.snap(D); D.burst = false; }, 900);
+  },
+  undo(D) {
+    this.init(D); clearTimeout(D.tm); D.burst = false; const prev = D.hist.pop(); if (!prev) return false;
+    const o = JSON.parse(prev); Object.assign(D, { sales: o.sales, amend: o.amend, adv: o.adv, docs: o.docs }); D.last = prev; D.dirty = prev !== D.saved; return true;
+  },
+  saved(D) { this.init(D); clearTimeout(D.tm); D.burst = false; D.last = D.saved = this.snap(D); D.hist = []; }
+};
+// v70: undo for saved GST review changes (registers, 2B, decisions, GSTR-1 entry, 3B figures) — per client|month, this browser session
+const GRUNDO = {};
+const grCanon = v => Array.isArray(v) ? v.map(grCanon) : v && typeof v === 'object' ? Object.keys(v).sort().reduce((o, k) => { if (v[k] !== undefined) o[k] = grCanon(v[k]); return o; }, {}) : v;
+const grSig = v => { const t = JSON.stringify(grCanon(v ?? null)); let h = 5381, h2 = 0; for (let i = 0; i < t.length; i++) { const k = t.charCodeAt(i); h = ((h << 5) + h + k) | 0; h2 = (h2 * 31 + k * (i + 1)) | 0; } return t.length + ':' + h + ':' + h2; };
+function grUndoLabel(before, patch) {
+  const k = Object.keys(patch).filter(x => x !== 'summary');
+  if (k.includes('purchases')) return patch.purchases ? 'purchase register change' : 'purchase register removed';
+  if (k.includes('gstr2b')) return patch.gstr2b ? 'GSTR-2B change' : 'GSTR-2B removed';
+  if (k.includes('g1')) return 'GSTR-1 entry save';
+  if (k.includes('sales')) return 'sales register change';
+  if (k.includes('gstr3b')) return 'GSTR-3B figures';
+  if (k.includes('gstr1')) return 'GSTR-1 totals';
+  if (k.includes('reco')) { const a = before.reco || {}, b = patch.reco || {}, ch = [...new Set([...Object.keys(a), ...Object.keys(b)])].filter(x => grSig(a[x]) !== grSig(b[x]));
+    return ch.some(x => /^(dec|ans)$/.test(x)) ? '2B vs Books decision' : ch.some(x => /einv/.test(x)) ? 'e-invoice totals' : 'GSTR-3B workings'; }
+  if (k.includes('status')) return patch.status === 'Verified' ? 'Mark as verified' : 'Back to draft';
+  if (k.includes('notes')) return 'review notes';
+  return 'last change';
+}             // unsaved work per client|month, survives tab switches
 let g1Tab = 'sales';
 addEventListener('beforeunload', e => { if (Object.values(g1Drafts).some(d => d.dirty)) { e.preventDefault(); e.returnValue = ''; } });
 const G1_LABEL = { B2B: '4A  B2B — registered customers', B2CL: '5  B2CL — inter-state unregistered above ₹1 lakh', EXP: '6A  Exports', SEZ: '6B  SEZ supplies',
@@ -6676,10 +6740,10 @@ function learnSales(c, D) {
   }
   if (sug && !grRules.some(r => r.client_id === c.id && r.field === sug.field && r.op === sug.op && U(r.val) === U(sug.val))) offerRule(c, sug, 'sales', action);
 }
-function renderG1(o, { client: c, getRow, save, mode = 'work' }) {   // v57: mode 'data' = step 1 (templates only), 'work' = step 2 (the sheet)
+function renderG1(o, { client: c, getRow, save, filed = null, mode = 'work' }) {   // v57: mode 'data' = step 1 (templates only), 'work' = step 2 (the sheet)
   const row = getRow(), key = c.id + '|' + row.period;
   if (!g1Drafts[key]) { const g = row.g1 || {}; g1Drafts[key] = { sales: (g.sales || []).map(x => ({ ...x })), amend: (g.amend || []).map(x => ({ ...x })), adv: (g.adv || []).map(x => ({ ...x })), docs: (g.docs || []).map(x => ({ ...x })), dirty: false }; }
-  const D = g1Drafts[key];
+  const D = g1Drafts[key]; G1U.init(D);
   const COLS = { sales: G1.SALES, amend: G1.AMEND, adv: G1.ADV };
   const own = String(c.gstin || '').slice(0, 2);
   const calc = () => ({ sales: G1.calcSales(D.sales, own, c.gstin), amend: G1.calcAmend(D.amend, own), adv: G1.calcAdv(D.adv, own) });
@@ -6687,20 +6751,22 @@ function renderG1(o, { client: c, getRow, save, mode = 'work' }) {   // v57: mod
   const sm = () => G1.summary(D, c);
   if (mode === 'data' && COLS[g1Tab] == null && g1Tab !== 'docs') g1Tab = 'sales';
   o.innerHTML = mode === 'data' ? `<div class="g1-bar"><b>GSTR-1 entry</b><span class="spacer"></span><span class="small" data-g1st></span>
-      <button class="btn sm" data-g1dl>Blank template</button><button class="btn sm" data-g1up>Upload filled template</button><button class="btn sm primary" data-g1save>Save</button></div><div data-g1body></div>`
+      <button class="btn sm" data-g1undo disabled title="Undo the last change not yet saved">↶ Undo</button><button class="btn sm" data-g1dl>Blank template</button><button class="btn sm" data-g1up>Upload filled template</button><button class="btn sm primary" data-g1save>Save</button></div><div data-g1body></div>`
     : `<div class="g1-bar"><div class="seg">${[['sales', 'Sales'], ['amend', 'Amendments'], ['adv', 'Advances'], ['docs', 'Documents'], ['hsn', 'HSN'], ['sum', 'Summary']]
       .map(([k, l]) => `<button data-g1t="${k}" class="${g1Tab === k ? 'on' : ''}">${l}${COLS[k] ? ` <small data-g1n="${k}"></small>` : ''}</button>`).join('')}</div>
       <span class="spacer"></span><span class="small" data-g1st></span>
-      <button class="btn sm" data-g1xl>Download Excel</button><button class="btn sm" data-g1json title="JSON for GST portal → GSTR-1 → Prepare offline → Upload">GSTR-1 JSON</button><button class="btn sm" data-g1wb title="Your GST Workings master template, filled for the whole financial year">GST workings (master)</button>
+      <button class="btn sm" data-g1undo disabled title="Undo the last change not yet saved">↶ Undo</button><button class="btn sm" data-g1xl>Download Excel</button><button class="btn sm" data-g1json title="JSON for GST portal → GSTR-1 → Prepare offline → Upload">GSTR-1 JSON</button><button class="btn sm" data-g1wb title="Your GST Workings master template, filled for the whole financial year">GST workings (master)</button>
       <button class="btn sm primary" data-g1save>Save</button></div>
     <div data-g1body></div>`;
+  if (filed) o.insertAdjacentHTML('afterbegin', `<p class="note warn small" style="margin:0 0 8px"><b>GSTR-1 for this month is already filed</b>${filed.arn ? ' · ARN ' + esc(filed.arn) : ''}${filed.filed_on ? ' · ' + esc(filed.filed_on) : ''}. You can still change these workings (they feed the draft GSTR-3B), but that does not change the filed return — corrections go into next month's amendments.</p>`);   // v70
   const body = $('[data-g1body]', o), st = $('[data-g1st]', o);
   const status = () => {
     const s = sm();
     st.innerHTML = (D.dirty ? '<b class="late">● Unsaved changes</b> · ' : row.g1 ? '<span class="ok-t">✓ Saved</span> · ' : '') + `${s.okCount} OK row${s.okCount === 1 ? '' : 's'}${s.errors ? ` · <b class="late">${s.errors} with errors</b>` : ''}`;
+    { const u = $('[data-g1undo]', o); if (u) { const n = (D.hist || []).length; u.disabled = !n; u.title = n ? `Undo the last change not yet saved (${n} step${n > 1 ? 's' : ''})` : 'Nothing to undo — saved changes are undone with ↶ Undo at the top of the page'; } }
     ['sales', 'amend', 'adv'].forEach(k => { const x = $(`[data-g1n="${k}"]`, o); if (x) x.textContent = D[k].filter(r => Object.keys(r).length).length || ''; });
   };
-  const dirty = () => { D.dirty = true; status(); };
+  const dirty = () => { D.dirty = true; G1U.mark(D); status(); };
 
   // ----- grid -----
   function cellHtml(col, v, ri) {
@@ -6827,6 +6893,7 @@ function renderG1(o, { client: c, getRow, save, mode = 'work' }) {   // v57: mod
   o.addEventListener('click', async e => {
     const b = e.target.closest('button'); if (!b) return; const d = b.dataset;
     if (d.g1t) { g1Tab = d.g1t; $$('[data-g1t]', o).forEach(x => x.classList.toggle('on', x === b)); draw(); }
+    if ('g1undo' in d) { if (G1U.undo(D)) { draw(); toast('Undone'); } return; }   // v70
     if (d.g1add) { for (let i = 0; i < 20; i++) D[g1Tab].push({}); drawGrid(g1Tab); }
     if (d.g1del != null) { D[g1Tab].splice(+d.g1del, 1); dirty(); drawGrid(g1Tab); }
     if ('g1dl' in d) { const a = document.createElement('a'); a.href = 'gstr1-entry-template.xlsx'; a.download = `GSTR1-entry-${slug(c.name)}-${row.period.slice(0, 7)}.xlsx`; document.body.appendChild(a); a.click(); a.remove(); }
@@ -6887,7 +6954,7 @@ function renderG1(o, { client: c, getRow, save, mode = 'work' }) {   // v57: mod
       if (!cur || cur.source === 'g1' || confirm('Also use these entries as the sales register for the draft GSTR-3B? (This replaces the uploaded sales register.)'))
         patch.sales = reg.length ? { rows: reg, file: 'GSTR-1 entry', source: 'g1', at: g1.at, by: me.id } : null;
       b.disabled = true;
-      try { await save(patch); D.dirty = false; toast('GSTR-1 entry saved'); learnSales(c, D); }
+      try { await save(patch); D.dirty = false; G1U.saved(D); toast('GSTR-1 entry saved'); learnSales(c, D); }
       catch (err) { toast(friendly(err), true); }
       finally { b.disabled = false; }
     }
