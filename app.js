@@ -5190,7 +5190,8 @@ function trimSheet(X, ws) {
 const prevMonth = () => { const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() - 1); return iso(d).slice(0, 7); };
 const periodToMonth = p => { const m = String(p || '').match(/([A-Za-z]{3})[a-z]*[\s-]+(\d{4})/); if (!m) return ''; const i = MONTHS.findIndex(x => x.toLowerCase() === m[1].toLowerCase()); return i < 0 ? '' : `${m[2]}-${pad(i + 1)}`; };
 const gTax = o => GR.tax(o || {});
-const gst$ = n => inr(Math.round(n || 0));
+// v90: GST review shows exact amounts (paise) — no rounding to rupees, so ITC / tax match the portal to the paisa
+const gst$ = n => { const v = (Math.round((+n || 0) * 100) / 100) || 0, frac = Math.abs(v % 1) > 0.0001; return '₹' + v.toLocaleString('en-IN', { minimumFractionDigits: frac ? 2 : 0, maximumFractionDigits: 2 }); };
 let grPos = null, grLastStep = {}, grPayX = null;   // v57: open return + step in GST review
 let grOv = true, gr3Last = 's2', grClient = '', grMonth = prevMonth(), grTab = 'g1', grRecFilter = 'books_only', grRecView = 'inv', grImsF = 'all';
 
@@ -7673,7 +7674,7 @@ const REV = (() => {
 })();
 
 // v78: this tab's code version — when a newer app is uploaded, offer Reload and block mails from old code
-const APP_VER = 'jlr-shell-v89';
+const APP_VER = 'jlr-shell-v90';
 let appStale = false;
 async function checkAppVer() {
   try { const t = await fetch('sw.js?v=' + Date.now(), { cache: 'no-store' }).then(r => r.text()); const live = (t.match(/jlr-shell-v\d+/) || [])[0];
