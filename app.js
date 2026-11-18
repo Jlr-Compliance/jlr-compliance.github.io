@@ -4533,8 +4533,10 @@ const GR = (() => {
       itcBase = fix(sum(ok)); itcFrom = 'confirmed';
     }
     // v79: RCM = 2B RCM + books RCM from unregistered / foreign suppliers (never in 2B) + typed in GSTR-3B workings (reco.w3b.rcm_add)
-    const rcmUnreg = fix(sum(P, r => r.rc && !gstinOk(r.g))), wr = ((((m.reco || {}).w3b) || {}).rcm_add) || {};
-    const rcm = fix({ t: 0, ig: 0, cg: 0, sg: 0, cs: 0 }); [has2b ? rcm2b : rcmBooks, has2b ? rcmUnreg : null, { t: +wr.t || 0, ig: +wr.ig || 0, cg: +wr.cg || 0, sg: +wr.sg || 0, cs: +wr.cs || 0 }].forEach(x => { if (x) for (const k in rcm) rcm[k] = r2((rcm[k] || 0) + (+x[k] || 0)); });
+    const rcmUnreg = fix(sum(P, r => r.rc && !gstinOk(r.g))), W3 = (((m.reco || {}).w3b) || {}), num5 = o => ({ t: +(o || {}).t || 0, ig: +(o || {}).ig || 0, cg: +(o || {}).cg || 0, sg: +(o || {}).sg || 0, cs: +(o || {}).cs || 0 });
+    // v89: 3.1(d) parts — 2B (or books when no 2B) · books lines of unregistered / foreign suppliers · typed "other" · typed unregistered persons (sec 9(4))
+    const rcmParts = { reg: has2b ? rcm2b : rcmBooks, booksUnreg: has2b ? rcmUnreg : fix({ t: 0, ig: 0, cg: 0, sg: 0, cs: 0 }), typed: num5(W3.rcm_add), unreg: num5(W3.rcm_unreg), has2b };
+    const rcm = fix({ t: 0, ig: 0, cg: 0, sg: 0, cs: 0 }); [rcmParts.reg, rcmParts.booksUnreg, rcmParts.typed, rcmParts.unreg].forEach(x => { if (x) for (const k in rcm) rcm[k] = r2((rcm[k] || 0) + (+x[k] || 0)); });
     // RCM: tax is paid in cash, and the same amount becomes ITC
     const liab = { ig: out.ig + rcm.ig, cg: out.cg + rcm.cg, sg: out.sg + rcm.sg, cs: out.cs + rcm.cs };
     const credit = { ig: itcBase.ig + rcm.ig, cg: itcBase.cg + rcm.cg, sg: itcBase.sg + rcm.sg, cs: itcBase.cs + rcm.cs };
@@ -4548,7 +4550,7 @@ const GR = (() => {
     cmp('GSTR-1 vs GSTR-3B 3.1(a)', g1, t31);
     if (g3 && g3.itc_net && has2b) cmp('GSTR-2B ITC vs GSTR-3B ITC claimed', itc2b, { t: itc2b.t, ...g3.itc_net });
     const over2b = method === 'books' && has2b ? r2(tax(itcBooks) - tax(itc2b)) : 0;
-    return { out, outB2B, outB2C, nilOut, nonGst, itc2b, blocked, rcm, itcBooks, itcBase, itcFrom, waiting, over2b, method, has2b, liab: fix(liab), setoff: so, cash, cashTotal: tax(cash), rec, checks,
+    return { out, outB2B, outB2C, nilOut, nonGst, itc2b, blocked, rcm, rcmParts, itcBooks, itcBase, itcFrom, waiting, over2b, method, has2b, liab: fix(liab), setoff: so, cash, cashTotal: tax(cash), rec, checks,
       counts: { sales: SA.length, purchases: P.length, b2b: B.length },
       trend: { sales: out.t, outTax: tax(out), itc: tax(itcBase), cash: g3 && g3.cash ? tax(g3.cash) : tax(cash), filedCash: g3 && g3.cash ? true : false } };
   }
@@ -5711,7 +5713,7 @@ VIEWS.gst = async v => {
     const D = draft3b(row, sm, c, st.ready ? st.cl.claim : null), G3 = row.gstr3b, h4 = ['ig', 'cg', 'sg', 'cs'];
     const tr = (l, x, cls = '', keys = H5) => `<tr class="${cls}"><td>${l}</td>${cells(x, keys)}</tr>`;
     const FROM = { gstr1: 'as per GSTR-1 filed', gstr1w: 'as per GSTR-1 (copied from our working)', sales: 'as per sales register — GSTR-1 filed not added' }[D.from];
-    const anyW = ['rcm_add', 'int', 'late', 'rev_perm', 'rev_temp', 'reclaim', 'cl_open', 'cash_open'].some(k => D.w[k] && h4.some(h => +D.w[k][h]));
+    const anyW = ['rcm_add', 'rcm_unreg', 'int', 'late', 'rev_perm', 'rev_temp', 'reclaim', 'cl_open', 'cash_open'].some(k => D.w[k] && h4.some(h => +D.w[k][h]));
     o.innerHTML = `<div class="rc-head"><div><h3 style="margin:0">Draft GSTR-3B — ${RECO.monthName(period)}</h3><p class="muted small" style="margin:2px 0 0">Laid out like the GSTR-3B form — click a heading to open it.</p></div><span class="spacer"></span>
         <button class="btn sm primary" data-w3b>RCM, reversal &amp; ledger balances${anyW ? ' ✓' : ''}</button><a class="btn sm" href="#/taxpay" data-tpfrom>Payment intimation →</a></div>
       ${D.from === 'sales' ? '<p class="note warn small">3.1 is from the sales register because the filed GSTR-1 is not added. Add it in the GSTR-1 filed tab.</p>' : ''}
@@ -5725,7 +5727,11 @@ VIEWS.gst = async v => {
       <h4 hidden class="gr-payh">3.1 Outward supplies and inward supplies liable to reverse charge <span class="muted small">(${FROM})</span></h4>
       <div class="table-wrap"><table class="gr-t"><thead><tr><th>Nature of supplies</th><th class="r">Taxable value</th><th class="r">IGST</th><th class="r">CGST</th><th class="r">SGST</th><th class="r">Cess</th></tr></thead><tbody>
         ${tr('(a) Outward taxable supplies (other than zero rated, nil rated and exempted)', D.a)}${tr('(b) Outward taxable supplies (zero rated)', D.b)}${tr('(c) Other outward supplies (nil rated, exempted)', D.c)}
-        ${tr('(d) Inward supplies (liable to reverse charge)', D.d)}${tr('(e) Non-GST outward supplies', D.e)}</tbody></table></div>
+        ${tr('<b>(d) Inward supplies (liable to reverse charge) — total</b>', D.d)}${(() => { const RP = sm.rcmParts || {}, U = RP.unreg || {}, sub = (l, x) => x && (x.t || x.ig || x.cg || x.sg || x.cs) ? `<tr class="muted"><td style="padding-left:22px">${l}</td>${['t', 'ig', 'cg', 'sg', 'cs'].map(k => `<td class="r">${gst$(x[k] || 0)}</td>`).join('')}</tr>` : '';
+          const inp = k => `<td class="r"><input type="number" step="0.01" min="0" data-rcmu="${k}" value="${U[k] ? esc(String(U[k])) : ''}" placeholder="0" style="width:96px;text-align:right;padding:3px 5px"></td>`;
+          return sub(`• in ${RP.has2b ? 'GSTR-2B (registered suppliers)' : 'purchase register'}`, RP.reg) + sub('• purchase register — unregistered / foreign suppliers', RP.booksUnreg) + sub('• typed — other (RCM, reversal &amp; ledger balances)', RP.typed)
+            + `<tr class="gr-rcmu"><td style="padding-left:22px">• Unregistered persons — sec 9(4) / notified, <b>type here</b> <button class="btn sm primary" data-rcmusave style="margin-left:6px">Save</button></td>${inp('t')}${inp('ig')}${inp('cg')}${inp('sg')}${inp('cs')}</tr>`; })()}
+        ${tr('(e) Non-GST outward supplies', D.e)}</tbody></table></div>
       </details>
       <details class="gr-fold"><summary>4 Eligible ITC · net ${gst$(gTax(D.C))} <span class="muted small">(${{ '2b': 'GSTR-2B', books: 'books', confirmed: 'bills the client confirmed', reco: 'after 2B vs Books decisions' }[D.itcSrc]})</span>${gTax(D.B2) ? ` · ${gst$(gTax(D.B2))} temporarily reversed` : ''}</summary>
       <h4 hidden class="gr-payh">4 Eligible ITC <span class="muted small">(${{ '2b': 'GSTR-2B', books: 'books', confirmed: '2B bills the client confirmed' }[sm.itcFrom]})</span></h4>
@@ -5757,6 +5763,15 @@ VIEWS.gst = async v => {
       </details>
       <p class="muted small">Set-off follows Sec 49/49A and Rule 88A: IGST credit first (IGST, then CGST/SGST), then CGST and SGST credit. Reverse charge tax is paid only in cash. Use “Reversal &amp; ledger balances” for 4(B) reversals, 4(D)(1) reclaim and the balances already in the credit and cash ledgers.</p>`;
     $('[data-w3b]', o).onclick = () => w3bDialog();
+    const rsv = $('[data-rcmusave]', o); if (rsv) rsv.onclick = async () => {   // v89: typed RCM from unregistered persons → reco.w3b.rcm_unreg
+      const v = {}; $$('[data-rcmu]', o).forEach(i => { const x = num(i.value); if (x) v[i.dataset.rcmu] = x; });
+      if (Object.keys(v).length && !v.t) return toast('Type the taxable value too', true);
+      const reco = JSON.parse(JSON.stringify(row.reco || {})), w = { ...(reco.w3b || {}) };
+      if (Object.keys(v).length) w.rcm_unreg = v; else delete w.rcm_unreg;
+      reco.w3b = { ...w, by: me.id, at: new Date().toISOString() };
+      rsv.disabled = true; try { await save({ reco }); toast('Unregistered RCM saved — added to 3.1(d), cash and 4(A)(3)'); } catch (e) { rsv.disabled = false; toast(friendly(e), true); }
+    };
+    $$('[data-rcmu]', o).forEach(i => i.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); rsv && rsv.click(); } }));
   }
   function w3bDialog() {
     const w = ((row.reco || {}).w3b) || {}, h4 = ['ig', 'cg', 'sg', 'cs'], L = { ig: 'IGST', cg: 'CGST', sg: 'SGST', cs: 'Cess' };
@@ -5776,6 +5791,7 @@ VIEWS.gst = async v => {
         const out = {}; const nt = (el.querySelector('[data-int51m]') || {}).dataset; if (nt && nt.note) out.int_note = nt.note;
         ['rcm_add', 'rev_temp', 'rev_perm', 'reclaim', 'int', 'late', 'cl_open', 'cash_open'].forEach(k => { const v = {}; [...(k === 'rcm_add' ? ['t'] : []), ...h4].forEach(h => { const x = num(fv(el, `${k}_${h}`)); if (x) v[h] = x; }); if (Object.keys(v).length) out[k] = v; });
         if (!out.int_note && w.int_note && (out.int || out.late)) out.int_note = w.int_note;
+        if (w.rcm_unreg) out.rcm_unreg = w.rcm_unreg;   // v89: typed in the 3.1 table, not in this window
         const reco = JSON.parse(JSON.stringify(row.reco || {})); reco.w3b = { ...out, by: me.id, at: new Date().toISOString() };
         await save({ reco }); toast('Saved');
       } });
@@ -7657,7 +7673,7 @@ const REV = (() => {
 })();
 
 // v78: this tab's code version — when a newer app is uploaded, offer Reload and block mails from old code
-const APP_VER = 'jlr-shell-v88';
+const APP_VER = 'jlr-shell-v89';
 let appStale = false;
 async function checkAppVer() {
   try { const t = await fetch('sw.js?v=' + Date.now(), { cache: 'no-store' }).then(r => r.text()); const live = (t.match(/jlr-shell-v\d+/) || [])[0];
