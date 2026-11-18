@@ -7098,6 +7098,14 @@ async function fillGstWorkings(XP, templateBytes, data) {
       lines = m.sales.rows.map(s => ({ no: s.i, d: s.d, gstin: s.g || '', name: s.n || '', hsn: '', qty: null, uqc: '', pos: '', tx: Math.abs(s.t), rate: null,
         ig: Math.abs(s.ig), cg: Math.abs(s.cg), sg: Math.abs(s.sg), te: 'Taxable', tms: '', rc: 'No', reg: s.g ? 'Registered' : 'Unregistered',
         sales: s.cn ? 'Sales Return' : 'Sales', doc: s.cn ? 'Credit Note' : 'Invoice', st: s.g ? 'B2B' : 'B2C', signedTx: s.t }));
+    } else if (m.gstr1) {                                          // v77: no invoice lines — only the filed GSTR-1 totals (fetched / typed): one line per portal table
+      const F = m.gstr1, secs = (F.secs || []).filter(x => x.sign && (x.t || x.ig || x.cg || x.sg));
+      const NAME = { B2B: 'B2B invoices', B2CL: 'B2C large', B2CS: 'B2C others', EXP: 'Exports', SEZWP: 'SEZ with payment', SEZWOP: 'SEZ without payment', DE: 'Deemed exports', AT: 'Advances received', CDNR: 'Credit / debit notes (registered)', CDNUR: 'Credit / debit notes (unregistered)', ATADJ: 'Advances adjusted', TXPD: 'Advances adjusted' };
+      const src = F.source === 'api' || secs.length ? 'filed GSTR-1, portal' : F.source === 'working' ? 'filed GSTR-1, as per working' : 'filed GSTR-1, typed';
+      const one = (nm, x, sign) => ({ no: `${NAME[nm] || nm || 'Outward supplies'} — total (${src})${x.n ? ` · ${x.n} doc${x.n > 1 ? 's' : ''}` : ''}`, d: null, gstin: '', name: '', hsn: '', qty: null, uqc: '', pos: '',
+        tx: Math.abs(r2(x.t)), rate: null, ig: Math.abs(r2(x.ig)), cg: Math.abs(r2(x.cg)), sg: Math.abs(r2(x.sg)), te: 'Taxable', tms: '', rc: 'No', reg: /B2C|EXP/.test(nm) ? 'Unregistered' : 'Registered',
+        sales: sign < 0 ? 'Sales Return' : 'Sales', doc: sign < 0 ? 'Credit Note' : 'Invoice', st: /^(EXP|SEZ|DE)/.test(nm) ? (nm === 'EXP' ? (x.ig ? 'EXPWP' : 'EXPWOP') : nm === 'DE' ? 'DE' : nm) : /B2C/.test(nm) ? (nm === 'B2CL' ? 'B2CL' : 'B2C') : 'B2B', signedTx: sign * Math.abs(x.t || 0) });
+      lines = secs.length ? secs.map(x => one(x.nm, x, x.sign)) : (F.t || F.ig || F.cg || F.sg) ? [one('', F, 1)] : [];
     }
     if (!lines.length) continue;
     turnover[mi] = r2(lines.reduce((a, l) => a + l.signedTx, 0));
@@ -7240,7 +7248,7 @@ async function downloadGstWorkings(c, period) {
     safe(sb.from('notices').select('*').eq('client_id', c.id).order('notice_date')),
     safe(sb.from('tasks').select('return_name,period,status,filed_on,arn').eq('client_id', c.id).ilike('return_name', 'GSTR-1%').limit(500))
   ]);
-  const months = (gm.data || []).map(r => ({ period: r.period, g1: r.g1, sales: r.sales, purchases: r.purchases, gstr2b: r.gstr2b, gstr3b: r.gstr3b, status: r.status }));
+  const months = (gm.data || []).map(r => ({ period: r.period, g1: r.g1, sales: r.sales, gstr1: r.gstr1, purchases: r.purchases, gstr2b: r.gstr2b, gstr3b: r.gstr3b, status: r.status }));
   if (!months.length) return toast('No GST data saved for this client in FY ' + fy, true);
   const g1tasks = (tk.data || []).map(t => ({ ...t, period: (periodToMonth(t.period) || '') + '-01' })).filter(t => t.period.length === 10 && t.period >= `${fyStart}-04-01` && t.period <= `${fyStart + 1}-03-01`);
   const sel = (gm.data || []).find(r => r.period === period);
@@ -7334,7 +7342,7 @@ const REV = (() => {
     const y = +period.slice(0, 4), m = +period.slice(5, 7), fyStart = m >= 4 ? y : y - 1, fy = `${fyStart}-${String((fyStart + 1) % 100).padStart(2, '0')}`;
     const [XP, tpl, gm] = await Promise.all([loadXlsxPopulate(), fetch('gst-workings-master.xlsx', { cache: 'no-store' }).then(r => { if (!r.ok) throw new Error('Master template not found on the site'); return r.arrayBuffer(); }),
       must(sb.from('gst_months').select('*').eq('client_id', c.id).gte('period', `${fyStart}-04-01`).lte('period', `${fyStart + 1}-03-01`).order('period'))]);
-    const months = (gm.data || []).map(r => ({ period: r.period, g1: r.g1, sales: r.sales, purchases: r.purchases, gstr2b: r.gstr2b, gstr3b: r.gstr3b, status: r.status }));
+    const months = (gm.data || []).map(r => ({ period: r.period, g1: r.g1, sales: r.sales, gstr1: r.gstr1, purchases: r.purchases, gstr2b: r.gstr2b, gstr3b: r.gstr3b, status: r.status }));
     const sel = (gm.data || []).find(r => r.period === period);
     const out = await fillGstWorkings(XP, new Uint8Array(tpl), { client: { name: c.name, gstin: c.gstin, trade: c.trade_name || '' }, fy, month: GW_MONTHS[(m + 8) % 12], months, notices: [], g1tasks: [],
       preparedBy: me.full_name || me.email, verifiedBy: sel && sel.verified_by ? profName(sel.verified_by) : '', send: true });
