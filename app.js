@@ -4586,8 +4586,10 @@ function draft3b(m, sm, client, claim = null) {
   const imp = Z(), isd = Z();
   if (itcSrc !== 'books') B2.forEach(x => { if (x.na || x.rc) return; if (/IMP/.test(x.src || '') && !GR.impHeld(m.reco, x)) add(imp, x); if (/ISD/.test(x.src || '')) add(isd, x); });
   const a5 = add(add(add(Z(), claim || sm.itcBase), imp, -1), isd, -1); add(a5, g('reclaim'));
+  const held2b = claim && claim.held2b ? add(Z(), claim.held2b) : Z();           // v75: 2B ITC not taken now — shown in 4(A)(5) and reversed in 4(B)(2), like the portal
+  add(a5, held2b);
   const A = add(add(add(add(Z(), imp), sm.rcm), isd), a5);
-  const B1 = g('rev_perm'), B2r = g('rev_temp'), C = add(add(add(Z(), A), B1, -1), B2r, -1);
+  const B1 = g('rev_perm'), B2r = add(g('rev_temp'), held2b), C = add(add(add(Z(), A), B1, -1), B2r, -1);
   const L = add(add(Z(), a), b);                                  // zero-rated with IGST is payable too (exports without payment carry 0)
   const RC = sm.rcm, credit = add(add(Z(), C), g('cl_open')), so = GR.setoff(L, credit);
   // RCM liability must be paid in cash; RCM ITC is already in 4(A)(3)
@@ -4595,7 +4597,7 @@ function draft3b(m, sm, client, claim = null) {
   H.forEach(k => { cashNeed[k] = r2(so.cash[k] + (RC[k] || 0)); cashUsed[k] = r2(Math.min(cashNeed[k], Math.max(0, cashLedger[k]))); deposit[k] = r2(cashNeed[k] - cashUsed[k]); });
   const sum = o => r2(H.reduce((s, k) => s + (+o[k] || 0), 0));
   return { from, itcSrc, a, b, c: sm.nilOut, d: RC, e: sm.nonGst, imp, isd, a5, A, B1, B2: B2r, C, D1: g('reclaim'), D2: sm.blocked, L, credit, so, cashNeed, cashUsed, deposit,
-    depositTotal: sum(deposit), cashTotal: sum(cashNeed), w, H };
+    depositTotal: sum(deposit), cashTotal: sum(cashNeed), w, H, held2b };
 }
 
 /* =====================================================================
@@ -4722,32 +4724,35 @@ const RECO = (() => {
   function claim(list, reco, b2rows, o = {}) {
     const method = o.method || 'books_2b', dec = (reco && reco.dec) || {};
     const Z = () => ({ t: 0, ig: 0, cg: 0, sg: 0, cs: 0 }), add = (a, x) => { for (const f in a) a[f] = r2(a[f] + ((x && x[f]) || 0)); };
-    const c = Z(), held = Z(), carried = Z(), other = Z(), late = Z(), undecided = [];
+    const c = Z(), held0 = Z(), carried = Z(), other = Z(), late = Z(), undecided = [], held2b = Z();
+    // v75: ITC in 2B that is not taken this month — the portal puts all 2B ITC in 4(A), so this goes to 4(B)(2) temporary reversal
+    const hold = (o, from2b) => { add(held0, o); if (from2b) add(held2b, o); };
     list.forEach(it => {
       const a = GR.effA(reco, it.k), x = it.x, b = it.b;
       if ((x && x.rc) || (b && b.rc)) return;                                  // reverse charge — cash, see draft 3B
       if (it.st === 'claimed_before') return;                                   // claimed in an earlier month
       if (method === 'books') {                                                 // credit as per books; 2B only tracked
-        if (b) { if ((dec[it.k] || {}).a === 'noclaim') add(held, b); else add(c, b); return; }
-        if (it.st === '2b_only') { if (TAKE.includes(a)) add(c, x); else { add(held, x); if (!a) undecided.push(it); } }
+        if (b) { if ((dec[it.k] || {}).a === 'noclaim') hold(b, false); else add(c, b); return; }
+        if (it.st === '2b_only') { if (TAKE.includes(a)) add(c, x); else { hold(x, true); if (!a) undecided.push(it); } }
         return;                                                                 // carried: already claimed when booked
       }
-      if (it.st === 'confirm') { if (TAKE.includes(a)) add(c, x); else { add(held, x); if (!a) undecided.push(it); } return; }
+      if (it.st === 'confirm') { if (TAKE.includes(a)) add(c, x); else { hold(x, true); if (!a) undecided.push(it); } return; }
       if (it.st === 'matched') add(c, x);
       else if (it.st === 'carried') { add(c, x); add(carried, x); }
       else if (it.st === 'mismatch') {
         if (!a) undecided.push(it);
-        if (a === 'reject') add(held, x);
+        if (a === 'reject') hold(x, true);
         else if (a === 'acc2b' || a === 'ignore') add(c, x);
         else add(c, Math.abs(tax(b)) <= Math.abs(tax(x)) ? b : x);             // until decided: the lower of books and 2B
-      } else if (it.st === 'gstin_diff' || it.st === 'suggest') { if (a === 'link' || a === 'fixbooks') add(c, x); else { add(held, x); if (!a) undecided.push(it); } }
-      else if (it.st === '2b_only') { if (!a) undecided.push(it); if (TAKE.includes(a)) add(c, x); else add(held, x); }
-      else if (it.st === 'books_only') add(held, b);
+      } else if (it.st === 'gstin_diff' || it.st === 'suggest') { if (a === 'link' || a === 'fixbooks') add(c, x); else { hold(x, true); if (!a) undecided.push(it); } }
+      else if (it.st === '2b_only') { if (!a) undecided.push(it); if (TAKE.includes(a)) add(c, x); else hold(x, true); }
+      else if (it.st === 'books_only') hold(b, false);
     });
     (o.late || []).forEach(e => { if (!e.x.rc) { add(c, e.x); add(late, e.x); } });
-    if (method !== 'books') (b2rows || []).forEach(x => { if (/IMP|ISD/.test(x.src || '') && !x.na && !x.rc) { if (/IMP/.test(x.src || '') && GR.impHeld(reco, x)) add(held, x); else add(other, x); } });
+    if (method !== 'books') (b2rows || []).forEach(x => { if (/IMP|ISD/.test(x.src || '') && !x.na && !x.rc) { if (/IMP/.test(x.src || '') && GR.impHeld(reco, x)) hold(x, false); else add(other, x); } });
     add(c, other);
-    return { claim: c, held, carried, other, late, undecided };
+    if (method !== 'books') Object.defineProperty(c, 'held2b', { value: held2b, enumerable: false });   // read by draft3b
+    return { claim: c, held: held0, held2b, carried, other, late, undecided };
   }
   // bills that can be sent to the client to confirm (in 2B, not in books / no books), not yet answered
   const askable = (list, reco) => list.filter(it => (it.st === '2b_only' || it.st === 'imp_2b' || it.st === 'confirm') && !GR.effA(reco, it.k) && !(it.x && (it.x.rc || it.x.na)));
@@ -5684,7 +5689,7 @@ VIEWS.gst = async v => {
         <tr class="sub"><td colspan="5"><b>(A) ITC available (whether in full or part)</b></td></tr>
         ${tr('(1) Import of goods', D.imp, '', h4)}${tr('(2) Import of services', { ig: 0, cg: 0, sg: 0, cs: 0 }, '', h4)}${tr('(3) Inward supplies liable to reverse charge', D.d, '', h4)}${tr('(4) Inward supplies from ISD', D.isd, '', h4)}${tr('(5) All other ITC', D.a5, '', h4)}
         <tr class="sub"><td colspan="5"><b>(B) ITC reversed</b></td></tr>
-        ${tr('(1) As per rules 38, 42 &amp; 43 of CGST Rules and section 17(5)', D.B1, '', h4)}${tr('(2) Others (temporary reversal)', D.B2, gTax(D.B2) ? 'warn-row' : '', h4)}
+        ${tr('(1) As per rules 38, 42 &amp; 43 of CGST Rules and section 17(5)', D.B1, '', h4)}${tr(`(2) Others (temporary reversal)${D.held2b && gTax(D.held2b) ? ` <span class="muted small">— incl. ${gst$(gTax(D.held2b))} in 2B not taken this month${gTax(D.B2) - gTax(D.held2b) > 0.5 ? ` + ${gst$(gTax(D.B2) - gTax(D.held2b))} typed` : ''}</span>` : ''}`, D.B2, gTax(D.B2) ? 'warn-row' : '', h4)}
         ${tr('<b>(C) Net ITC available (A) − (B)</b>', D.C, 'tot', h4)}
         <tr class="sub"><td colspan="5"><b>(D) Other details</b></td></tr>
         ${tr('(1) ITC reclaimed which was reversed under 4(B)(2) earlier', D.D1, '', h4)}${tr('(2) Ineligible ITC under section 16(4) &amp; ITC restricted due to PoS rules / not available in 2B', D.D2, '', h4)}
