@@ -5248,6 +5248,8 @@ VIEWS.gst = async v => {
   // ===== v34: front view = overview cards (E), workings = 4 steps (D) =====
   const rowNow = () => row;
   const stepOf = k => (((row.reco || {}).steps) || {})[k] || null;
+  // v76: nil return per return (reco.nil.g1 / reco.nil.g3b) — GSTR-1 can be nil while GSTR-3B still claims 2B ITC
+  const nilOf = k => !!((((row.reco || {}).nil) || {})[k === 'gstr1' ? 'g1' : 'g3b']);
   async function setStep(k, v) {
     const reco = JSON.parse(JSON.stringify(row.reco || {})); reco.steps = reco.steps || {};
     if (v === 'clear') delete reco.steps[k]; else reco.steps[k] = { [v]: true, by: me.id, at: new Date().toISOString() };
@@ -5281,6 +5283,7 @@ VIEWS.gst = async v => {
   const chip = (k, label, d, info, btns) => `<div class="grc ${d ? 'ok' : ''}"><span class="grc-i" aria-hidden="true">${d ? '✓' : '○'}</span><div class="grc-b"><b>${label}</b><small>${d ? info : 'Not added'}</small></div><div class="grc-a">${btns}${d ? `<button class="link small danger-t" data-clr="${k}" aria-label="Remove ${esc(label)}">Remove</button>` : ''}</div></div>`;
   // v38: GSTR-3B goes for verification only when 2B is complete (2B in, reco ready, nothing left to decide)
   function gate3(sm, st) {
+    if (nilOf('gstr3b')) return { ok: true, why: [] };
     const M = meth(), why = [], [y, m] = grMonth.split('-').map(Number), nx = new Date(y, m, 14);
     if (!row.gstr2b) why.push(`GSTR-2B is not added yet — ${nx <= new Date() ? 'on the portal since' : 'it comes on'} ${nx.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })} (upload, or send it with the JLR GST helper)`);
     else if (M !== '2b_confirm' && !row.purchases) why.push('The purchase register is not added');
@@ -5297,8 +5300,9 @@ VIEWS.gst = async v => {
       const ci = L.findIndex(x => !x.d); if (ci >= 0) L[ci].cur = true;
       const si = L.findIndex(x => x.l === 'Sent for verification'); if (RS === 'changes') { L[si].bad = true; L[si].l = 'Changes needed'; L[si].d = false; L.forEach(x => { if (x !== L[si]) x.cur = false; }); L[si].cur = true; }
       return L; };
-    FL.gstr1 = mk([['Data received', row.sales || row.g1], ['Workings done', ok('s1') || (row.g1 && (row.g1.sales || []).length)], ['Sent for verification', SENT.includes(a.RS)], ['Verified — ready to file', OKD.includes(a.RS)], ['Filed', a.filed]], a.RS);
-    FL.gstr3b = mk([['Data received', row.purchases || row.gstr2b], ['2B complete', G3gate.ok], ['Workings done', ok('s3')], ['Sent for verification', SENT.includes(b.RS)], ['Payment & ready to file', OKD.includes(b.RS)], ['Filed', b.filed]], b.RS);
+    const n1 = nilOf('gstr1'), n3 = nilOf('gstr3b');
+    FL.gstr1 = mk([['Data received', row.sales || row.g1 || n1], ['Workings done', n1 || ok('s1') || (row.g1 && (row.g1.sales || []).length)], ['Sent for verification', SENT.includes(a.RS)], ['Verified — ready to file', OKD.includes(a.RS)], ['Filed', a.filed]], a.RS);
+    FL.gstr3b = mk([['Data received', row.purchases || row.gstr2b || n3], ['2B complete', G3gate.ok], ['Workings done', n3 || ok('s3')], ['Sent for verification', SENT.includes(b.RS)], ['Payment & ready to file', OKD.includes(b.RS)], ['Filed', b.filed]], b.RS);
   }
   const flowNow = k => { const L = FL[k], cur = L.find(x => x.cur); return cur ? [cur.bad ? 'Changes needed' : (cur.l === 'Filed' ? 'Ready to file' : 'Next: ' + cur.l), cur.bad ? 'bad' : cur.l === 'Filed' ? 'ok' : 'info'] : ['Filed ✓', 'ok']; };
   const flowHtml = (k, small) => `<ol class="rf ${small ? 'rf-sm' : ''}" aria-label="${REV.KIND[k].label} status">${FL[k].map((x, i) => `<li class="${x.d ? 'done' : ''} ${x.cur ? 'cur' : ''} ${x.bad ? 'bad' : ''}" ${x.cur ? 'aria-current="step"' : ''}><span class="rf-n">${x.d ? '✓' : x.bad ? '!' : i + 1}</span>${esc(x.l)}</li>`).join('')}</ol>`;
@@ -5364,7 +5368,8 @@ VIEWS.gst = async v => {
       return `<li class="${x.d ? 'done' : ''} ${x.cur ? 'cur' : ''} ${x.bad ? 'bad' : ''} ${on ? 'sel' : ''}"><button type="button" data-rs="${k}:${i + 1}" ${on ? 'aria-current="step"' : ''}><span class="rf-n">${x.d ? '✓' : x.bad ? '!' : i + 1}</span>${esc(x.l)}</button></li>`; }).join('')}</ol>`;
     const myTodo = todoOf(sm, st, stat).filter(t => t[1] === RET);
     const lock = RET === 'gstr3b' && !G3gate.ok && !SENT.includes((revs.gstr3b || {}).state) && SN <= 4 ? `<div class="rf-lock" role="note"><b>Send for verification is locked until 2B is complete.</b> You can still work on purchases and the draft 3B. ${G3gate.why.map(esc).join(' · ')}</div>` : '';
-    const bar = retTabs(RET) + `<section class="rf-w"><div class="rf-h"><h2>${RET === 'gstr1' ? 'GSTR-1 workspace' : 'GSTR-3B workspace'}</h2><span class="muted small">Click a step to open it</span></div>${flowNav(RET)}${lock}
+    const bar = retTabs(RET) + `<section class="rf-w"><div class="rf-h"><h2>${RET === 'gstr1' ? 'GSTR-1 workspace' : 'GSTR-3B workspace'}</h2><span class="muted small">Click a step to open it</span><span class="spacer" style="flex:1"></span>${nilOf(RET) ? `<span class="pill b small">NIL return</span><button class="link small" data-nil="${RET}" data-nilx="1">Not nil</button>` : `<button class="btn sm" data-nil="${RET}" title="No ${RET === 'gstr1' ? 'sales' : 'sales, ITC or tax'} this month">Mark as Nil return</button>`}</div>${flowNav(RET)}${lock}
+      ${nilOf(RET) ? `<p class="note small" style="margin:6px 0 0"><b>${RET === 'gstr1' ? 'GSTR-1' : 'GSTR-3B'} is a NIL return this month</b>${(((row.reco || {}).nil || {})[RET === 'gstr1' ? 'g1' : 'g3b'] || {}).by ? ` · marked by ${esc(profName(row.reco.nil[RET === 'gstr1' ? 'g1' : 'g3b'].by) || '')}` : ''}. Send it for verification to the senior as usual, file it (portal, or SMS <code>NIL ${RET === 'gstr1' ? 'R1' : '3B'} ${esc(c.gstin || '')} ${grMonth.slice(5, 7)}${grMonth.slice(0, 4)}</code> to 14409), then upload the acknowledgement.</p>` : ''}
       ${myTodo.length ? `<div class="gr-todo" aria-label="To do">${myTodo.slice(0, 4).map(t => `<button class="gr-todo-i" data-rs="${t[1]}:${t[2]}" ${t[3] ? `data-rf2="${t[3]}"` : ''}><span>${esc(t[0])}</span><span aria-hidden="true">›</span></button>`).join('')}</div>` : ''}</section>`;
     const myRules = grRules.filter(r => r.client_id === c.id && r.active !== false).length;
     const okRev = k => !!(revs[k] && ['approved', 'sent_client'].includes(revs[k].state));
@@ -5529,14 +5534,33 @@ VIEWS.gst = async v => {
     render();
   }
   // v57: the to-do list, shown inside each return's tab: [text, return, step, reco filter]
+  async function setNil(k, on) {   // v76
+    const key = k === 'gstr1' ? 'g1' : 'g3b', L = REV.KIND[k].label, sm = gsum(row), T = o => GR.r2(gTax(o || {}));
+    if (on) {
+      const sales = ((row.sales || {}).rows || []).length + (((row.g1 || {}).sales) || []).filter(r => Object.keys(r).length).length;
+      if (k === 'gstr1' && sales) return toast(`GSTR-1 can't be nil — this month has ${sales} sales line(s). Remove the sales register / GSTR-1 entry rows first.`, true);
+      if (k === 'gstr3b') {
+        const salesTax = T(sm.out) || T(row.gstr1), itc2b = T(sm.itc2b), itcB = T(sm.itcBooks), rcm = T(sm.rcm);
+        if (salesTax || (sales && !nilOf('gstr1'))) return toast(`GSTR-3B can't be nil — there is tax on sales (${gst$(salesTax)}) for this month.`, true);
+        if (itc2b || itcB || rcm) return toast(`GSTR-3B can't be nil — ${itc2b ? `GSTR-2B has ITC of ${gst$(itc2b)}` : itcB ? `the purchase register has ITC of ${gst$(itcB)}` : `there is reverse charge of ${gst$(rcm)}`}. File GSTR-3B with the ITC: 3.1 stays zero and the credit goes to the ledger (carried forward). Only GSTR-1 can be nil.`, true);
+        if (!row.gstr2b && !confirm(`GSTR-2B is not added for ${REV.mon(period)}.\n\nCheck on the portal that 2B has no ITC (and there is no reverse charge) before marking GSTR-3B as nil.\n\nMark GSTR-3B as NIL?`)) return;
+      }
+      if (!confirm(`Mark ${L} for ${REV.mon(period)} as a NIL return?\n\nThe data and workings steps are ticked. It still goes to the senior for verification, then filing and the acknowledgement as usual.`)) return;
+    } else if (!confirm(`${L} for ${REV.mon(period)} is NOT a nil return?\n\nThe steps go back to normal (add the data and workings).`)) return;
+    const nil = { ...(((row.reco || {}).nil) || {}) };
+    if (on) nil[key] = { by: me.id, at: new Date().toISOString() }; else delete nil[key];
+    try { await save({ reco: { ...(row.reco || {}), nil } }); toast(on ? `${L} marked as NIL return` : `${L} is no longer nil`); }
+    catch (e) { toast(friendly(e), true); }
+  }
   function todoOf(sm, st, stat) {
     const S = row.sales, P = row.purchases, B = row.gstr2b, G1f = row.gstr1, M = meth(), todo = [];
     const t1 = taskOf('gstr1'), filed1 = (t1 && t1.status === 'Filed') || (revs.gstr1 && revs.gstr1.state === 'sent_client');
-    if (!S && !row.g1) todo.push(['Add the sales register, or upload the filled GSTR-1 template', 'gstr1', 1]);
+    const n1 = nilOf('gstr1'), n3 = nilOf('gstr3b');
+    if (!S && !row.g1 && !n1) todo.push(['Add the sales register, or upload the filled GSTR-1 template', 'gstr1', 1]);
     if (filed1 && !G1f) todo.push(['Add the filed GSTR-1 figures (fetch, same as working or type in)', 'gstr1', 5]);
     if (stat.s1[1] === 'bad') todo.push(['Filed GSTR-1 differs from our working', 'gstr1', 5]);
-    if (M !== '2b_confirm' && !P) todo.push(['Add the purchase register', 'gstr3b', 1]);
-    if (!B) todo.push(['Add GSTR-2B (upload, or send it with the JLR GST helper)', 'gstr3b', 1]);
+    if (M !== '2b_confirm' && !P && !n3) todo.push(['Add the purchase register', 'gstr3b', 1]);
+    if (!B && !n3) todo.push(['Add GSTR-2B (upload, or send it with the JLR GST helper)', 'gstr3b', 1]);
     if (st.decideN) todo.push([`Decide ${st.decideN} bill${st.decideN > 1 ? 's' : ''} (amount, GSTIN or bill no differs)`, 'gstr3b', 2, 'decide']);
     if (st.openN && !st.toAsk.length) todo.push([`${st.openN} bill${st.openN > 1 ? 's' : ''} in 2B ${M === '2b_confirm' ? 'waiting for the client' : 'not in books — decide'}`, 'gstr3b', 2, M === '2b_confirm' ? 'waiting' : 'notbooks']);
     if (st.toMiss && st.toMiss.length) todo.push([`Tell the client about ${st.toMiss.length} bill${st.toMiss.length > 1 ? 's' : ''} missing in 2B`, 'gstr3b', 2, 'missing']);
@@ -5545,7 +5569,7 @@ VIEWS.gst = async v => {
     if (st.lw.wait.length) todo.push([`${st.lw.wait.length} earlier bill${st.lw.wait.length > 1 ? 's' : ''} still waiting for the client`, 'gstr3b', 2, 'earlier']);
     if (sm.checks.some(x => !x.ok)) todo.push(['Look at the GSTR-1 vs 3B checks', 'gstr3b', 3]);
     const srN = (REV.senior() || {}).full_name || 'the senior', dd = d => new Date(d).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
-    [['gstr1', 3, !!(S || row.g1)], ['gstr3b', 4, !!((S || G1f || row.g1) && G3gate.ok)]].forEach(([k, s, ready]) => {
+    [['gstr1', 3, !!(S || row.g1 || n1)], ['gstr3b', 4, !!((S || G1f || row.g1 || n1) && G3gate.ok)]].forEach(([k, s, ready]) => {
       const rv = revs[k], RS = rv ? rv.state : 'draft', L = REV.KIND[k].label;
       if (RS === 'changes') todo.unshift([`Senior asked for changes on ${L}: ${((rv.remarks || []).slice(-1)[0] || {}).text || ''}`.slice(0, 130), k, s]);
       else if (RS === 'sent') todo.push([`${L} waiting for ${srN} to verify (sent ${dd(rv.sent_at)})`, k, s]);
@@ -6200,6 +6224,7 @@ VIEWS.gst = async v => {
       await save({ gstr1: { t: o2.t, ig: o2.ig, cg: o2.cg, sg: o2.sg, cs: o2.cs, source: 'working', ...by() } }).catch(err => toast(friendly(err), true)); toast('GSTR-1 (filed) set from our working');
     }
     if (d.rev) { revAction(d.rev, d.rk || 'gstr3b', b); return; }
+    if (d.nil) { setNil(d.nil, !d.nilx); return; }
     if (b.id === 'grSaveNotes') { await save({ notes: $('#grNotes', body).value.trim() || null }).catch(err => toast(friendly(err), true)); toast('Notes saved'); }
     if (b.id === 'grVer') { if (!gsum(row).counts.sales && !row.gstr2b) return toast('Add the data first', true); await save({ status: 'Verified', notes: (($('#grNotes', body) || {}).value || row.notes || '').trim() || null }).catch(err => toast(friendly(err), true)); toast('Marked as verified'); }
     if (b.id === 'grUnver') { await save({ status: 'Draft' }).catch(err => toast(friendly(err), true)); }
@@ -7269,7 +7294,7 @@ const REV = (() => {
       itc: st && st.ready ? { in2b: tx(sm.itc2b), claim: tx(st.cl.claim), held: tx(st.cl.held), books: tx(sm.itcBooks), matched: L('matched').length, decide: st.decideN, missing: L('books_only').length, notbooks: L('2b_only').length + L('confirm').length } : null,
       missing: L('books_only').slice(0, 25).map(brief), notbooks: [...L('2b_only'), ...L('confirm')].slice(0, 25).map(brief),
       decide: [...L('mismatch'), ...L('suggest'), ...L('gstin_diff')].map(x => [...brief(x), (RECO.decLabel(x.st, (((row.reco || {}).dec || {})[x.k] || {}).a) || 'not decided')]).slice(0, 25),
-      notes: row.notes || ''
+      notes: row.notes || '', nil: ((row.reco || {}).nil) || {}
     };
   }
   async function pdf(S, kind = 'gstr3b') {
@@ -7362,7 +7387,8 @@ const REV = (() => {
       token_exp: new Date(Date.now() + 10 * 864e5).toISOString(), tag, summary: S };
     const up = await safe(sb.from('gst_reviews').upsert(rec, { onConflict: 'client_id,period,kind' }));
     if (up.error) throw new Error(v19(up.error));
-    const who = me.full_name || me.email, F = figures(S, kind), line = `PFA the ${K.short} Workings of ${c.name} for ${mon(period)} for your reference.`;
+    const isNil = !!(S.nil || {})[kind === 'gstr1' ? 'g1' : 'g3b'];   // v76
+    const who = me.full_name || me.email, F = isNil ? [['Return', 'NIL — no ' + (kind === 'gstr1' ? 'outward supplies' : 'outward supplies, ITC or tax')]] : figures(S, kind), line = isNil ? `${K.label} of ${c.name} for ${mon(period)} is a NIL return. Please verify.` : `PFA the ${K.short} Workings of ${c.name} for ${mon(period)} for your reference.`;
     const body = `${greeting()}\n\n${line}\n\n${F.map(([l, v]) => `${l}: ${v}`).join('\n')}${S.notes ? '\nNotes: ' + S.notes : ''}\n\nApprove or ask for changes: ${link}\nOr reply to this mail — "Approved" on the first line approves; anything else goes back to the team as remarks.\n\nThanks & Regards,\n${who}\n${signature()}`;
     const html = `<div style="font-family:Arial,sans-serif;font-size:14px;color:#222;line-height:1.5">
       <p>${htmlEsc(greeting())}</p><p>${htmlEsc(line)}</p>
@@ -7372,7 +7398,7 @@ const REV = (() => {
       &nbsp; <a href="${link}&a=changes" style="color:#a3261d;border:1px solid #a3261d;padding:8px 16px;border-radius:6px;text-decoration:none;font-weight:bold;font-size:13px">Needs changes</a></p>
       <p style="color:#6b7280;font-size:12px">Or reply to this mail: write <b>Approved</b> on the first line to approve, or type your remarks.</p>
       <p>Thanks &amp; Regards,<br>${htmlEsc(who)}</p>${sigHtml()}</div>`;
-    const ins = await safe(sb.from('mail_jobs').insert({ kind: 'review', kind2: kind, to_addr: sr.email, subject: `${K.short} Workings | ${monShort(period)} | ${c.name}  [JLR-REVIEW:${tag}]`, body, html, files: fl, client_id: c.id, period }));
+    const ins = await safe(sb.from('mail_jobs').insert({ kind: 'review', kind2: kind, to_addr: sr.email, subject: `${isNil ? 'NIL ' : ''}${K.short} Workings | ${monShort(period)} | ${c.name}  [JLR-REVIEW:${tag}]`, body, html, files: fl, client_id: c.id, period }));
     if (ins.error) throw new Error(v19(ins.error));
     return { tag, link, portal: !!(rev && rev.draft) };
   }
