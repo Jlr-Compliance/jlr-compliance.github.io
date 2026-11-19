@@ -4598,8 +4598,9 @@ function draft3b(m, sm, client, claim = null) {
   const a5 = add(add(add(Z(), claim || sm.itcBase), imp, -1), isd, -1); add(a5, g('reclaim'));
   const held2b = claim && claim.held2b ? add(Z(), claim.held2b) : Z();           // v75: 2B ITC not taken now — shown in 4(A)(5) and reversed in 4(B)(2), like the portal
   add(a5, held2b);
+  const blk175 = claim && claim.blocked175 ? add(Z(), claim.blocked175) : Z(); add(a5, blk175);   // v100: blocked 17(5) — in 4(A)(5), reversed in 4(B)(1)
   const A = add(add(add(add(Z(), imp), sm.rcm), isd), a5);
-  const B1 = g('rev_perm'), B2r = add(g('rev_temp'), held2b), C = add(add(add(Z(), A), B1, -1), B2r, -1);
+  const B1 = add(g('rev_perm'), blk175), B2r = add(g('rev_temp'), held2b), C = add(add(add(Z(), A), B1, -1), B2r, -1);
   const L = add(add(Z(), a), b);                                  // zero-rated with IGST is payable too (exports without payment carry 0)
   const RC = sm.rcm, credit = add(add(Z(), C), g('cl_open')), so = GR.setoff(L, credit);
   // RCM liability must be paid in cash; RCM ITC is already in 4(A)(3)
@@ -4608,7 +4609,7 @@ function draft3b(m, sm, client, claim = null) {
   H.forEach(k => { cashNeed[k] = r2(so.cash[k] + (RC[k] || 0) + int51[k] + late51[k]); cashUsed[k] = r2(Math.min(cashNeed[k], Math.max(0, cashLedger[k]))); deposit[k] = r2(cashNeed[k] - cashUsed[k]); });
   const sum = o => r2(H.reduce((s, k) => s + (+o[k] || 0), 0));
   return { from, itcSrc, a, b, c: sm.nilOut, d: RC, e: sm.nonGst, imp, isd, a5, A, B1, B2: B2r, C, D1: g('reclaim'), D2: sm.blocked, L, credit, so, cashNeed, cashUsed, deposit,
-    depositTotal: sum(deposit), cashTotal: sum(cashNeed), w, H, held2b, int51, late51 };
+    depositTotal: sum(deposit), cashTotal: sum(cashNeed), w, H, held2b, blk175, int51, late51 };
 }
 
 /* =====================================================================
@@ -4624,7 +4625,8 @@ const RECO = (() => {
   const DEC = {
     mismatch: [['acc2b', 'Claim as per 2B'], ['accbooks', 'Supplier to amend — follow up'], ['reject', 'Wrong document — reject in IMS'], ['ignore', 'Known difference — claim as per 2B']],
     books_only: [['follow', 'Follow up supplier'], ['later', 'Supplier filing late — claim when in 2B'], ['noclaim', 'Do not claim (ineligible / reversed)']],
-    '2b_only': [['addbooks', 'Missed in books — add & claim'], ['notours', 'Not our purchase — reject in IMS'], ['hold', 'Keep pending — check with client']],
+    '2b_only': [['addbooks', 'Missed in books — add & claim'], ['notours', 'Not our purchase — reject in IMS'], ['hold', 'Keep pending — check with client'], ['block', 'Blocked credit u/s 17(5) — reverse in 4(B)(1)']],
+    matched: [['block', 'Blocked credit u/s 17(5) — reverse in 4(B)(1)']],
     gstin_diff: [['link', 'Same bill — supplier used another GSTIN, claim'], ['fixbooks', 'Books had the wrong GSTIN — corrected, claim'], ['notsame', 'Not the same bill']],
     suggest: [['link', 'Same bill — treat as matched'], ['notsame', 'Different bills']]
   };
@@ -4645,6 +4647,7 @@ const RECO = (() => {
     const x = it.x, a = typeof d === 'string' ? d : d && d.a; if (!x) return null;
     if (x.rc) return { a: 'NA', why: 'Reverse charge — not in IMS' };
     if (/IMP|ISD/.test(x.src || '')) return { a: 'NA', why: 'Import / ISD — not in IMS' };
+    if (a === 'block') return { a: 'Accept', why: 'Accept in IMS — ITC blocked u/s 17(5), reversed in 4(B)(1)' };   // v100
     if (it.st === 'matched') return { a: 'Accept', why: 'Matches books' };
     if (it.st === 'not_avail') return { a: 'Accept', why: 'Matches books — ITC not available, do not claim' };
     if (it.st === 'carried') return { a: 'Accept', why: `Booked in ${monthName(it.from)}` };
@@ -4735,13 +4738,15 @@ const RECO = (() => {
   function claim(list, reco, b2rows, o = {}) {
     const method = o.method || 'books_2b', dec = (reco && reco.dec) || {};
     const Z = () => ({ t: 0, ig: 0, cg: 0, sg: 0, cs: 0 }), add = (a, x) => { for (const f in a) a[f] = r2(a[f] + ((x && x[f]) || 0)); };
-    const c = Z(), held0 = Z(), carried = Z(), other = Z(), late = Z(), undecided = [], held2b = Z();
+    const c = Z(), held0 = Z(), carried = Z(), other = Z(), late = Z(), undecided = [], held2b = Z(), blocked = Z(), cnHeld = Z();
     // v75: ITC in 2B that is not taken this month — the portal puts all 2B ITC in 4(A), so this goes to 4(B)(2) temporary reversal
-    const hold = (o, from2b) => { add(held0, o); if (from2b) add(held2b, o); };
+    // v100: a credit note kept pending / rejected is simply not reduced from ITC this month (never a minus figure in 4(B)(2))
+    const hold = (o, from2b) => { if (tax(o) < 0) { add(cnHeld, o); return; } add(held0, o); if (from2b) add(held2b, o); };
     list.forEach(it => {
       const a = GR.effA(reco, it.k), x = it.x, b = it.b;
       if ((x && x.rc) || (b && b.rc)) return;                                  // reverse charge — cash, see draft 3B
       if (it.st === 'claimed_before') return;                                   // claimed in an earlier month
+      if (a === 'block' && tax(x || b) > 0) { add(blocked, x || b); return; }   // v100: blocked u/s 17(5) — shown in 4(A), reversed in 4(B)(1)
       if (method === 'books') {                                                 // credit as per books; 2B only tracked
         if (b) { if ((dec[it.k] || {}).a === 'noclaim') hold(b, false); else add(c, b); return; }
         if (it.st === '2b_only') { if (TAKE.includes(a)) add(c, x); else { hold(x, true); if (!a) undecided.push(it); } }
@@ -4763,7 +4768,8 @@ const RECO = (() => {
     if (method !== 'books') (b2rows || []).forEach(x => { if (/IMP|ISD/.test(x.src || '') && !x.na && !x.rc) { if (/IMP/.test(x.src || '') && GR.impHeld(reco, x)) hold(x, false); else add(other, x); } });
     add(c, other);
     if (method !== 'books') Object.defineProperty(c, 'held2b', { value: held2b, enumerable: false });   // read by draft3b
-    return { claim: c, held: held0, held2b, carried, other, late, undecided };
+    Object.defineProperty(c, 'blocked175', { value: blocked, enumerable: false });
+    return { claim: c, held: held0, held2b, carried, other, late, undecided, blocked, cnHeld };
   }
   // bills that can be sent to the client to confirm (in 2B, not in books / no books), not yet answered
   const askable = (list, reco) => list.filter(it => (it.st === '2b_only' || it.st === 'imp_2b' || it.st === 'confirm') && !GR.effA(reco, it.k) && !(it.x && (it.x.rc || it.x.na)));
@@ -5742,7 +5748,7 @@ VIEWS.gst = async v => {
         <tr class="sub"><td colspan="5"><b>(A) ITC available (whether in full or part)</b></td></tr>
         ${tr('(1) Import of goods', D.imp, '', h4)}${tr('(2) Import of services', { ig: 0, cg: 0, sg: 0, cs: 0 }, '', h4)}${tr('(3) Inward supplies liable to reverse charge', D.d, '', h4)}${tr('(4) Inward supplies from ISD', D.isd, '', h4)}${tr('(5) All other ITC', D.a5, '', h4)}
         <tr class="sub"><td colspan="5"><b>(B) ITC reversed</b></td></tr>
-        ${tr('(1) As per rules 38, 42 &amp; 43 of CGST Rules and section 17(5)', D.B1, '', h4)}${tr(`(2) Others (temporary reversal)${D.held2b && gTax(D.held2b) ? ` <span class="muted small">— incl. ${gst$(gTax(D.held2b))} in 2B not taken this month${gTax(D.B2) - gTax(D.held2b) > 0.5 ? ` + ${gst$(gTax(D.B2) - gTax(D.held2b))} typed` : ''}</span>` : ''}`, D.B2, gTax(D.B2) ? 'warn-row' : '', h4)}
+        ${tr(`(1) As per rules 38, 42 &amp; 43 of CGST Rules and section 17(5)${D.blk175 && gTax(D.blk175) ? ` <span class="muted small">— incl. ${gst$(gTax(D.blk175))} blocked u/s 17(5)</span>` : ''}`, D.B1, '', h4)}${tr(`(2) Others (temporary reversal)${D.held2b && gTax(D.held2b) ? ` <span class="muted small">— incl. ${gst$(gTax(D.held2b))} in 2B not taken this month${gTax(D.B2) - gTax(D.held2b) > 0.5 ? ` + ${gst$(gTax(D.B2) - gTax(D.held2b))} typed` : ''}</span>` : ''}`, D.B2, gTax(D.B2) ? 'warn-row' : '', h4)}
         ${tr('<b>(C) Net ITC available (A) − (B)</b>', D.C, 'tot', h4)}
         <tr class="sub"><td colspan="5"><b>(D) Other details</b></td></tr>
         ${tr('(1) ITC reclaimed which was reversed under 4(B)(2) earlier', D.D1, '', h4)}${tr('(2) Ineligible ITC under section 16(4) &amp; ITC restricted due to PoS rules / not available in 2B', D.D2, '', h4)}
@@ -5819,11 +5825,12 @@ VIEWS.gst = async v => {
   // ===== GSTR-2B reconciliation tab =====
   // step 2: three numbers, five filters, one-click decisions
   const DEC_BTN = {
-    mismatch: [['acc2b', 'Claim as per 2B'], ['accbooks', 'Ask supplier'], ['reject', 'Reject in IMS']],
+    mismatch: [['acc2b', 'Claim as per 2B'], ['accbooks', 'Ask supplier'], ['reject', 'Reject in IMS'], ['block', 'Blocked 17(5)']],
+    matched: [['block', 'Blocked 17(5)']],
     suggest: [['link', 'Same bill'], ['notsame', 'Different']],
     gstin_diff: [['link', 'Same bill'], ['fixbooks', 'Books GSTIN wrong'], ['notsame', 'Not same']],
     books_only: [['follow', 'Chase supplier'], ['later', 'Filing late'], ['noclaim', "Don't claim"]],
-    '2b_only': [['addbooks', 'Add & claim'], ['hold', 'Keep pending'], ['notours', 'Not ours']],
+    '2b_only': [['addbooks', 'Add & claim'], ['hold', 'Keep pending'], ['notours', 'Not ours'], ['block', 'Blocked 17(5)']],
     imp_2b: [['addbooks', 'Add & claim'], ['hold', 'Keep pending'], ['notours', 'Not ours']],
     confirm: [['take', 'Take credit'], ['skip', 'Not now'], ['notmine', 'Not mine']]
   };
@@ -5880,6 +5887,7 @@ VIEWS.gst = async v => {
     const cur = F.find(f => f[0] === grRecFilter);
     o.innerHTML = `<div class="rc-sum">${three}</div>
       ${cl.undecided.length ? `<p class="note warn small" style="margin:10px 0 0">${cl.undecided.length} bill${cl.undecided.length > 1 ? 's need' : ' needs'} a decision. ${M === 'books_2b' ? 'Until then the lower of books and 2B is counted for differences, and other bills are held back.' : 'Until then they are not claimed.'}</p>` : ''}
+      ${gTax(cl.blocked || {}) || gTax(cl.cnHeld || {}) ? `<p class="note small" style="margin:10px 0 0">${[gTax(cl.blocked || {}) ? `${gst$(gTax(cl.blocked))} marked <b>Blocked 17(5)</b> — not claimed; shown in 3B 4(A) and reversed in 4(B)(1)` : '', gTax(cl.cnHeld || {}) ? `${gst$(Math.abs(gTax(cl.cnHeld)))} of credit notes kept pending / rejected — not reduced from ITC this month` : ''].filter(Boolean).join('. ')}.</p>` : ''}
       ${M === 'books' && sm.over2b > RECO.TOL ? `<p class="note warn small" style="margin:10px 0 0">Credit as per books is ${gst$(sm.over2b)} more than GSTR-2B. ITC needs the bill in 2B (Sec 16(2)(aa)).</p>` : ''}
       ${grRecView === 'inv' ? `<div class="rc-f" role="tablist">${F.map(f => `<button role="tab" aria-selected="${grRecFilter === f[0]}" class="rc-fb ${grRecFilter === f[0] ? 'on' : ''}" data-rf="${f[0]}">${f[1]} · ${cnt(f)}${(() => { if (!f[2] || !['decide', 'notbooks', 'missing'].includes(f[0]) || !f[2].length) return ''; const dn = f[2].filter(x => GR.effA(reco, x.k)).length; return dn ? ` <span class="small" style="opacity:.8">· ✓ ${dn === f[2].length ? 'all' : dn} decided</span>` : ''; })()}</button>`).join('')}
         <span class="spacer"></span>${['missing', 'notbooks'].includes(grRecFilter) && toMiss.length && toAsk.length ? `<button class="btn sm primary" id="grBoth" title="One message and one Excel with both lists">Send both to client · ${toMiss.length} missing in 2B + ${toAsk.length} not in books</button>` : ''}${grRecFilter === 'missing' ? (toMiss.length ? `<button class="btn sm primary" id="grMiss" title="Tell the client these bills are not in GSTR-2B so they can ask their suppliers to upload them">Send ${toMiss.length} missing bill${toMiss.length > 1 ? 's' : ''} to client</button>` : Object.keys(missed).length ? `<span class="small muted">Missing bills sent to client ${sh(reco.miss.at)}</span>` : '') : toAsk.length ? `<button class="btn sm primary" id="grAsk">Send ${toAsk.length} bill${toAsk.length > 1 ? 's' : ''} to client</button>` : ''}<button class="btn sm" id="grXl">Excel</button></div>` : ''}
@@ -7420,7 +7428,7 @@ async function fillGstWorkings(XP, templateBytes, data) {
   const mi = wb.sheet('MonthlyInputs');
   const col = i => String.fromCharCode(67 + i);                                   // C..N
   const sum = (rows, f) => rows.filter(f).reduce((a, x) => ({ t: a.t + Math.abs(x.t || 0), ig: a.ig + Math.abs(x.ig || 0), cg: a.cg + Math.abs(x.cg || 0), sg: a.sg + Math.abs(x.sg || 0) }), { t: 0, ig: 0, cg: 0, sg: 0 });
-  const put = (row, i, v) => mi.cell(`${col(i)}${row}`).value(r2(v));
+  const put = (row, i, v) => mi.cell(`${col(i)}${row}`).value(r2(v)), clOpen = Array(12).fill(null);
   for (const m of months) {
     const i = mIdx(m.period), B = (m.gstr2b && m.gstr2b.rows) || [];
     if (B.length) {
@@ -7441,7 +7449,15 @@ async function fillGstWorkings(XP, templateBytes, data) {
     const r93 = A2(B.length ? sum(B, x => x.rc && !x.na && !rcmOut(x)) : sum(P, x => x.rc && okG(x.g)), n5(W3.rcm_add)), r94 = A2(sum(P, x => x.rc && !okG(x.g)), n5(W3.rcm_unreg));
     if (B.length || r93.t || r93.ig || r93.cg || r93.sg) { put(5, i, r93.t); put(29, i, r93.ig); put(30, i, r93.cg); put(31, i, r93.sg); }
     if (r94.t || r94.ig || r94.cg || r94.sg) { put(6, i, r94.t); put(7, i, r94.ig); put(8, i, r94.cg); put(9, i, r94.sg); }
+    // v100: credit ledger opening balance (row 71 = IGST; CGST / SGST go straight into Summary D36:E36) and cash ledger (rows 72–74), as entered in GSTR-3B workings
+    const clo = n5(W3.cl_open), cao = n5(W3.cash_open);
+    if (clo.ig) put(71, i, clo.ig); clOpen[i] = clo;
+    if (cao.ig || cao.cg || cao.sg) { put(72, i, cao.ig); put(73, i, cao.cg); put(74, i, cao.sg); }
   }
+  { const S0 = wb.sheet('Summary(1&3B)'), i0b = GW_MONTHS.indexOf(data.month);
+    ['cg', 'sg'].forEach((h, j) => { const cl = S0.cell(`${'DE'[j]}36`); cl._styleId = S0.cell('C36')._styleId;
+      if (data.send) cl.value(r2(((clOpen[i0b] || {})[h]) || 0));
+      else cl.formula(`INDEX({${clOpen.map(o => r2((o || {})[h] || 0)).join(',')}},1,MATCH($B$3,MonthlyInputs!$C$3:$N$3,0))`); }); }
 
   // v95: Summary Part B "RCM" ITC = RCM u/s 9(3) + 9(4) (the template took only 9(4) CGST and no value)
   { const S1 = wb.sheet('Summary(1&3B)'); if (S1) ['B', 'C', 'D', 'E'].forEach(k => S1.cell(`${k}26`).formula(`${k}17+${k}18`)); }
@@ -7541,16 +7557,22 @@ async function fillGstWorkings(XP, templateBytes, data) {
     };
     const av = build('ITC Available', AV, false, at);
     build('ITC Not Available', NAV, true, at + 1);
-    // ITC in 2B not claimed this month (held back) → Summary "Less: Rule 42/43 Reversals"
-    const sh = av.sh; let rw = av.rw + 1;
-    sh.cell(rw, 1).value('ITC in 2B held back — not claimed this month (goes to Summary "Less: Rule 42/43 Reversals")')._styleId = ST.hd; rw++;
-    ['S.No', 'Supplier name', 'Invoice no', 'Taxable value', 'Integrated Tax (₹)', 'Central Tax (₹)', 'State/UT Tax (₹)', 'Cess (₹)', 'Status'].forEach((h, k) => { const cl = sh.cell(rw, k + 1); cl.value(h); cl._styleId = ST.th; }); rw++;
-    const held = (data.itc2b || []).filter(d => d.x && !d.x.na && !d.x.rc && !d.x.cn && !d.claimed), h0 = rw;
-    held.forEach((d, k) => { const x = d.x, A = v => r2(Math.abs(+v || 0));
-      [k + 1, `${x.n || ''}${x.g && x.g !== 'IMPORT' ? ' (' + x.g + ')' : ''}`, x.i || '', A(x.t), A(x.ig), A(x.cg), A(x.sg), A(x.cs), d.status].forEach((v, j) => { const cl = sh.cell(rw, j + 1); cl.value(v); cl._styleId = j >= 3 && j <= 7 ? ST.num : ST.lab; }); rw++; });
-    if (!held.length) { sh.cell(rw, 2).value(data.itc2b ? 'Nothing held back — all ITC in 2B is claimed this month' : 'Decisions not available for this download')._styleId = ST.lab; rw++; }
-    const holdRow = rw;
-    ['', 'Total held back', '', ...['D', 'E', 'F', 'G', 'H'].map(c => held.length ? `=SUM(${c}${h0}:${c}${rw - 1})` : 0), ''].forEach((v, j) => { const cl = sh.cell(rw, j + 1); if (typeof v === 'string' && v[0] === '=') cl.formula(v.slice(1)); else if (v !== '') cl.value(v); cl._styleId = j >= 3 && j <= 7 ? ST.numB : ST.labB; });
+    // v100: two lists under the 2B summary — Blocked u/s 17(5) → "Less: Blocked Credits"; held back (credit notes kept pending add back) → "Less: Rule 42/43 Reversals"
+    const sh = av.sh; let rw = av.rw;
+    const list = (title, docs, totalLabel, empty) => {
+      rw++; sh.cell(rw, 1).value(title)._styleId = ST.hd; rw++;
+      ['S.No', 'Supplier name', 'Invoice / note no', 'Taxable value', 'Integrated Tax (₹)', 'Central Tax (₹)', 'State/UT Tax (₹)', 'Cess (₹)', 'Status'].forEach((h, k) => { const cl = sh.cell(rw, k + 1); cl.value(h); cl._styleId = ST.th; }); rw++;
+      const h0 = rw;
+      docs.forEach((d, k) => { const x = d.x, sg = x.cn || GR.tax(x) < 0 ? -1 : 1, A = v => r2(sg * Math.abs(+v || 0));
+        [k + 1, `${x.n || ''}${x.g && x.g !== 'IMPORT' ? ' (' + x.g + ')' : ''}`, `${x.i || ''}${sg < 0 ? ' (credit note)' : ''}`, A(x.t), A(x.ig), A(x.cg), A(x.sg), A(x.cs), d.status].forEach((v, j) => { const cl = sh.cell(rw, j + 1); cl.value(v); cl._styleId = j >= 3 && j <= 7 ? ST.num : ST.lab; }); rw++; });
+      if (!docs.length) { sh.cell(rw, 2).value(data.itc2b ? empty : 'Decisions not available for this download')._styleId = ST.lab; rw++; }
+      const tr = rw;
+      ['', totalLabel, '', ...['D', 'E', 'F', 'G', 'H'].map(c => docs.length ? `=SUM(${c}${h0}:${c}${rw - 1})` : 0), ''].forEach((v, j) => { const cl = sh.cell(rw, j + 1); if (typeof v === 'string' && v[0] === '=') cl.formula(v.slice(1)); else if (v !== '') cl.value(v); cl._styleId = j >= 3 && j <= 7 ? ST.numB : ST.labB; });
+      rw++; return tr;
+    };
+    const I2 = data.itc2b || [];
+    const blkRow = list('Blocked credit u/s 17(5) — marked in the tracker (goes to Summary "Less: Blocked Credits - S.17(5)")', I2.filter(d => d.x && d.blocked), 'Total blocked u/s 17(5)', 'No bill marked Blocked 17(5)');
+    const holdRow = list('ITC in 2B held back — not claimed this month (goes to Summary "Less: Rule 42/43 Reversals"). Credit notes kept pending are shown minus — they are not reduced this month', I2.filter(d => d.x && !d.x.na && !d.x.rc && !d.claimed && !d.blocked), 'Total held back (net)', 'Nothing held back — all ITC in 2B is claimed this month');
     // links into Summary(1&3B) Part B — Summary columns B..E = taxable / IGST / CGST / SGST = sheet columns D..G
     const L = (rows, c) => rows.length ? rows.map(r => `'ITC Available'!${c}${r}`).join('+') : '0';
     const link = (row, rows) => ['B', 'C', 'D', 'E'].forEach((k, j) => {
@@ -7562,8 +7584,9 @@ async function fillGstWorkings(XP, templateBytes, data) {
     link(25, refs.imp);       // c. Import of goods
     link(30, refs.cn);        // Less: Credit Note
     link(31, refs.dn);        // Add: Debit Note
+    link(28, [blkRow]);       // Less: Blocked Credits - S.17(5)
     link(34, [holdRow]);      // Less: Rule 42/43 Reversals = ITC held back
-    S1.cell('B34')._styleId = S1.cell('C34')._styleId;
+    S1.cell('B34')._styleId = S1.cell('C34')._styleId; S1.cell('B28')._styleId = S1.cell('C28')._styleId;
   }
   // v93: 2B detail — "2B ITC Available" / "2B ITC Not Available", one line per document with its status
   if (data.itc2b && (data.itc2b.length || (data.itc2b.books || []).length)) {
@@ -7758,10 +7781,11 @@ const REV = (() => {
     if (!B.length) { const P0 = (row.purchases || {}).rows || []; return P0.length ? Object.assign([], { books: GR.mergeDocs(P0).map(b => ({ b, status: 'GSTR-2B not added yet', claimed: false })) }) : null; }
     const M = c.itc_method || 'books_2b', reco = row.reco || {}, sm = GR.summarise(row, { method: M, match: c.reco_match });
     const items = M === '2b_confirm' || !sm.rec ? RECO.confirmItems(B).map(it => ({ ...it, k: GR.docKey(it.x) })) : sm.rec.items.filter(it => it.x).map(it => ({ ...it, k: GR.docKey(it.b || it.x) }));
-    const S = (l, yes) => [l, yes];
+    const S = (l, yes, blk) => [l, yes, !!blk];
     const statusOf = it => {
       const x = it.x, a = GR.effA(reco, it.k);
       if (x.na) return S('ITC not available as per 2B — not claimed', false);
+      if (a === 'block' && !x.rc && GR.tax(x) > 0) return S('Blocked credit u/s 17(5) — not claimed, reversed in 4(B)(1)', false, true);   // v100
       if (/IMP/.test(x.src || '')) return GR.impHeld(reco, x) ? S('Import of goods — held, not claimed', false) : S('Import of goods — claimed in 4(A)(1)', true);
       if (/ISD/.test(x.src || '')) return S('ISD credit — claimed in 4(A)(4)', true);
       if (x.rc) return S('Reverse charge — tax paid in cash, ITC in 4(A)(3)', true);
@@ -7777,10 +7801,11 @@ const REV = (() => {
         default: return S(it.st, false);
       }
     };
-    const b2 = items.map(it => { const [status, claimed] = statusOf(it); return { x: it.x, b: it.b || null, status, claimed }; });
+    const b2 = items.map(it => { const [status, claimed, blocked] = statusOf(it); return { x: it.x, b: it.b || null, status, claimed, blocked }; });
     // v94: purchase register bills with their status against 2B
     const booksOf = it => {
       const a = GR.effA(reco, it.k);
+      if (a === 'block') return S('Blocked credit u/s 17(5) — not claimed', false);
       switch (it.st) {
         case 'matched': return a === 'noclaim' ? S('Matched in 2B — not claimed (ineligible)', false) : S('Matched in 2B — claimed', true);
         case 'not_avail': return S('In 2B, ITC not available — not claimed', false);
@@ -7901,7 +7926,7 @@ const REV = (() => {
 })();
 
 // v78: this tab's code version — when a newer app is uploaded, offer Reload and block mails from old code
-const APP_VER = 'jlr-shell-v99';
+const APP_VER = 'jlr-shell-v100';
 let appStale = false;
 async function checkAppVer() {
   try { const t = await fetch('sw.js?v=' + Date.now(), { cache: 'no-store' }).then(r => r.text()); const live = (t.match(/jlr-shell-v\d+/) || [])[0];
