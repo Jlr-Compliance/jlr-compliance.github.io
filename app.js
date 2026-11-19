@@ -7385,12 +7385,22 @@ async function fillGstWorkings(XP, templateBytes, data) {
       const actual = sum(B, x => !isCdn(x) && !isImp(x) && !x.na && !x.rc), dn = sum(B, x => isCdn(x) && !x.cn && !x.na), cn = sum(B, x => isCdn(x) && x.cn && !x.na);
       const imp = sum(B, x => isImp(x)), inel = sum(B, x => x.na), rcm = sum(B, x => x.rc && !x.na);
       [[11, actual], [14, dn], [20, imp], [23, inel], [29, rcm], [32, cn]].forEach(([row, v]) => { put(row, i, v.ig); put(row + 1, i, v.cg); put(row + 2, i, v.sg); });
-      put(5, i, rcm.t);                                                            // RCM u/s 9(3) – tax value
+      put(5, i, rcm.t);                                                            // RCM u/s 9(3) – tax value (2B)
       [[43, actual], [47, imp], [58, cn], [62, dn]].forEach(([row, v]) => { put(row, i, v.t); put(row + 1, i, v.ig); put(row + 2, i, v.cg); put(row + 3, i, v.sg); });
     }
     const P = (m.purchases && m.purchases.rows) || [];
     if (P.length) { const w = P.filter(x => !x.rc).reduce((a, x) => ({ ig: a.ig + (x.ig || 0), cg: a.cg + (x.cg || 0), sg: a.sg + (x.sg || 0) }), { ig: 0, cg: 0, sg: 0 }); put(35, i, w.ig); put(36, i, w.cg); put(37, i, w.sg); }
+    // v95: RCM split — 9(3) / registered (row 5 value, rows 29–31 tax): 2B RCM (or books RCM of registered suppliers when no 2B) + typed "other";
+    //      9(4) unregistered (rows 6–9): books RCM lines of unregistered / foreign suppliers + typed "unregistered persons"
+    const W3 = ((m.reco || {}).w3b) || {}, n5 = o => ({ t: Math.abs(+(o || {}).t || 0), ig: Math.abs(+(o || {}).ig || 0), cg: Math.abs(+(o || {}).cg || 0), sg: Math.abs(+(o || {}).sg || 0) }), A2 = (a, b) => ({ t: a.t + b.t, ig: a.ig + b.ig, cg: a.cg + b.cg, sg: a.sg + b.sg });
+    const okG = g => /^\d{2}[A-Z]{5}\d{4}[A-Z][A-Z0-9]Z[A-Z0-9]$/.test(String(g || '').toUpperCase());
+    const r93 = A2(B.length ? sum(B, x => x.rc && !x.na) : sum(P, x => x.rc && okG(x.g)), n5(W3.rcm_add)), r94 = A2(sum(P, x => x.rc && !okG(x.g)), n5(W3.rcm_unreg));
+    if (r93.t || r93.ig || r93.cg || r93.sg) { put(5, i, r93.t); put(29, i, r93.ig); put(30, i, r93.cg); put(31, i, r93.sg); }
+    if (r94.t || r94.ig || r94.cg || r94.sg) { put(6, i, r94.t); put(7, i, r94.ig); put(8, i, r94.cg); put(9, i, r94.sg); }
   }
+
+  // v95: Summary Part B "RCM" ITC = RCM u/s 9(3) + 9(4) (the template took only 9(4) CGST and no value)
+  { const S1 = wb.sheet('Summary(1&3B)'); if (S1) ['B', 'C', 'D', 'E'].forEach(k => S1.cell(`${k}26`).formula(`${k}17+${k}18`)); }
 
   // ---------- Reconciliation: GSTR-3B liability per month ----------
   const rc = wb.sheet('Reconciliation');
@@ -7518,7 +7528,7 @@ async function downloadGstWorkings(c, period) {
     safe(sb.from('notices').select('*').eq('client_id', c.id).order('notice_date')),
     safe(sb.from('tasks').select('return_name,period,status,filed_on,arn').eq('client_id', c.id).ilike('return_name', 'GSTR-1%').limit(500))
   ]);
-  const months = (gm.data || []).map(r => ({ period: r.period, g1: r.g1, sales: r.sales, gstr1: r.gstr1, purchases: r.purchases, gstr2b: r.gstr2b, gstr3b: r.gstr3b, status: r.status }));
+  const months = (gm.data || []).map(r => ({ period: r.period, g1: r.g1, sales: r.sales, gstr1: r.gstr1, purchases: r.purchases, gstr2b: r.gstr2b, gstr3b: r.gstr3b, reco: r.reco, status: r.status }));
   if (!months.length) return toast('No GST data saved for this client in FY ' + fy, true);
   const g1tasks = (tk.data || []).map(t => ({ ...t, period: (periodToMonth(t.period) || '') + '-01' })).filter(t => t.period.length === 10 && t.period >= `${fyStart}-04-01` && t.period <= `${fyStart + 1}-03-01`);
   const sel = (gm.data || []).find(r => r.period === period);
@@ -7661,7 +7671,7 @@ const REV = (() => {
     const y = +period.slice(0, 4), m = +period.slice(5, 7), fyStart = m >= 4 ? y : y - 1, fy = `${fyStart}-${String((fyStart + 1) % 100).padStart(2, '0')}`;
     const [XP, tpl, gm] = await Promise.all([loadXlsxPopulate(), fetch('gst-workings-master.xlsx', { cache: 'no-store' }).then(r => { if (!r.ok) throw new Error('Master template not found on the site'); return r.arrayBuffer(); }),
       must(sb.from('gst_months').select('*').eq('client_id', c.id).gte('period', `${fyStart}-04-01`).lte('period', `${fyStart + 1}-03-01`).order('period'))]);
-    const months = (gm.data || []).map(r => ({ period: r.period, g1: r.g1, sales: r.sales, gstr1: r.gstr1, purchases: r.purchases, gstr2b: r.gstr2b, gstr3b: r.gstr3b, status: r.status }));
+    const months = (gm.data || []).map(r => ({ period: r.period, g1: r.g1, sales: r.sales, gstr1: r.gstr1, purchases: r.purchases, gstr2b: r.gstr2b, gstr3b: r.gstr3b, reco: r.reco, status: r.status }));
     const sel = (gm.data || []).find(r => r.period === period);
     const out = await fillGstWorkings(XP, new Uint8Array(tpl), { client: { name: c.name, gstin: c.gstin, trade: c.trade_name || '' }, fy, month: GW_MONTHS[(m + 8) % 12], months, notices: [], g1tasks: [],
       preparedBy: me.full_name || me.email, verifiedBy: sel && sel.verified_by ? profName(sel.verified_by) : '', send: true, itc2b: sel ? itc2bStatus(c, sel) : null });
@@ -7759,7 +7769,7 @@ const REV = (() => {
 })();
 
 // v78: this tab's code version — when a newer app is uploaded, offer Reload and block mails from old code
-const APP_VER = 'jlr-shell-v94';
+const APP_VER = 'jlr-shell-v95';
 let appStale = false;
 async function checkAppVer() {
   try { const t = await fetch('sw.js?v=' + Date.now(), { cache: 'no-store' }).then(r => r.text()); const live = (t.match(/jlr-shell-v\d+/) || [])[0];
