@@ -7577,7 +7577,10 @@ async function fillGstWorkings(XP, templateBytes, data) {
     };
     const I2 = data.itc2b || [];
     const blkRow = list('Blocked credit u/s 17(5) — marked in the tracker (goes to Summary "Less: Blocked Credits - S.17(5)")', I2.filter(d => d.x && d.blocked), 'Total blocked u/s 17(5)', 'No bill marked Blocked 17(5)');
-    const holdRow = list('ITC in 2B held back — not claimed this month (goes to Summary "Less: Rule 42/43 Reversals"). Credit notes kept pending are shown minus — they are not reduced this month', I2.filter(d => d.x && !d.x.na && !d.x.rc && !d.claimed && !d.blocked), 'Total held back (net)', 'Nothing held back — all ITC in 2B is claimed this month');
+    // v103: held bills only → "Less: Rule 42/43 Reversals" (= 3B 4(B)(2)); held credit notes are taken out of "Less: Credit Note" instead
+    const isCN = d => d.x.cn || GR.tax(d.x) < 0, held0 = I2.filter(d => d.x && !d.x.na && !d.x.rc && !d.claimed && !d.blocked);
+    const holdRow = list('ITC in 2B held back — not claimed this month (goes to Summary "Less: Rule 42/43 Reversals" = GSTR-3B 4(B)(2))', held0.filter(d => !isCN(d)), 'Total held back', 'Nothing held back — all ITC in 2B is claimed this month');
+    const cnRow = list('Credit notes in 2B kept pending / rejected — not reduced this month (taken out of Summary "Less: Credit Note")', held0.filter(isCN), 'Total credit notes not reduced', 'No credit note kept pending');
     // links into Summary(1&3B) Part B — Summary columns B..E = taxable / IGST / CGST / SGST = sheet columns D..G
     const L = (rows, c) => rows.length ? rows.map(r => `'ITC Available'!${c}${r}`).join('+') : '0';
     const link = (row, rows) => ['B', 'C', 'D', 'E'].forEach((k, j) => {
@@ -7587,7 +7590,7 @@ async function fillGstWorkings(XP, templateBytes, data) {
     });
     link(24, refs.inv);       // b. Inputs / Input Services = B2B invoices (+ ECO, ISD, amendments)
     link(25, refs.imp);       // c. Import of goods
-    link(30, refs.cn);        // Less: Credit Note
+    link(30, refs.cn.concat([cnRow]));   // Less: Credit Note = credit notes in 2B minus those kept pending (their total is shown minus)
     link(31, refs.dn);        // Add: Debit Note
     link(28, [blkRow]);       // Less: Blocked Credits - S.17(5)
     link(34, [holdRow]);      // Less: Rule 42/43 Reversals = ITC held back
@@ -7931,7 +7934,7 @@ const REV = (() => {
 })();
 
 // v78: this tab's code version — when a newer app is uploaded, offer Reload and block mails from old code
-const APP_VER = 'jlr-shell-v102';
+const APP_VER = 'jlr-shell-v103';
 let appStale = false;
 async function checkAppVer() {
   try { const t = await fetch('sw.js?v=' + Date.now(), { cache: 'no-store' }).then(r => r.text()); const live = (t.match(/jlr-shell-v\d+/) || [])[0];
