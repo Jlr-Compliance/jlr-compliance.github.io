@@ -7478,9 +7478,121 @@ async function fillGstWorkings(XP, templateBytes, data) {
     set(ns, `D${row}`, n.status === 'Hearing' ? `Hearing${n.hearing_date ? ' on ' + n.hearing_date.split('-').reverse().join('-') : ''}` : n.status);
   });
 
+  // ---------- v99: Summary(1&3B) — 2B portal sheets "ITC Available" / "ITC Not Available" for this month, linked into Part B ----------
+  const S1 = wb.sheet('Summary(1&3B)'), i0 = GW_MONTHS.indexOf(data.month), yr = i0 >= 9 ? fyStart + 1 : fyStart;
+  const selM = months.find(m => monthName(m.period) === data.month), B2s = (selM && selM.gstr2b && selM.gstr2b.rows) || [];
+  const ST = { hd: mi.cell('A4')._styleId, th: mi.cell('A3')._styleId, lab: S1.cell('H5')._styleId, labB: S1.cell('H13')._styleId, num: S1.cell('I5')._styleId, numB: S1.cell('I13')._styleId, blank: S1.cell('M20')._styleId };
+  // the small 2B check table beside the summary (Actual 2B … Difference) is removed — to be added back later
+  for (let rr = 4; rr <= 15; rr++) for (const k of ['H', 'I', 'J', 'K']) { const cl = S1.cell(`${k}${rr}`); cl.value(undefined); cl._styleId = ST.blank; }
+  ['C', 'D', 'E'].forEach((k, j) => S1.cell(`${k}17`).formula(`INDEX(MonthlyInputs!$C$${29 + j}:$N$${29 + j},1,MATCH($B$3,MonthlyInputs!$C$3:$N$3,0))`));   // RCM 9(3) tax was =I11:K11
+  if (B2s.length) {
+    const secOf = x => { const s = String(x.src || 'B2B').toUpperCase(), am = /A$/.test(s) ? 'a' : '';
+      if (/IMPGSEZ/.test(s)) return 'impgsez' + am; if (/IMPG/.test(s) || x.g === 'IMPORT') return 'impg' + am; if (/ISD/.test(s)) return 'isd' + am;
+      if (/ECO/.test(s)) return 'eco' + am; if (/CDN/.test(s)) return 'cdnr' + am; if (/B2BA/.test(s)) return 'b2ba'; return 'b2b'; };
+    const W = (secs, o = {}) => x => secs.includes(secOf(x)) && (o.cn === undefined || !!x.cn === o.cn) && (o.rc === undefined || !!x.rc === o.rc);
+    const NA = { cn: false, rc: false }, CN = { cn: true };
+    const linesI = [['B2B - Invoices', W(['b2b'], NA), 'inv'], ['B2B - Debit notes', W(['cdnr'], NA), 'dn'], ['ECO - Documents', W(['eco'], NA), 'inv'],
+      ['B2B - Invoices (Amendment)', W(['b2ba'], NA), 'inv'], ['B2B - Debit notes (Amendment)', W(['cdnra'], NA), 'dn'], ['ECO - Documents (Amendment)', W(['ecoa'], NA), 'inv']];
+    const linesII = [['ISD - Invoices', W(['isd'], { cn: false }), 'inv'], ['ISD - Invoices (Amendment)', W(['isda'], { cn: false }), 'inv']];
+    const RC = { cn: false, rc: true };
+    const linesIII = [['B2B - Invoices', W(['b2b'], RC), 'rcm'], ['B2B - Debit notes', W(['cdnr'], RC), 'rcm'], ['B2B - Invoices (Amendment)', W(['b2ba'], RC), 'rcm'], ['B2B - Debit notes (Amendment)', W(['cdnra'], RC), 'rcm']];
+    const linesIV = [['IMPG - Import of goods from overseas', W(['impg']), 'imp'], ['IMPG (Amendment)', W(['impga']), 'imp'], ['IMPGSEZ - Import of goods from SEZ', W(['impgsez']), 'imp'], ['IMPGSEZ (Amendment)', W(['impgseza']), 'imp']];
+    const linesB = [['B2B - Credit notes', W(['b2b', 'cdnr', 'eco'], { cn: true, rc: false }), 'cn'], ['B2B - Credit notes (Amendment)', W(['b2ba', 'cdnra', 'ecoa'], { cn: true, rc: false }), 'cn'],
+      ['B2B - Credit notes (Reverse charge)', W(['b2b', 'cdnr'], { cn: true, rc: true }), 'cn'], ['B2B - Credit notes (Reverse charge)(Amendment)', W(['b2ba', 'cdnra'], { cn: true, rc: true }), 'cn'],
+      ['ISD - Credit notes', W(['isd'], CN), 'cn'], ['ISD - Credit notes (Amendment)', W(['isda'], CN), 'cn']];
+    const AV = [['Part A', 'ITC Available - Credit may be claimed in relevant headings in GSTR-3B', [
+        ['I', 'All other ITC - Supplies from registered persons other than reverse charge', '4(A)(5)', 'Net input tax credit may be availed under Table 4(A)(5) of FORM GSTR-3B.', linesI],
+        ['II', 'Inward Supplies from ISD', '4(A)(4)', 'Net input tax credit may be availed under Table 4(A)(4) of FORM GSTR-3B.', linesII],
+        ['III', 'Inward Supplies liable for reverse charge', '3.1(d) / 4(A)(3)', 'These supplies shall be declared in Table 3.1(d) of FORM GSTR-3B for payment of tax. Net input tax credit may be availed under Table 4(A)(3) on payment of tax.', linesIII],
+        ['IV', 'Import of Goods', '4(A)(1)', 'Net input tax credit may be availed under Table 4(A)(1) of FORM GSTR-3B.', linesIV]]],
+      ['Part B', 'ITC Available - Credit notes should be net-off against relevant ITC available tables', [
+        ['I', 'Others', '4(A)', 'Credit notes are reduced from the ITC of the relevant 4(A) table of FORM GSTR-3B.', linesB]]]];
+    const NAV = [['Part A', 'ITC Not Available', [
+        ['I', 'All other ITC - Supplies from registered persons other than reverse charge', '4(D)(2)', 'Such credit shall not be taken and has to be reported in Table 4(D)(2) of FORM GSTR-3B.', linesI],
+        ['II', 'Inward Supplies from ISD', '4(D)(2)', 'Such credit shall not be taken and has to be reported in Table 4(D)(2) of FORM GSTR-3B.', linesII],
+        ['III', 'Inward Supplies liable for reverse charge', '3.1(d)', 'These supplies shall be declared in Table 3.1(d) of FORM GSTR-3B for payment of tax. However, credit will not be available on the same.', linesIII]]],
+      ['Part B', 'ITC Not Available - Credit notes', [['I', 'Others', '4(B)(2)', 'Credit notes on which ITC is not available.', linesB]]]];
+    const at = wb.sheets().indexOf(S1) + 1, refs = { inv: [], dn: [], imp: [], cn: [], rcm: [] };
+    const sum2 = f => B2s.filter(f).reduce((a, x) => { for (const k in a) a[k] = r2(a[k] + Math.abs(+x[k] || 0)); return a; }, { t: 0, ig: 0, cg: 0, sg: 0, cs: 0 });
+    const build = (name, spec, na, pos) => {
+      const sh = wb.addSheet(name, pos), C = (rw, k) => sh.cell(rw, k);
+      const put = (rw, vals, lab, num) => vals.forEach((v, k) => { const cl = C(rw, k + 1); if (v !== '' && v !== undefined) { if (typeof v === 'string' && v[0] === '=') cl.formula(v.slice(1)); else cl.value(v); } cl._styleId = k >= 3 && k <= 7 ? num : lab; });
+      C(1, 1).value(`GSTR-2B — ${name} · ${data.client.name || ''} · ${data.month} ${yr}`)._styleId = ST.hd;
+      C(2, 1).value("Same layout as the portal's GSTR-2B Excel, built from the 2B saved in the tracker. Taxable value is added for the workings.");
+      put(4, ['S.No', 'Heading', 'GSTR-3B table', 'Taxable value', 'Integrated Tax (₹)', 'Central Tax (₹)', 'State/UT Tax (₹)', 'Cess (₹)', 'Advisory'], ST.th, ST.th);
+      let rw = 5;
+      for (const [part, ptitle, groups] of spec) {
+        C(rw, 1).value(part)._styleId = ST.hd; C(rw, 2).value(ptitle)._styleId = ST.hd; rw++;
+        for (const [no, head, tbl, adv, lines] of groups) {
+          const g = rw++, first = rw;
+          for (const [lab, f, key] of lines) {
+            const v = sum2(x => (!!x.na === na) && f(x));
+            put(rw, ['', lab, '', v.t, v.ig, v.cg, v.sg, v.cs, ''], ST.lab, ST.num);
+            if (!na && key !== 'rcm') refs[key].push(rw);
+            rw++;
+          }
+          const S = c => `=SUM(${c}${first}:${c}${rw - 1})`;
+          put(g, [no, head, tbl, S('D'), S('E'), S('F'), S('G'), S('H'), adv], ST.labB, ST.numB);
+        }
+        rw++;
+      }
+      [7, 58, 16, 17, 17, 17, 17, 13, 80].forEach((w, k) => sh.column(k + 1).width(w));
+      return { sh, rw };
+    };
+    const av = build('ITC Available', AV, false, at);
+    build('ITC Not Available', NAV, true, at + 1);
+    // ITC in 2B not claimed this month (held back) → Summary "Less: Rule 42/43 Reversals"
+    const sh = av.sh; let rw = av.rw + 1;
+    sh.cell(rw, 1).value('ITC in 2B held back — not claimed this month (goes to Summary "Less: Rule 42/43 Reversals")')._styleId = ST.hd; rw++;
+    ['S.No', 'Supplier name', 'Invoice no', 'Taxable value', 'Integrated Tax (₹)', 'Central Tax (₹)', 'State/UT Tax (₹)', 'Cess (₹)', 'Status'].forEach((h, k) => { const cl = sh.cell(rw, k + 1); cl.value(h); cl._styleId = ST.th; }); rw++;
+    const held = (data.itc2b || []).filter(d => d.x && !d.x.na && !d.x.rc && !d.x.cn && !d.claimed), h0 = rw;
+    held.forEach((d, k) => { const x = d.x, A = v => r2(Math.abs(+v || 0));
+      [k + 1, `${x.n || ''}${x.g && x.g !== 'IMPORT' ? ' (' + x.g + ')' : ''}`, x.i || '', A(x.t), A(x.ig), A(x.cg), A(x.sg), A(x.cs), d.status].forEach((v, j) => { const cl = sh.cell(rw, j + 1); cl.value(v); cl._styleId = j >= 3 && j <= 7 ? ST.num : ST.lab; }); rw++; });
+    if (!held.length) { sh.cell(rw, 2).value(data.itc2b ? 'Nothing held back — all ITC in 2B is claimed this month' : 'Decisions not available for this download')._styleId = ST.lab; rw++; }
+    const holdRow = rw;
+    ['', 'Total held back', '', ...['D', 'E', 'F', 'G', 'H'].map(c => held.length ? `=SUM(${c}${h0}:${c}${rw - 1})` : 0), ''].forEach((v, j) => { const cl = sh.cell(rw, j + 1); if (typeof v === 'string' && v[0] === '=') cl.formula(v.slice(1)); else if (v !== '') cl.value(v); cl._styleId = j >= 3 && j <= 7 ? ST.numB : ST.labB; });
+    // links into Summary(1&3B) Part B — Summary columns B..E = taxable / IGST / CGST / SGST = sheet columns D..G
+    const L = (rows, c) => rows.length ? rows.map(r => `'ITC Available'!${c}${r}`).join('+') : '0';
+    const link = (row, rows) => ['B', 'C', 'D', 'E'].forEach((k, j) => {
+      const cl = S1.cell(`${k}${row}`), f = L(rows, 'DEFG'[j]);
+      const old = cl.formula() || (typeof cl.value() === 'number' ? String(cl.value()) : '0');
+      cl.formula(data.send ? f : `IF($B$3="${data.month}",${f},${old})`);
+    });
+    link(24, refs.inv);       // b. Inputs / Input Services = B2B invoices (+ ECO, ISD, amendments)
+    link(25, refs.imp);       // c. Import of goods
+    link(30, refs.cn);        // Less: Credit Note
+    link(31, refs.dn);        // Add: Debit Note
+    link(34, [holdRow]);      // Less: Rule 42/43 Reversals = ITC held back
+    S1.cell('B34')._styleId = S1.cell('C34')._styleId;
+  }
+  // v93: 2B detail — "2B ITC Available" / "2B ITC Not Available", one line per document with its status
+  if (data.itc2b && (data.itc2b.length || (data.itc2b.books || []).length)) {
+    const T = o => r2((+o.ig || 0) + (+o.cg || 0) + (+o.sg || 0) + (+o.cs || 0)), sec = x => /IMP/.test(x.src || '') ? 'IMPG' : /ISD/.test(x.src || '') ? 'ISD' : /CDN/.test(x.src || '') ? 'CDNR' : x.src || 'B2B';
+    const head = ['Section', 'Supplier GSTIN', 'Supplier name', 'Invoice / note no', 'Date', 'Type', 'Taxable', 'IGST', 'CGST', 'SGST', 'Cess', 'Total tax', 'Status', 'Claimed this month', 'Books bill no'];
+    const hd2 = ST.hd, th2 = ST.th;
+    const headB = ['Section', 'Supplier GSTIN', 'Supplier name', 'Bill no (books)', 'Date', 'Type', 'Taxable', 'IGST', 'CGST', 'SGST', 'Cess', 'Total tax', 'Status', 'Claimed this month', 'Bill no in 2B'];
+    [['2B ITC Available', data.itc2b.filter(d => !d.x.na), 'x'], ['2B ITC Not Available', data.itc2b.filter(d => d.x.na), 'x'], ['Books (Purchase register)', data.itc2b.books || [], 'b']].forEach(([nm, list, side]) => {
+      if (side === 'b' && !list.length) return;
+      const sh = wb.addSheet(nm); let rr = 1;
+      sh.cell('A1').value(`${side === 'b' ? 'Purchase register (books) vs GSTR-2B' : nm.replace('2B ', 'GSTR-2B — ')} · ${data.client.name} · ${data.month} ${yr}`)._styleId = hd2; rr = 3;
+      (side === 'b' ? headB : head).forEach((h, k) => { const cl = sh.cell(rr, k + 1); cl.value(h); cl._styleId = th2; }); rr++;
+      const mainOf = d => side === 'b' ? d.b : d.x, otherOf = d => side === 'b' ? d.x : d.b;
+      const sorted = list.slice().sort((a, b) => String(a.status).localeCompare(String(b.status)) || String(mainOf(a).n || '').localeCompare(String(mainOf(b).n || '')));
+      const rows = sorted.map(d => { const x = mainOf(d), o = otherOf(d), sg = x.cn || (+x.t || 0) < 0 ? -1 : 1, A = v => r2(sg * Math.abs(+v || 0));
+        return [side === 'b' ? (x.rc ? 'RCM' : x.cn ? 'Credit note' : 'Bill') : sec(x), x.g || '', x.n || '', x.i || '', x.d ? String(x.d).split('-').reverse().join('-') : '', GR.docWord(x), A(x.t), A(x.ig), A(x.cg), A(x.sg), A(x.cs), r2(sg * Math.abs(T(x))), d.status, d.claimed ? 'Yes' : 'No', o && o.i ? o.i : '']; });
+      if (rows.length) { sh.cell(rr, 1).value(rows); rr += rows.length; } else { sh.cell(rr, 1).value('No documents'); rr++; }
+      const tot = (f, l) => { const L = rows.filter(f), s = k => r2(L.reduce((a, r) => a + (+r[k] || 0), 0)); sh.cell(rr, 1).value([[l, '', '', `${L.length} document${L.length === 1 ? '' : 's'}`, '', '', s(6), s(7), s(8), s(9), s(10), s(11), '', '', '']]); for (let k = 1; k <= 15; k++) sh.cell(rr, k)._styleId = th2; rr++; };
+      rr++; tot(() => true, 'Total'); if (nm !== '2B ITC Not Available') { tot(r => r[13] === 'Yes', 'Claimed this month'); tot(r => r[13] === 'No', 'Not claimed this month'); }
+      // status summary
+      rr++; sh.cell(rr, 1).value('Status summary')._styleId = hd2; rr++;
+      const by = {}; rows.forEach(r => { by[r[12]] = by[r[12]] || { n: 0, t: 0 }; by[r[12]].n++; by[r[12]].t = r2(by[r[12]].t + r[11]); });
+      if (Object.keys(by).length) sh.cell(rr, 1).value(Object.entries(by).map(([k, v]) => [k, '', '', `${v.n}`, '', '', '', '', '', '', '', v.t, '', '', ''])); rr += Object.keys(by).length;
+      [10, 18, 34, 20, 11, 12, 13, 12, 12, 12, 9, 13, 52, 10, 20].forEach((w, k) => sh.column(k + 1).width(w));
+    });
+  }
   // ---------- v71: the copy that goes to the senior / client — current month only, invoice-wise breakup, no Home / Reconciliation ----------
   if (data.send) {
-    const sel = months.find(m => monthName(m.period) === data.month), i0 = GW_MONTHS.indexOf(data.month), yr = i0 >= 9 ? fyStart + 1 : fyStart;
+    const sel = selM;
     const sm = wb.sheet('Summary(1&3B)');                                          // Name / GSTIN / FY were formulas on Home
     sm.cell('B1').value(data.client.name || ''); sm.cell('B2').value(data.client.gstin || ''); sm.cell('B4').value(data.fy);
     // MonthlyInputs: keep only this month, in column C (Summary finds the month by name in C3:N3)
@@ -7519,31 +7631,6 @@ async function fillGstWorkings(XP, templateBytes, data) {
       bold('A', 'K'); rr += 1;
     }
     if (!B.length && !P.length) mi.cell(`A${rr + 1}`).value('No GSTR-2B or purchase register saved for this month.');
-    // v93: 2B detail — "2B ITC Available" / "2B ITC Not Available", one line per document with its status
-    if (data.itc2b && (data.itc2b.length || (data.itc2b.books || []).length)) {
-      const T = o => r2((+o.ig || 0) + (+o.cg || 0) + (+o.sg || 0) + (+o.cs || 0)), sec = x => /IMP/.test(x.src || '') ? 'IMPG' : /ISD/.test(x.src || '') ? 'ISD' : /CDN/.test(x.src || '') ? 'CDNR' : x.src || 'B2B';
-      const head = ['Section', 'Supplier GSTIN', 'Supplier name', 'Invoice / note no', 'Date', 'Type', 'Taxable', 'IGST', 'CGST', 'SGST', 'Cess', 'Total tax', 'Status', 'Claimed this month', 'Books bill no'];
-      const hd2 = mi.cell('A4')._styleId, th2 = mi.cell('A3')._styleId;
-      const headB = ['Section', 'Supplier GSTIN', 'Supplier name', 'Bill no (books)', 'Date', 'Type', 'Taxable', 'IGST', 'CGST', 'SGST', 'Cess', 'Total tax', 'Status', 'Claimed this month', 'Bill no in 2B'];
-      [['2B ITC Available', data.itc2b.filter(d => !d.x.na), 'x'], ['2B ITC Not Available', data.itc2b.filter(d => d.x.na), 'x'], ['Books (Purchase register)', data.itc2b.books || [], 'b']].forEach(([nm, list, side]) => {
-        if (side === 'b' && !list.length) return;
-        const sh = wb.addSheet(nm); let rr = 1;
-        sh.cell('A1').value(`${side === 'b' ? 'Purchase register (books) vs GSTR-2B' : nm.replace('2B ', 'GSTR-2B — ')} · ${data.client.name} · ${data.month} ${yr}`)._styleId = hd2; rr = 3;
-        (side === 'b' ? headB : head).forEach((h, k) => { const cl = sh.cell(rr, k + 1); cl.value(h); cl._styleId = th2; }); rr++;
-        const mainOf = d => side === 'b' ? d.b : d.x, otherOf = d => side === 'b' ? d.x : d.b;
-        const sorted = list.slice().sort((a, b) => String(a.status).localeCompare(String(b.status)) || String(mainOf(a).n || '').localeCompare(String(mainOf(b).n || '')));
-        const rows = sorted.map(d => { const x = mainOf(d), o = otherOf(d), sg = x.cn || (+x.t || 0) < 0 ? -1 : 1, A = v => r2(sg * Math.abs(+v || 0));
-          return [side === 'b' ? (x.rc ? 'RCM' : x.cn ? 'Credit note' : 'Bill') : sec(x), x.g || '', x.n || '', x.i || '', x.d ? String(x.d).split('-').reverse().join('-') : '', GR.docWord(x), A(x.t), A(x.ig), A(x.cg), A(x.sg), A(x.cs), r2(sg * Math.abs(T(x))), d.status, d.claimed ? 'Yes' : 'No', o && o.i ? o.i : '']; });
-        if (rows.length) { sh.cell(rr, 1).value(rows); rr += rows.length; } else { sh.cell(rr, 1).value('No documents'); rr++; }
-        const tot = (f, l) => { const L = rows.filter(f), s = k => r2(L.reduce((a, r) => a + (+r[k] || 0), 0)); sh.cell(rr, 1).value([[l, '', '', `${L.length} document${L.length === 1 ? '' : 's'}`, '', '', s(6), s(7), s(8), s(9), s(10), s(11), '', '', '']]); for (let k = 1; k <= 15; k++) sh.cell(rr, k)._styleId = th2; rr++; };
-        rr++; tot(() => true, 'Total'); if (nm !== '2B ITC Not Available') { tot(r => r[13] === 'Yes', 'Claimed this month'); tot(r => r[13] === 'No', 'Not claimed this month'); }
-        // status summary
-        rr++; sh.cell(rr, 1).value('Status summary')._styleId = hd2; rr++;
-        const by = {}; rows.forEach(r => { by[r[12]] = by[r[12]] || { n: 0, t: 0 }; by[r[12]].n++; by[r[12]].t = r2(by[r[12]].t + r[11]); });
-        if (Object.keys(by).length) sh.cell(rr, 1).value(Object.entries(by).map(([k, v]) => [k, '', '', `${v.n}`, '', '', '', '', '', '', '', v.t, '', '', ''])); rr += Object.keys(by).length;
-        [10, 18, 34, 20, 11, 12, 13, 12, 12, 12, 9, 13, 52, 10, 20].forEach((w, k) => sh.column(k + 1).width(w));
-      });
-    }
     // sheets not sent (Reconciliation will be added back later)
     wb.activeSheet('Summary(1&3B)');
     // v78: also ReadMe, GSTR-9 (Coming Soon) and Macro Code are not sent
@@ -7578,7 +7665,8 @@ async function downloadGstWorkings(c, period) {
   const sel = (gm.data || []).find(r => r.period === period);
   const out = await fillGstWorkings(XP, new Uint8Array(tpl), {
     client: { name: c.name, gstin: c.gstin, trade: c.trade_name || '' }, fy, month: GW_MONTHS[(m + 8) % 12], months,
-    notices: nt.error ? [] : nt.data || [], g1tasks, preparedBy: me.full_name || me.email, verifiedBy: sel && sel.verified_by ? profName(sel.verified_by) : '' });
+    notices: nt.error ? [] : nt.data || [], g1tasks, preparedBy: me.full_name || me.email, verifiedBy: sel && sel.verified_by ? profName(sel.verified_by) : '',
+    itc2b: sel ? (() => { try { return REV.itc2bStatus(c, sel); } catch (e) { console.warn(e); return null; } })() : null });   // v99
   const blob = new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
   const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `GST Workings - ${c.name} - FY ${fy}.xlsx`;
   document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 4000);
@@ -7809,11 +7897,11 @@ const REV = (() => {
     if (u.error) throw new Error(v19(u.error));
     return { to, what: K.label };
   }
-  return { STATE, KIND, KINDS, kindOf, summary, pdf, excel, files, load, send, toClient, setDraft, clearDraft, senior, mon, monShort, rand, sha };
+  return { STATE, KIND, KINDS, kindOf, summary, pdf, excel, files, load, send, toClient, setDraft, clearDraft, senior, mon, monShort, rand, sha, itc2bStatus };
 })();
 
 // v78: this tab's code version — when a newer app is uploaded, offer Reload and block mails from old code
-const APP_VER = 'jlr-shell-v98';
+const APP_VER = 'jlr-shell-v99';
 let appStale = false;
 async function checkAppVer() {
   try { const t = await fetch('sw.js?v=' + Date.now(), { cache: 'no-store' }).then(r => r.text()); const live = (t.match(/jlr-shell-v\d+/) || [])[0];
