@@ -4521,7 +4521,9 @@ const GR = (() => {
     const SA = (m.sales && m.sales.rows) || [], S = SA.filter(r => !r.nil), P = (m.purchases && m.purchases.rows) || [], B = (m.gstr2b && m.gstr2b.rows) || [];
     const nilOut = fix(sum(SA, r => r.nil && r.nil !== 'Non-GST')), nonGst = fix(sum(SA, r => r.nil === 'Non-GST'));
     const out = fix(sum(S)), outB2B = fix(sum(S, r => gstinOk(r.g))), outB2C = fix(sum(S, r => !gstinOk(r.g)));
-    const itc2b = fix(sum(B, r => !r.na && !r.rc)), blocked = fix(sum(B, r => r.na)), rcm2b = fix(sum(B, r => r.rc && !r.na));
+    // v98: an RCM bill in 2B decided "Not ours" / "Keep pending" / "Don't take now" / rejected is left out of 3.1(d) and 4(A)(3)
+    const RCM_OUT = ['notours', 'notmine', 'hold', 'skip', 'reject', 'noclaim'], rcmOut = r => RCM_OUT.includes(effA(m.reco, docKey(r)));
+    const itc2b = fix(sum(B, r => !r.na && !r.rc)), blocked = fix(sum(B, r => r.na)), rcm2b = fix(sum(B, r => r.rc && !r.na && !rcmOut(r))), rcmHeld = fix(sum(B, r => r.rc && !r.na && rcmOut(r)));
     const itcBooks = fix(sum(P, r => !r.rc)), rcmBooks = fix(sum(P, r => r.rc));
     const has2b = B.length > 0;
     let itcBase = has2b ? itc2b : itcBooks, itcFrom = has2b ? '2b' : 'books', waiting = 0;
@@ -4535,7 +4537,7 @@ const GR = (() => {
     // v79: RCM = 2B RCM + books RCM from unregistered / foreign suppliers (never in 2B) + typed in GSTR-3B workings (reco.w3b.rcm_add)
     const rcmUnreg = fix(sum(P, r => r.rc && !gstinOk(r.g))), W3 = (((m.reco || {}).w3b) || {}), num5 = o => ({ t: +(o || {}).t || 0, ig: +(o || {}).ig || 0, cg: +(o || {}).cg || 0, sg: +(o || {}).sg || 0, cs: +(o || {}).cs || 0 });
     // v89: 3.1(d) parts — 2B (or books when no 2B) · books lines of unregistered / foreign suppliers · typed "other" · typed unregistered persons (sec 9(4))
-    const rcmParts = { reg: has2b ? rcm2b : rcmBooks, booksUnreg: has2b ? rcmUnreg : fix({ t: 0, ig: 0, cg: 0, sg: 0, cs: 0 }), typed: num5(W3.rcm_add), unreg: num5(W3.rcm_unreg), has2b };
+    const rcmParts = { held: rcmHeld, reg: has2b ? rcm2b : rcmBooks, booksUnreg: has2b ? rcmUnreg : fix({ t: 0, ig: 0, cg: 0, sg: 0, cs: 0 }), typed: num5(W3.rcm_add), unreg: num5(W3.rcm_unreg), has2b };
     const rcm = fix({ t: 0, ig: 0, cg: 0, sg: 0, cs: 0 }); [rcmParts.reg, rcmParts.booksUnreg, rcmParts.typed, rcmParts.unreg].forEach(x => { if (x) for (const k in rcm) rcm[k] = r2((rcm[k] || 0) + (+x[k] || 0)); });
     // RCM: tax is paid in cash, and the same amount becomes ITC
     const liab = { ig: out.ig + rcm.ig, cg: out.cg + rcm.cg, sg: out.sg + rcm.sg, cs: out.cs + rcm.cs };
@@ -5730,7 +5732,7 @@ VIEWS.gst = async v => {
         ${tr('(a) Outward taxable supplies (other than zero rated, nil rated and exempted)', D.a)}${tr('(b) Outward taxable supplies (zero rated)', D.b)}${tr('(c) Other outward supplies (nil rated, exempted)', D.c)}
         ${tr('<b>(d) Inward supplies (liable to reverse charge) — total</b>', D.d)}${(() => { const RP = sm.rcmParts || {}, U = RP.unreg || {}, sub = (l, x) => x && (x.t || x.ig || x.cg || x.sg || x.cs) ? `<tr class="muted"><td style="padding-left:22px">${l}</td>${['t', 'ig', 'cg', 'sg', 'cs'].map(k => `<td class="r">${gst$(x[k] || 0)}</td>`).join('')}</tr>` : '';
           const inp = k => `<td class="r"><input type="number" step="0.01" min="0" data-rcmu="${k}" value="${U[k] ? esc(String(U[k])) : ''}" placeholder="0" style="width:96px;text-align:right;padding:3px 5px"></td>`;
-          return sub(`• in ${RP.has2b ? 'GSTR-2B (registered suppliers)' : 'purchase register'}`, RP.reg) + sub('• purchase register — unregistered / foreign suppliers', RP.booksUnreg) + sub('• typed — other (RCM, reversal &amp; ledger balances)', RP.typed)
+          return sub(`• in ${RP.has2b ? 'GSTR-2B (registered suppliers)' : 'purchase register'}`, RP.reg) + (RP.held && (RP.held.t || RP.held.cg || RP.held.ig) ? `<tr class="muted"><td style="padding-left:22px">• RCM in 2B left out (Not ours / Keep pending) — not in the total</td>${['t', 'ig', 'cg', 'sg', 'cs'].map(k => `<td class="r"><s>${gst$(RP.held[k] || 0)}</s></td>`).join('')}</tr>` : '') + sub('• purchase register — unregistered / foreign suppliers', RP.booksUnreg) + sub('• typed — other (RCM, reversal &amp; ledger balances)', RP.typed)
             + `<tr class="gr-rcmu"><td style="padding-left:22px">• Unregistered persons — sec 9(4) / notified, <b>type here</b> <button class="btn sm primary" data-rcmusave style="margin-left:6px">Save</button></td>${inp('t')}${inp('ig')}${inp('cg')}${inp('sg')}${inp('cs')}</tr>`; })()}
         ${tr('(e) Non-GST outward supplies', D.e)}</tbody></table></div>
       </details>
@@ -7435,8 +7437,9 @@ async function fillGstWorkings(XP, templateBytes, data) {
     //      9(4) unregistered (rows 6–9): books RCM lines of unregistered / foreign suppliers + typed "unregistered persons"
     const W3 = ((m.reco || {}).w3b) || {}, n5 = o => ({ t: Math.abs(+(o || {}).t || 0), ig: Math.abs(+(o || {}).ig || 0), cg: Math.abs(+(o || {}).cg || 0), sg: Math.abs(+(o || {}).sg || 0) }), A2 = (a, b) => ({ t: a.t + b.t, ig: a.ig + b.ig, cg: a.cg + b.cg, sg: a.sg + b.sg });
     const okG = g => /^\d{2}[A-Z]{5}\d{4}[A-Z][A-Z0-9]Z[A-Z0-9]$/.test(String(g || '').toUpperCase());
-    const r93 = A2(B.length ? sum(B, x => x.rc && !x.na) : sum(P, x => x.rc && okG(x.g)), n5(W3.rcm_add)), r94 = A2(sum(P, x => x.rc && !okG(x.g)), n5(W3.rcm_unreg));
-    if (r93.t || r93.ig || r93.cg || r93.sg) { put(5, i, r93.t); put(29, i, r93.ig); put(30, i, r93.cg); put(31, i, r93.sg); }
+    const rcmOut = x => ['notours', 'notmine', 'hold', 'skip', 'reject', 'noclaim'].includes(GR.effA(m.reco || {}, GR.docKey(x)));   // v98
+    const r93 = A2(B.length ? sum(B, x => x.rc && !x.na && !rcmOut(x)) : sum(P, x => x.rc && okG(x.g)), n5(W3.rcm_add)), r94 = A2(sum(P, x => x.rc && !okG(x.g)), n5(W3.rcm_unreg));
+    if (B.length || r93.t || r93.ig || r93.cg || r93.sg) { put(5, i, r93.t); put(29, i, r93.ig); put(30, i, r93.cg); put(31, i, r93.sg); }
     if (r94.t || r94.ig || r94.cg || r94.sg) { put(6, i, r94.t); put(7, i, r94.ig); put(8, i, r94.cg); put(9, i, r94.sg); }
   }
 
@@ -7810,7 +7813,7 @@ const REV = (() => {
 })();
 
 // v78: this tab's code version — when a newer app is uploaded, offer Reload and block mails from old code
-const APP_VER = 'jlr-shell-v97';
+const APP_VER = 'jlr-shell-v98';
 let appStale = false;
 async function checkAppVer() {
   try { const t = await fetch('sw.js?v=' + Date.now(), { cache: 'no-store' }).then(r => r.text()); const live = (t.match(/jlr-shell-v\d+/) || [])[0];
