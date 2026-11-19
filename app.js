@@ -6927,11 +6927,52 @@ const SALESIN = (() => {
     skipped.month.amt = r2(skipped.month.amt);
     return { lines, skipped, fileTax: r2(Math.abs(fileTax)), source: 'Sales register (ERP sections B2B / Export / CRN)' };
   }
-  // the firm's workings: its GSTR-1 sheet if filled → the ERP Sales sheet → the portal-format sheets
+  // ---- v96: Zoho invoice export cut into blocks (B2B / B2C / EXP / CRN), one row per item, no GSTIN / rate columns ----
+  // GSTIN comes from the portal-format b2b / cdnr sheets of the same file (by invoice / note number); rate = tax ÷ taxable.
+  const isZbHead = r => { const h = (r || []).map(P); return (h.includes('invoice number') && h.includes('gst treatment') && h.includes('taxable value')) || (h.includes('credit note number') && h.includes('total')); };
+  const UP = v => String(v ?? '').trim().toUpperCase();
+  const zbSheet = sheets => sheets.find(sh => (sh.rows || []).slice(0, 30).some(r => { const h = (r || []).map(P); return h.includes('invoice number') && h.includes('gst treatment') && h.includes('taxable value'); }));
+  function fromZohoBlocks(rows, sheets, opts = {}) {
+    const gmap = {};   // invoice / note no → { g, n } from the portal sheets
+    sheets.forEach(sh => { const K = portalKind(sh.rows || []); if (!K || !['b2b', 'cdnr'].includes(K.k)) return; const gi = K.h.indexOf('gstin uin of recipient'), ni = K.h.indexOf('invoice number') >= 0 ? K.h.indexOf('invoice number') : K.h.indexOf('note number'), rn = K.h.indexOf('receiver name');
+      for (let r = K.r + 1; r < sh.rows.length; r++) { const row = sh.rows[r] || [], no = String(row[ni] ?? '').trim(); if (no) gmap[UP(no)] = { g: String(row[gi] ?? '').trim().toUpperCase(), n: String(row[rn] ?? '').trim() }; } });
+    const lines = [], skipped = { month: { n: 0, amt: 0 }, void: { n: 0 } }, noG = new Set(); let C = null, cn = false, fileTax = 0;
+    for (let r = 0; r < rows.length; r++) {
+      const row = rows[r] || [];
+      if (isZbHead(row)) { const h = row.map(P), all = nm => h.reduce((a, x, i) => x === nm ? [...a, i] : a, []), ix = (...nm) => { for (const x of nm) { const k = h.indexOf(x); if (k >= 0) return k; } return -1; };
+        cn = h.includes('credit note number'); const cgs = all('cgst');
+        C = { d: ix('invoice date', 'credit note date'), st: ix('invoice status', 'credit note status'), no: ix('invoice number', 'credit note number'), n: ix('customer name'), pos: ix('place of supply with state code', 'place of supply'),
+          tr: ix('gst treatment'), tx: ix('taxable value'), tot: ix('total'), ig: ix('igst'), cg: cgs[0] ?? -1, sg: ix('sgst') >= 0 ? ix('sgst') : (cgs[1] ?? -1), hsn: ix('hsn sac', 'hsn'), qty: ix('quantity'), gst: ix('gstin', 'gst identification number gstin', 'customer gstin') };
+        continue; }
+      if (!C) continue;
+      const get = k => C[k] >= 0 ? row[C[k]] : '', no = String(get('no') ?? '').trim(), d = xdate(get('d'));
+      if (!no || !d) continue;
+      if (/void|draft/i.test(String(get('st') || ''))) { skipped.void.n++; continue; }
+      if (opts.month && d.slice(0, 7) !== opts.month) { skipped.month.n++; continue; }
+      const ig = Math.abs(n(get('ig'))), cg = Math.abs(n(get('cg'))), sg = Math.abs(n(get('sg'))), tax = ig + cg + sg;
+      let tx = Math.abs(n(get('tx'))); if (!tx && cn) tx = Math.max(0, Math.abs(n(get('tot'))) - tax);
+      const tr = P(get('tr')), posS = String(get('pos') ?? ''), pm = posS.match(/^\s*(\d{1,2})/), pc = pm ? pm[1].padStart(2, '0') : '';
+      const look = gmap[UP(no)] || {}, gRaw = String(get('gst') ?? '').trim().toUpperCase(), g = /^\d{2}[A-Z0-9]{13}$/.test(gRaw) ? gRaw : /^\d{2}[A-Z0-9]{13}$/.test(look.g || '') ? look.g : '';
+      const o = { src: 'portal', d, no, ty: cn ? 'Credit Note' : 'Invoice', name: String(get('n') ?? '').trim() || look.n || '', tx: r2(tx) };
+      if (g) o.gstin = g; else if (/business gst|sez/.test(tr)) noG.add(no);
+      if (!g && pc && stateOf(pc)) o.state = stateOf(pc).trim();
+      if (has(get('hsn'))) o.hsn = String(get('hsn')).trim();
+      if (n(get('qty'))) o.qty = n(get('qty'));
+      o.rate = nearRate(tx ? tax / tx * 100 : 0);
+      if (/overseas/.test(tr)) o.exp = ig ? 'Export - With GST' : 'Export - Without GST';
+      else if (/sez/.test(tr)) o.exp = ig ? 'SEZ - With GST' : 'SEZ - Without GST';
+      lines.push(o); fileTax += (cn ? -1 : 1) * tax;
+    }
+    const res = { lines, skipped, fileTax: r2(Math.abs(fileTax)), source: 'Invoice sheet (Zoho blocks B2B / B2C / EXP / CRN)' };
+    if (noG.size) res.warn = `${noG.size} registered-customer invoice(s) without GSTIN (not in the b2b sheet): ${[...noG].slice(0, 6).join(', ')}${noG.size > 6 ? '…' : ''} — type the GSTIN in GSTR-1 entry`;
+    return res;
+  }
+  // the firm's workings: its GSTR-1 sheet if filled → the ERP Sales sheet → the Zoho Invoice sheet → the portal-format sheets
   function fromWorkbook(sheets, opts) {
     const w = sheets.find(isWorkings), wr = w ? fromWorkings(w.rows, opts) : null;
     if (wr && (wr.lines.length || wr.skipped.month.n)) return wr;
     const e = erpSheet(sheets); if (e) { const er = fromErp(e.rows, opts); if (er.lines.length || er.skipped.month.n) return er; }
+    const zb = zbSheet(sheets); if (zb) { const zr = fromZohoBlocks(zb.rows, sheets, opts); if (zr.lines.length || zr.skipped.month.n) return zr; }
     if (isPortal(sheets)) { const p = fromPortal(sheets, opts); if (p.lines.length || p.skipped.month.n) return p; }
     return wr;
   }
@@ -6941,7 +6982,7 @@ const SALESIN = (() => {
     const wb = fromWorkbook(sheets, opts); if (wb) return wb;
     return fromRegister((sheets[0] || {}).rows || [], opts);
   }
-  return { isZoho, fromZoho, fromRegister, fromWorkings, isWorkings, isPortal, fromPortal, fromErp, erpSheet, fromWorkbook, read };
+  return { isZoho, fromZoho, fromRegister, fromWorkings, isWorkings, isPortal, fromPortal, fromErp, erpSheet, zbSheet, fromZohoBlocks, fromWorkbook, read };
 })();
 
 /* =====================================================================
@@ -7226,13 +7267,13 @@ function renderG1(o, { client: c, getRow, save, filed = null, mode = 'work' }) {
       const f = await new Promise(res => { const i = document.createElement('input'); i.type = 'file'; i.accept = '.xlsx,.xls'; i.onchange = () => res(i.files[0]); i.click(); });
       if (!f) return;
       try {
-        const shs = await readSheets(f), wk = shs.find(SALESIN.isWorkings) || SALESIN.erpSheet(shs) || (SALESIN.isPortal(shs) ? {} : null);
+        const shs = await readSheets(f), wk = shs.find(SALESIN.isWorkings) || SALESIN.erpSheet(shs) || SALESIN.zbSheet(shs) || (SALESIN.isPortal(shs) ? {} : null);
         if (wk) {   // v72: the firm's GST workings — its GSTR-1 sheet, else (v82) the ERP Sales sheet, else (v81) the portal-format sheets
           const res = SALESIN.fromWorkbook(shs, { month: row.period.slice(0, 7) }) || { lines: [], skipped: { month: { n: 0 } }, error: 'No invoices found in this workings file' };
           if (!res.lines.length) return toast(res.skipped.month && res.skipped.month.n ? `No invoices dated in this month (${res.skipped.month.n} other-month rows in the file)` : res.error || 'No invoices found in the GSTR-1 sheet', true);
           if (D.sales.some(r => Object.keys(r).length) && !confirm('Replace the sales rows already entered here with the rows from this workings file?')) return;
           D.sales = res.lines; dirty(); draw();
-          toast(`${res.lines.length} invoice${res.lines.length > 1 ? 's' : ''} loaded from the workings${res.skipped.month.n ? ` (${res.skipped.month.n} of other months left out)` : ''} — check and Save`); return;
+          toast(`${res.lines.length} invoice${res.lines.length > 1 ? 's' : ''} loaded from the workings${res.skipped.month.n ? ` (${res.skipped.month.n} of other months left out)` : ''} — check and Save${res.warn ? ' · ⚠ ' + res.warn : ''}`, !!res.warn); return;
         }
         const g = G1.fromWorkbook(shs);
         if (g.error) return toast(g.error, true);
@@ -7769,7 +7810,7 @@ const REV = (() => {
 })();
 
 // v78: this tab's code version — when a newer app is uploaded, offer Reload and block mails from old code
-const APP_VER = 'jlr-shell-v95';
+const APP_VER = 'jlr-shell-v96';
 let appStale = false;
 async function checkAppVer() {
   try { const t = await fetch('sw.js?v=' + Date.now(), { cache: 'no-store' }).then(r => r.text()); const live = (t.match(/jlr-shell-v\d+/) || [])[0];
