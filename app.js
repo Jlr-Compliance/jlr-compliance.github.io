@@ -4746,6 +4746,7 @@ const RECO = (() => {
       const a = GR.effA(reco, it.k), x = it.x, b = it.b;
       if ((x && x.rc) || (b && b.rc)) return;                                  // reverse charge — cash, see draft 3B
       if (it.st === 'claimed_before') return;                                   // claimed in an earlier month
+      if (x && x.na && method !== 'books') return;                              // v102: ITC not available as per 2B — never claimed (goes to 4(D)(2)), even when the bill differs or is linked
       if (a === 'block' && tax(x || b) > 0) { add(blocked, x || b); return; }   // v100: blocked u/s 17(5) — shown in 4(A), reversed in 4(B)(1)
       if (method === 'books') {                                                 // credit as per books; 2B only tracked
         if (b) { if ((dec[it.k] || {}).a === 'noclaim') hold(b, false); else add(c, b); return; }
@@ -7930,7 +7931,7 @@ const REV = (() => {
 })();
 
 // v78: this tab's code version — when a newer app is uploaded, offer Reload and block mails from old code
-const APP_VER = 'jlr-shell-v101';
+const APP_VER = 'jlr-shell-v102';
 let appStale = false;
 async function checkAppVer() {
   try { const t = await fetch('sw.js?v=' + Date.now(), { cache: 'no-store' }).then(r => r.text()); const live = (t.match(/jlr-shell-v\d+/) || [])[0];
