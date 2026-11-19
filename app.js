@@ -4411,8 +4411,8 @@ const GR = (() => {
     const used = { ig: Z(), cg: Z(), sg: Z(), cs: Z() };        // used[creditHead][liabHead]
     const use = (from, to, cap = Infinity) => { const a = Math.min(C[from], L[to], cap); if (a > 0) { C[from] -= a; L[to] -= a; used[from][to] += a; } };
     use('ig', 'ig');
-    const shortC = Math.max(0, L.cg - C.cg), shortS = Math.max(0, L.sg - C.sg);
-    use('ig', 'cg', shortC); use('ig', 'sg', shortS); use('ig', 'cg'); use('ig', 'sg');
+    // v101: IGST credit left after IGST is split equally between CGST and SGST (if one side needs less, the other takes the rest)
+    const R = C.ig; use('ig', 'cg', Math.max(R / 2, R - L.sg)); use('ig', 'sg');
     use('cg', 'cg'); use('cg', 'ig'); use('sg', 'sg'); use('sg', 'ig'); use('cs', 'cs');
     return { cash: fix(L), balance: fix(C), used: Object.fromEntries(Object.entries(used).map(([k, v]) => [k, fix(v)])) };
   }
@@ -7460,7 +7460,11 @@ async function fillGstWorkings(XP, templateBytes, data) {
       else cl.formula(`INDEX({${clOpen.map(o => r2((o || {})[h] || 0)).join(',')}},1,MATCH($B$3,MonthlyInputs!$C$3:$N$3,0))`); }); }
 
   // v95: Summary Part B "RCM" ITC = RCM u/s 9(3) + 9(4) (the template took only 9(4) CGST and no value)
-  { const S1 = wb.sheet('Summary(1&3B)'); if (S1) ['B', 'C', 'D', 'E'].forEach(k => S1.cell(`${k}26`).formula(`${k}17+${k}18`)); }
+  { const S1 = wb.sheet('Summary(1&3B)'); if (S1) ['B', 'C', 'D', 'E'].forEach(k => S1.cell(`${k}26`).formula(`${k}17+${k}18`));
+    // v101: IGST credit left after IGST liability is split equally between CGST and SGST (overflow goes to the other head)
+    if (S1) { S1.cell('D42').formula('-MIN(D41,MAX((C37+C42)/2,(C37+C42)-E41))'); S1.cell('E42').formula('-MIN(E41,C37+C42+D42)');
+      // ITC carried forward: IGST used against CGST / SGST comes out of the IGST credit (the template took it from CGST / SGST credit)
+      S1.cell('C55').formula('D42'); S1.cell('D55').value('NA'); S1.cell('C57').formula('E42'); S1.cell('E57').value('NA'); } }
 
   // ---------- Reconciliation: GSTR-3B liability per month ----------
   const rc = wb.sheet('Reconciliation');
@@ -7926,7 +7930,7 @@ const REV = (() => {
 })();
 
 // v78: this tab's code version — when a newer app is uploaded, offer Reload and block mails from old code
-const APP_VER = 'jlr-shell-v100';
+const APP_VER = 'jlr-shell-v101';
 let appStale = false;
 async function checkAppVer() {
   try { const t = await fetch('sw.js?v=' + Date.now(), { cache: 'no-store' }).then(r => r.text()); const live = (t.match(/jlr-shell-v\d+/) || [])[0];
