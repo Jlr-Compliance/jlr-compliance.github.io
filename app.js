@@ -5365,7 +5365,7 @@ VIEWS.gst = async v => {
     const head = `<div class="grh"><div class="grh-pick"><label>Client<select id="grC">${gClients.length ? opts(gClients, grClient, x => `${x.name} · ${x.gstin}`, x => x.id) : '<option value="">No GST clients</option>'}</select></label>
         <label>Month<input type="month" id="grM" value="${esc(grMonth)}"></label></div>
       ${REV.KINDS.some(k => revs[k] && revs[k].state !== 'draft') ? REV.KINDS.filter(k => revs[k] && revs[k].state !== 'draft').map(k => `<span class="pill ${REV.STATE[revs[k].state][1]}">${REV.KIND[k].label}: ${REV.STATE[revs[k].state][0]}</span>`).join(' ') : row.status === 'Verified' ? `<span class="st st-filed">✓ Verified · ${esc(profName(row.verified_by) || '')}</span>` : '<span class="st st-pending-data">Draft</span>'}
-      <span class="spacer"></span><button class="btn sm" data-qlogin title="Opens the GST portal with the saved login filled in — you type only the captcha">Log in to GST portal</button><button class="btn sm" data-portal-api>Fetch from GST portal</button><a class="btn sm" href="#/clientreport" data-crgo>Client report</a>
+      <span class="spacer"></span><button class="btn sm" data-qlogin title="Opens the GST portal with the saved login filled in — you type only the captcha">Log in to GST portal</button><button class="btn sm" data-portal-api>Fetch from GST portal</button><button class="btn sm" data-wkdl title="Download this month's workings Excel (same as sent to the senior / client) for the client folder">⬇ Download workings</button><a class="btn sm" href="#/clientreport" data-crgo>Client report</a>
       ${isManager() ? (row.status === 'Verified' ? '<button class="btn sm" id="grUnver">Back to draft</button>' : '<button class="btn sm primary" id="grVer">✓ Mark as verified</button>') : ''}</div>`;
     // ===== v57: no Overview — two tabs (GSTR-1 · GSTR-3B), each one step at a time. Click a step in the progress line to open it. =====
     const STEPDEF = {
@@ -6292,6 +6292,13 @@ VIEWS.gst = async v => {
     }
     if (d.rev) { revAction(d.rev, d.rk || 'gstr3b', b); return; }
     if (d.nil) { setNil(d.nil, !d.nilx); return; }
+    if ('wkdl' in d) {   // v93: workings Excel for the office's own records
+      b.disabled = true; const t0 = b.textContent; b.textContent = 'Preparing…';
+      try { const x = await REV.excel(c, period); const a = document.createElement('a'); a.href = URL.createObjectURL(x.blob);
+        a.download = `GST Workings - ${c.name} - ${REV.mon(period)}.xlsx`.replace(/[\\/:*?"<>|]+/g, '-'); document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 4000); toast('Workings downloaded'); }
+      catch (e) { toast(friendly(e), true); } finally { b.disabled = false; b.textContent = t0; }
+      return;
+    }
     if (b.id === 'grSaveNotes') { await save({ notes: $('#grNotes', body).value.trim() || null }).catch(err => toast(friendly(err), true)); toast('Notes saved'); }
     if (b.id === 'grVer') { if (!gsum(row).counts.sales && !row.gstr2b) return toast('Add the data first', true); await save({ status: 'Verified', notes: (($('#grNotes', body) || {}).value || row.notes || '').trim() || null }).catch(err => toast(friendly(err), true)); toast('Marked as verified'); }
     if (b.id === 'grUnver') { await save({ status: 'Draft' }).catch(err => toast(friendly(err), true)); }
@@ -7458,6 +7465,31 @@ async function fillGstWorkings(XP, templateBytes, data) {
       bold('A', 'K'); rr += 1;
     }
     if (!B.length && !P.length) mi.cell(`A${rr + 1}`).value('No GSTR-2B or purchase register saved for this month.');
+    // v93: 2B detail — "2B ITC Available" / "2B ITC Not Available", one line per document with its status
+    if (data.itc2b && (data.itc2b.length || (data.itc2b.books || []).length)) {
+      const T = o => r2((+o.ig || 0) + (+o.cg || 0) + (+o.sg || 0) + (+o.cs || 0)), sec = x => /IMP/.test(x.src || '') ? 'IMPG' : /ISD/.test(x.src || '') ? 'ISD' : /CDN/.test(x.src || '') ? 'CDNR' : x.src || 'B2B';
+      const head = ['Section', 'Supplier GSTIN', 'Supplier name', 'Invoice / note no', 'Date', 'Type', 'Taxable', 'IGST', 'CGST', 'SGST', 'Cess', 'Total tax', 'Status', 'Claimed this month', 'Books bill no'];
+      const hd2 = mi.cell('A4')._styleId, th2 = mi.cell('A3')._styleId;
+      const headB = ['Section', 'Supplier GSTIN', 'Supplier name', 'Bill no (books)', 'Date', 'Type', 'Taxable', 'IGST', 'CGST', 'SGST', 'Cess', 'Total tax', 'Status', 'Claimed this month', 'Bill no in 2B'];
+      [['2B ITC Available', data.itc2b.filter(d => !d.x.na), 'x'], ['2B ITC Not Available', data.itc2b.filter(d => d.x.na), 'x'], ['Books (Purchase register)', data.itc2b.books || [], 'b']].forEach(([nm, list, side]) => {
+        if (side === 'b' && !list.length) return;
+        const sh = wb.addSheet(nm); let rr = 1;
+        sh.cell('A1').value(`${side === 'b' ? 'Purchase register (books) vs GSTR-2B' : nm.replace('2B ', 'GSTR-2B — ')} · ${data.client.name} · ${data.month} ${yr}`)._styleId = hd2; rr = 3;
+        (side === 'b' ? headB : head).forEach((h, k) => { const cl = sh.cell(rr, k + 1); cl.value(h); cl._styleId = th2; }); rr++;
+        const mainOf = d => side === 'b' ? d.b : d.x, otherOf = d => side === 'b' ? d.x : d.b;
+        const sorted = list.slice().sort((a, b) => String(a.status).localeCompare(String(b.status)) || String(mainOf(a).n || '').localeCompare(String(mainOf(b).n || '')));
+        const rows = sorted.map(d => { const x = mainOf(d), o = otherOf(d), sg = x.cn || (+x.t || 0) < 0 ? -1 : 1, A = v => r2(sg * Math.abs(+v || 0));
+          return [side === 'b' ? (x.rc ? 'RCM' : x.cn ? 'Credit note' : 'Bill') : sec(x), x.g || '', x.n || '', x.i || '', x.d ? String(x.d).split('-').reverse().join('-') : '', GR.docWord(x), A(x.t), A(x.ig), A(x.cg), A(x.sg), A(x.cs), r2(sg * Math.abs(T(x))), d.status, d.claimed ? 'Yes' : 'No', o && o.i ? o.i : '']; });
+        if (rows.length) { sh.cell(rr, 1).value(rows); rr += rows.length; } else { sh.cell(rr, 1).value('No documents'); rr++; }
+        const tot = (f, l) => { const L = rows.filter(f), s = k => r2(L.reduce((a, r) => a + (+r[k] || 0), 0)); sh.cell(rr, 1).value([[l, '', '', `${L.length} document${L.length === 1 ? '' : 's'}`, '', '', s(6), s(7), s(8), s(9), s(10), s(11), '', '', '']]); for (let k = 1; k <= 15; k++) sh.cell(rr, k)._styleId = th2; rr++; };
+        rr++; tot(() => true, 'Total'); if (nm !== '2B ITC Not Available') { tot(r => r[13] === 'Yes', 'Claimed this month'); tot(r => r[13] === 'No', 'Not claimed this month'); }
+        // status summary
+        rr++; sh.cell(rr, 1).value('Status summary')._styleId = hd2; rr++;
+        const by = {}; rows.forEach(r => { by[r[12]] = by[r[12]] || { n: 0, t: 0 }; by[r[12]].n++; by[r[12]].t = r2(by[r[12]].t + r[11]); });
+        if (Object.keys(by).length) sh.cell(rr, 1).value(Object.entries(by).map(([k, v]) => [k, '', '', `${v.n}`, '', '', '', '', '', '', '', v.t, '', '', ''])); rr += Object.keys(by).length;
+        [10, 18, 34, 20, 11, 12, 13, 12, 12, 12, 9, 13, 52, 10, 20].forEach((w, k) => sh.column(k + 1).width(w));
+      });
+    }
     // sheets not sent (Reconciliation will be added back later)
     wb.activeSheet('Summary(1&3B)');
     // v78: also ReadMe, GSTR-9 (Coming Soon) and Macro Code are not sent
@@ -7578,6 +7610,53 @@ const REV = (() => {
     return doc.output('blob');
   }
   // GST workings master (Excel) for the FY of this month
+  // v93: every 2B document of the month with what was done with it (matched / claimed on client's request / not taken / blocked …)
+  function itc2bStatus(c, row) {
+    const B = (row.gstr2b || {}).rows || [];
+    if (!B.length) { const P0 = (row.purchases || {}).rows || []; return P0.length ? Object.assign([], { books: GR.mergeDocs(P0).map(b => ({ b, status: 'GSTR-2B not added yet', claimed: false })) }) : null; }
+    const M = c.itc_method || 'books_2b', reco = row.reco || {}, sm = GR.summarise(row, { method: M, match: c.reco_match });
+    const items = M === '2b_confirm' || !sm.rec ? RECO.confirmItems(B).map(it => ({ ...it, k: GR.docKey(it.x) })) : sm.rec.items.filter(it => it.x).map(it => ({ ...it, k: GR.docKey(it.b || it.x) }));
+    const S = (l, yes) => [l, yes];
+    const statusOf = it => {
+      const x = it.x, a = GR.effA(reco, it.k);
+      if (x.na) return S('ITC not available as per 2B — not claimed', false);
+      if (/IMP/.test(x.src || '')) return GR.impHeld(reco, x) ? S('Import of goods — held, not claimed', false) : S('Import of goods — claimed in 4(A)(1)', true);
+      if (/ISD/.test(x.src || '')) return S('ISD credit — claimed in 4(A)(4)', true);
+      if (x.rc) return S('Reverse charge — tax paid in cash, ITC in 4(A)(3)', true);
+      if (M === 'books') return it.st === 'matched' ? S('Matched with books — claimed', true) : S('Not in books — credit taken as per books only', false);
+      if (M === '2b_confirm') return a === 'take' ? S('Claimed — confirmed by client', true) : a === 'skip' ? S('Not taken this month — client said later', false) : a === 'notmine' ? S('Not our purchase (client) — not taken', false) : S('Waiting for client — not taken', false);
+      switch (it.st) {
+        case 'matched': return a === 'noclaim' ? S('Matched with books — not claimed (ineligible)', false) : S('Matched with books — claimed', true);
+        case 'not_avail': return S('ITC not available as per 2B — not claimed', false);
+        case 'mismatch': return ['acc2b', 'ignore'].includes(a) ? S('Tax differs from books — claimed as per 2B', true) : a === 'accbooks' ? S('Tax differs — lower of books / 2B claimed, supplier to amend', true) : a === 'reject' ? S('Tax differs — rejected, not claimed', false) : S('Tax differs — lower of books / 2B claimed (pending decision)', true);
+        case 'suggest': return a === 'link' ? S('Matched with books (bill no differs) — claimed', true) : a === 'notsame' ? S('Not in books — not claimed', false) : S('Possible match in books — pending, not claimed', false);
+        case 'gstin_diff': return ['link', 'fixbooks'].includes(a) ? S('Matched with books (other GSTIN, same PAN) — claimed', true) : S('Same PAN, other GSTIN — pending, not claimed', false);
+        case '2b_only': return a === 'addbooks' || a === 'take' ? S('Not in books — claimed as per client request', true) : a === 'hold' || a === 'skip' ? S('Not in books — kept pending, not claimed', false) : a === 'notours' || a === 'notmine' ? S('Not our purchase — not claimed (reject in IMS)', false) : S('Not in books — pending decision, not claimed', false);
+        default: return S(it.st, false);
+      }
+    };
+    const b2 = items.map(it => { const [status, claimed] = statusOf(it); return { x: it.x, b: it.b || null, status, claimed }; });
+    // v94: purchase register bills with their status against 2B
+    const booksOf = it => {
+      const a = GR.effA(reco, it.k);
+      switch (it.st) {
+        case 'matched': return a === 'noclaim' ? S('Matched in 2B — not claimed (ineligible)', false) : S('Matched in 2B — claimed', true);
+        case 'not_avail': return S('In 2B, ITC not available — not claimed', false);
+        case 'mismatch': return ['acc2b', 'ignore'].includes(a) ? S('In 2B, tax differs — claimed as per 2B', true) : a === 'accbooks' ? S('In 2B, tax differs — lower claimed, supplier to amend', true) : a === 'reject' ? S('In 2B, tax differs — rejected, not claimed', false) : S('In 2B, tax differs — lower claimed (pending decision)', true);
+        case 'suggest': return a === 'link' ? S('Matched in 2B (bill no differs) — claimed', true) : S('Not in 2B (possible match pending) — not claimed', false);
+        case 'gstin_diff': return ['link', 'fixbooks'].includes(a) ? S('Matched in 2B (other GSTIN, same PAN) — claimed', true) : S('In 2B under another GSTIN — pending, not claimed', false);
+        case 'books_only': return a === 'noclaim' ? S('Not in 2B — not to be claimed (ineligible / reversed)', false) : a === 'later' ? S('Not in 2B — supplier filing late, claim when in 2B', false) : a === 'follow' ? S('Not in 2B — following up supplier, not claimed', false) : S('Not in 2B — not claimed', false);
+        case 'imp_matched': case 'imp_diff': return S('Import — matched with IMPG', true);
+        default: return S(it.st, false);
+      }
+    };
+    const P = (row.purchases || {}).rows || [];
+    let books = [];
+    if (M === 'books' || M === '2b_confirm' || !sm.rec) books = GR.mergeDocs(P.filter(r => !r.rc)).map(b => ({ b, status: M === 'books' ? 'Credit as per books — claimed' : 'Not matched (client confirms 2B method)', claimed: M === 'books' }));
+    else books = sm.rec.items.filter(it => it.b).map(it => { const [status, claimed] = booksOf({ ...it, k: GR.docKey(it.b) }); return { b: it.b, x: it.x || null, status, claimed }; });
+    GR.mergeDocs(P.filter(r => r.rc)).forEach(b => books.push({ b, status: 'Reverse charge — tax paid in cash, ITC in 4(A)(3)', claimed: true }));
+    return Object.assign(b2, { books });
+  }
   async function excel(c, period) {
     const y = +period.slice(0, 4), m = +period.slice(5, 7), fyStart = m >= 4 ? y : y - 1, fy = `${fyStart}-${String((fyStart + 1) % 100).padStart(2, '0')}`;
     const [XP, tpl, gm] = await Promise.all([loadXlsxPopulate(), fetch('gst-workings-master.xlsx', { cache: 'no-store' }).then(r => { if (!r.ok) throw new Error('Master template not found on the site'); return r.arrayBuffer(); }),
@@ -7585,7 +7664,7 @@ const REV = (() => {
     const months = (gm.data || []).map(r => ({ period: r.period, g1: r.g1, sales: r.sales, gstr1: r.gstr1, purchases: r.purchases, gstr2b: r.gstr2b, gstr3b: r.gstr3b, status: r.status }));
     const sel = (gm.data || []).find(r => r.period === period);
     const out = await fillGstWorkings(XP, new Uint8Array(tpl), { client: { name: c.name, gstin: c.gstin, trade: c.trade_name || '' }, fy, month: GW_MONTHS[(m + 8) % 12], months, notices: [], g1tasks: [],
-      preparedBy: me.full_name || me.email, verifiedBy: sel && sel.verified_by ? profName(sel.verified_by) : '', send: true });
+      preparedBy: me.full_name || me.email, verifiedBy: sel && sel.verified_by ? profName(sel.verified_by) : '', send: true, itc2b: sel ? itc2bStatus(c, sel) : null });
     return { blob: new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), name: `GST Workings - ${c.name} - FY ${fy}.xlsx` };
   }
   // ===== v36: two rounds a month — GSTR-1 (before the 11th) and GSTR-3B (after 2B) =====
@@ -7680,7 +7759,7 @@ const REV = (() => {
 })();
 
 // v78: this tab's code version — when a newer app is uploaded, offer Reload and block mails from old code
-const APP_VER = 'jlr-shell-v92';
+const APP_VER = 'jlr-shell-v94';
 let appStale = false;
 async function checkAppVer() {
   try { const t = await fetch('sw.js?v=' + Date.now(), { cache: 'no-store' }).then(r => r.text()); const live = (t.match(/jlr-shell-v\d+/) || [])[0];
