@@ -1258,9 +1258,9 @@ const GF_APPFORMS = [['RFD-11', 'LUT — letter of undertaking', 'fill'], ['REG-
   ['CMP-02', 'Opt for composition', 'fill'], ['CMP-04', 'Withdraw from composition', 'fill'], ['REG-16', 'Cancellation of registration', 'fill'], ['REG-21', 'Revocation of cancellation', 'fill'],
   ['REG-01', 'New registration', 'open'], ['Geocoding', 'Geocoding business address', 'open'], ['Rule 14B', 'Aadhaar authentication persons', 'open'], ['Specified premises', 'Declaration for specified premises', 'open'],
   // v109 stage 5: other returns and forms — opened on the portal with the tracker's notes, ARN saved when the portal shows it
-  ['GSTR-1A', 'Amend GSTR-1 (same month, before 3B)', 'open', 'ret'], ['IFF', 'Invoice furnishing facility (QRMP)', 'open', 'ret'], ['CMP-08', 'Composition — quarterly statement', 'open', 'ret'], ['GSTR-4', 'Composition — annual return', 'open', 'ret'],
+  ['GSTR-1A', 'Amend GSTR-1 (same month, before 3B)', 'open', 'ret'], ['IFF', 'Invoice furnishing facility (QRMP)', 'open', 'ret'], ['CMP-08', 'Composition — quarterly statement', 'fill', 'ret'], ['GSTR-4', 'Composition — annual return', 'open', 'ret'],
   ['GSTR-7', 'TDS deductor return', 'open', 'ret'], ['GSTR-8', 'TCS return (e-commerce operator)', 'open', 'ret'], ['GSTR-10', 'Final return after cancellation', 'open', 'ret'], ['GSTR-11', 'UIN holder — inward supplies', 'open', 'ret'],
-  ['GSTR-2X', 'Accept / reject TDS and TCS credit', 'open', 'ret'], ['RFD-01', 'Refund application', 'open', 'ret'], ['RFD-01W', 'Withdraw a refund application', 'open', 'ret'],
+  ['GSTR-2X', 'Accept / reject TDS and TCS credit', 'fill', 'ret'], ['RFD-01', 'Refund application', 'open', 'ret'], ['RFD-01W', 'Withdraw a refund application', 'open', 'ret'],
   ['ITC-01', 'Special ITC — new registration / leaving composition', 'open', 'ret'], ['ITC-02', 'Transfer of ITC on sale / merger', 'open', 'ret'], ['ITC-03', 'ITC reversal on opting composition', 'open', 'ret'], ['ITC-04', 'Job work', 'open', 'ret'],
   ['DRC-03', 'Voluntary payment', 'open', 'ret'], ['DRC-03A', 'Link DRC-03 to a demand', 'open', 'ret'], ['DRC-01B', 'Reply — GSTR-1 liability higher than 3B', 'open', 'ret'], ['DRC-01C', 'Reply — 2B ITC lower than 3B ITC', 'open', 'ret'],
   ['PMT-09', 'Transfer within cash ledger', 'fill', 'ret'], ['GSTP', 'Engage / disengage GST practitioner', 'open', 'ret'], ['GTA', 'GTA — forward charge option', 'open', 'ret'],
@@ -1282,8 +1282,29 @@ const GF_FILL = {
   'PMT-09': [['fromHead', 'Transfer from (major head)', 'sel', [['IGST', 'IGST'], ['CGST', 'CGST'], ['SGST', 'SGST / UTGST'], ['CESS', 'Cess']]],
     ['fromMinor', 'From minor head', 'sel', [['Tax', 'Tax'], ['Interest', 'Interest'], ['Penalty', 'Penalty'], ['Fee', 'Fee'], ['Others', 'Others']]],
     ['toHead', 'Transfer to (major head)', 'sel', [['IGST', 'IGST'], ['CGST', 'CGST'], ['SGST', 'SGST / UTGST'], ['CESS', 'Cess']]],
-    ['tax', 'Amount → Tax', 'money'], ['interest', 'Amount → Interest', 'money'], ['penalty', 'Amount → Penalty', 'money'], ['fee', 'Amount → Fee', 'money'], ['others', 'Amount → Others', 'money']]
+    ['tax', 'Amount → Tax', 'money'], ['interest', 'Amount → Interest', 'money'], ['penalty', 'Amount → Penalty', 'money'], ['fee', 'Amount → Fee', 'money'], ['others', 'Amount → Others', 'money']],
+  // v114 stage 2: GSTR-2X — saved on the portal with the portal's own accept / reject call; CMP-08 — table 3 typed into the portal form
+  'GSTR-2X': [['rtnPrd', 'Return month', 'month'], ['act', 'Entries not marked below', 'sel', [['A', 'Accept'], ['R', 'Reject'], ['N', 'Leave as they are']]],
+    ['remark', 'Remark for rejected entries (optional)', 'text'], ['marks', 'TDS / TCS entries read from the portal', 'g2x']],
+  'CMP-08': [['o_t', '1. Outward supplies (incl. exempt) — value', 'money'], ['o_c', '1. CGST', 'money'], ['o_s', '1. SGST', 'money'],
+    ['e_t', '1a. Through e-commerce operator — value', 'money'], ['e_c', '1a. CGST', 'money'], ['e_s', '1a. SGST', 'money'],
+    ['v_t', '1b. Outward services — value', 'money'], ['v_c', '1b. CGST', 'money'], ['v_s', '1b. SGST', 'money'],
+    ['r_t', '2. Inward supplies on reverse charge (incl. import of services) — value', 'money'], ['r_i', '2. IGST', 'money'], ['r_c', '2. CGST', 'money'], ['r_s', '2. SGST', 'money'], ['r_cs', '2. Cess', 'money'],
+    ['i_i', '4. Interest — IGST', 'money'], ['i_c', '4. Interest — CGST', 'money'], ['i_s', '4. Interest — SGST', 'money'], ['i_cs', '4. Interest — Cess', 'money']]
 };
+const g2xKey = r => [r.ctin || '', r.month || '', r.inum || ''].join('|');
+async function gfG2xDraw(el) {
+  const box = $('[data-g2x]', el); if (!box) return; const L = $('[data-g2xl]', box), cid = ($('[name=client]', el) || {}).value, m = ($('[name=gfx_rtnPrd]', el) || {}).value;
+  if (!cid || !m) return; const prd = m.slice(5) + m.slice(0, 4), I = await gfInfoRows(), row = I.rows && I.rows.get(cid), rec = (((row || {}).data || {}).gstr2xRec || {})[prd] || {};
+  let marks = {}; try { marks = JSON.parse(box.dataset.g2x || '{}'); } catch {}
+  const R = ['tds', 'tcs', 'tdsa', 'tcsa'].flatMap(k => (rec[k] || []).map(r => ({ ...r, sec: k })));
+  if (!R.length) { L.innerHTML = row && ((row.data || {}).gstr2x || {})[prd] ? 'No TDS / TCS entries on the portal for this month.' : 'Not read from the portal yet for this month — the add-on reads it once a day when someone is logged in. The default above is used.'; return; }
+  const n = v => (+v || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 });
+  L.innerHTML = `<div class="table-wrap"><table><thead><tr><th>Kind</th><th>Deductor / collector</th><th>Month</th><th>Doc</th><th>Value</th><th>Tax</th><th>Now</th><th>Do</th></tr></thead><tbody>${R.map(r => { const k = g2xKey(r), done = /^[AR]$/.test(r.flag || '');
+    return `<tr><td class="small">${esc(r.sec.toUpperCase())}</td><td class="wrap small">${esc(r.ctin || '')}<div class="muted">${esc(r.ctin_name || r.trdnm || '')}</div></td><td class="small">${esc(r.month || '')}</td><td class="small">${esc(r.inum || '')}</td>
+      <td class="small">${n(r.amt_ded || r.amt || r.txval)}</td><td class="small">${n((+r.iamt || 0) + (+r.camt || 0) + (+r.samt || 0))}</td><td class="small">${done ? (r.flag === 'A' ? 'Accepted' : 'Rejected') : 'Pending'}</td>
+      <td><select data-g2xk="${esc(k)}"><option value="">Default</option><option value="A" ${marks[k] === 'A' ? 'selected' : ''}>Accept</option><option value="R" ${marks[k] === 'R' ? 'selected' : ''}>Reject</option></select></td></tr>`; }).join('')}</tbody></table></div>`;
+}
 const GF_STOCK = [['IP', 'Inputs'], ['IPS', 'Inputs in semi-finished goods'], ['IPF', 'Inputs in finished goods'], ['CGPM', 'Capital goods / plant and machinery']];
 const gfFillable = f => f === 'RFD-11' || !!GF_FILL[f];
 function gfFillHtml(form, d = {}) {
@@ -1292,6 +1313,8 @@ function gfFillHtml(form, d = {}) {
         ${GF_STOCK.map(([c, n]) => `<tr><td class="wrap small">${esc(n)}</td>${['v', 'cg', 'ig', 'sg', 'cs'].map(h => `<td><input name="gfx_stock_${c}_${h}" inputmode="decimal" value="${esc(((d.stock || {})[c] || {})[h] ?? '')}"></td>`).join('')}</tr>`).join('')}</tbody></table></div></div>`
     : t === 'sel' ? `<label>${esc(l)}<select name="gfx_${k}"><option value="">—</option>${o.map(([v, n]) => `<option value="${esc(v)}" ${d[k] === v ? 'selected' : ''}>${esc(n)}</option>`).join('')}</select></label>`
     : t === 'area' ? `<label class="full">${esc(l)}<textarea name="gfx_${k}" rows="2">${esc(d[k] || '')}</textarea></label>`
+    : t === 'g2x' ? `<div class="full" data-g2x='${esc(JSON.stringify(d.marks || {}))}'><span class="small muted">${esc(l)}</span><div class="muted small" data-g2xl>Pick the client and month — entries appear here after the add-on's daily portal check.</div></div>`
+    : t === 'month' ? `<label>${esc(l)}<input type="month" name="gfx_${k}" value="${esc(/^\d{6}$/.test(d[k] || '') ? `${d[k].slice(2)}-${d[k].slice(0, 2)}` : '')}"></label>`
     : `<label>${esc(l)}<input name="gfx_${k}" ${t === 'date' ? 'type="date"' : t === 'money' ? 'inputmode="decimal"' : ''} value="${esc(d[k] || '')}"></label>`;
   return `<fieldset class="gf-fs" data-gfx="${esc(form)}"><legend>Filled on the portal by the add-on</legend><div class="form-grid">${F.map(fld).join('')}</div>
     <p class="muted small" style="margin:6px 0 0">Declarations, uploads and signing (DSC / EVC) stay with you.${form === 'REG-14 non-core' ? ' Other non-core changes (address, contacts, partners) — write them in the notes; they open beside the form.' : ''}</p></fieldset>`;
@@ -1299,6 +1322,8 @@ function gfFillHtml(form, d = {}) {
 function gfFillRead(el, form) {
   const F = GF_FILL[form]; if (!F) return null; const d = {}, v = n => (($(`[name="${n}"]`, el) || {}).value || '').trim();
   F.forEach(([k, , t]) => { if (t === 'stock') { const S = {}; GF_STOCK.forEach(([c]) => { const r = {}; ['v', 'cg', 'ig', 'sg', 'cs'].forEach(h => { const x = v(`gfx_stock_${c}_${h}`); if (x !== '') r[h] = x.replace(/,/g, ''); }); if (Object.keys(r).length) S[c] = r; }); if (Object.keys(S).length) d.stock = S; }
+    else if (t === 'g2x') { const M = {}; $$('[data-g2xk]', el).forEach(s => { if (s.value) M[s.dataset.g2xk] = s.value; }); d.marks = M; }
+    else if (t === 'month') { const x = v('gfx_' + k); if (x) d[k] = x.slice(5) + x.slice(0, 4); }
     else { const x = v('gfx_' + k); if (x) d[k] = t === 'money' ? x.replace(/,/g, '') : k === 'ifsc' || k === 'txgstin' ? x.toUpperCase() : x; } });
   return d;
 }
@@ -1344,7 +1369,7 @@ async function gfApps(body, only) {
     if (k === 'del') { if (!confirm('Delete this application from the tracker? (Nothing changes on the portal.)')) return; const r = await safe(sb.from('gst_applications').delete().eq('id', x.id)); if (r.error) return toast(friendly(r.error), true); return gfApps(body, only); }
     if (k === 'fill' || k === 'open') {
       const c = clientById(x.client_id); if (!c || !c.gstin) return toast('This client has no GSTIN', true);
-      const need = GF_FILL[x.form] ? '2.1.0' : GF_RETFORMS.includes(x.form) ? '2.0.0' : '1.8.0';
+      const need = ['GSTR-2X', 'CMP-08'].includes(x.form) ? '2.2.0' : GF_FILL[x.form] ? '2.1.0' : GF_RETFORMS.includes(x.form) ? '2.0.0' : '1.8.0';
       if (!gfAddon() || gfAddon() < need) return toast(`Needs the JLR add-on ${need} in this Chrome — reload the add-on from Settings → GST`, true);
       window.postMessage({ __jlrq: 'apply', job: { id: x.id, gstin: c.gstin.toUpperCase(), client: c.name, form: x.form, fy: x.fy, details: x.details || {}, notes: x.notes || '', by: (me && (me.full_name || me.email)) || '', at: new Date().toISOString() } }, location.origin);
       if (x.status === 'prepared') await safe(sb.from('gst_applications').update({ status: 'sent', updated_by: me.id, updated_at: new Date().toISOString() }).eq('id', x.id));
@@ -1406,7 +1431,9 @@ function gfAppDialog(x, done, ret) {
       toast('Saved'); done && done();
     }, wide: true });
   const fs = $('[name=form]', m.el), wrap = $('[data-gfxwrap]', m.el);
-  if (fs && wrap) fs.addEventListener('change', () => { wrap.innerHTML = gfFillHtml(fs.value, x && x.form === fs.value ? (x.details || {}) : {}); });
+  if (fs && wrap) fs.addEventListener('change', () => { wrap.innerHTML = gfFillHtml(fs.value, x && x.form === fs.value ? (x.details || {}) : {}); gfG2xDraw(m.el); });
+  m.el.addEventListener('change', e => { if (e.target.matches('[name=client],[name=gfx_rtnPrd]')) gfG2xDraw(m.el); });
+  gfG2xDraw(m.el);
   return m;
 }
 /* =====================================================================
@@ -8911,7 +8938,7 @@ const REV = (() => {
 })();
 
 // v78: this tab's code version — when a newer app is uploaded, offer Reload and block mails from old code
-const APP_VER = 'jlr-shell-v113';
+const APP_VER = 'jlr-shell-v114';
 let appStale = false;
 async function checkAppVer() {
   try { const t = await fetch('sw.js?v=' + Date.now(), { cache: 'no-store' }).then(r => r.text()); const live = (t.match(/jlr-shell-v\d+/) || [])[0];
