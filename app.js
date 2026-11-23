@@ -1354,9 +1354,9 @@ function gfLutDialog(x, done) {
 function gfAppDialog(x, done, ret) {
   const m = modal(x ? `${ret ? 'Return / form' : 'Application'} — ${x.form}` : ret ? 'Record a return / form' : 'Record an application', `<div class="form-grid">
       <label>Client<select name="client" ${x ? 'disabled' : ''}>${clients.filter(c => c.active !== false && c.gstin).sort((a, b) => a.name.localeCompare(b.name)).map(c => `<option value="${c.id}" ${x && x.client_id === c.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></label>
-      <label>Form<select name="form">${GF_APPFORMS.filter(f => f[0] !== 'RFD-11' && (ret ? f[3] === 'ret' || f[0] === 'Other' : f[3] !== 'ret')).map(f => `<option value="${esc(f[0])}" ${x && x.form === f[0] ? 'selected' : ''}>${esc(f[0])} — ${esc(f[1])}</option>`).join('')}</select></label>
+      <label class="full">Form<select name="form">${GF_APPFORMS.filter(f => f[0] !== 'RFD-11' && (ret ? f[3] === 'ret' || f[0] === 'Other' : f[3] !== 'ret')).map(f => `<option value="${esc(f[0])}" ${x && x.form === f[0] ? 'selected' : ''}>${esc(f[0])} — ${esc(f[1])}</option>`).join('')}</select></label>
       <label>Status<select name="status">${Object.entries(GF_APPST).map(([k, [l]]) => `<option value="${k}" ${(x ? x.status : 'prepared') === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
-      ${ret ? `<label>Period / year<input name="fy" value="${esc((x && x.fy) || '')}" placeholder="e.g. Oct 2026, Q3 2026-27, 2025-26"></label>` : ''}<label>ARN<input name="arn" value="${esc((x && x.arn) || '')}"></label><label>Submitted on<input type="date" name="sub" value="${esc((x && x.submitted_on) || '')}"></label>
+      ${ret ? `<label>Period / year<input name="fy" value="${esc((x && x.fy) || '')}" placeholder="Oct 2026 · Q3 2026-27"></label>` : ''}<label>ARN<input name="arn" value="${esc((x && x.arn) || '')}"></label><label>Submitted on<input type="date" name="sub" value="${esc((x && x.submitted_on) || '')}"></label>
       <label>Decided on<input type="date" name="dec" value="${esc((x && x.decided_on) || '')}"></label></div>
     <label class="small" style="display:block;margin-top:8px">What is being changed / notes (shown beside the portal form)<textarea name="notes" rows="4">${esc((x && x.notes) || '')}</textarea></label>`, {
     saveText: 'Save', onSave: async el => {

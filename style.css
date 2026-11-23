@@ -66,7 +66,10 @@ textarea{resize:vertical;min-height:70px}
 label{display:flex;flex-direction:column;gap:4px;font-size:.85rem;color:var(--muted);font-weight:500}
 label > input,label > select,label > textarea{color:var(--ink);font-size:.95rem}
 .check{flex-direction:row;align-items:center;gap:8px;color:var(--ink);font-weight:400;font-size:.95rem}
-.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.form-grid > label{min-width:0}
+.form-grid select,.form-grid input:not([type=checkbox]):not([type=radio]),.modal-body textarea{width:100%;max-width:100%;box-sizing:border-box}
+.modal-body select{text-overflow:ellipsis}
 .form-grid .full{grid-column:1/-1}
 @media (max-width:600px){.form-grid{grid-template-columns:1fr}}
 .toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:12px}
