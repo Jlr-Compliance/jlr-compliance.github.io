@@ -625,6 +625,10 @@ const ADDON_PDF = (() => {
   async function one(it) {
     const c = clients.find(x => (x.gstin || '').toUpperCase() === it.gstin);
     if (!c) return { key: it.key, final: true, msg: `${it.gstin} is not a client in the tracker` };
+    if (it.type === 'apply') {         // v107: application submitted on the portal (ARN read by the add-on)
+      const r = await safe(sb.from('gst_applications').update({ status: it.arn ? 'submitted' : 'filled', ...(it.arn ? { arn: it.arn, submitted_on: today() } : {}), updated_by: me.id, updated_at: new Date().toISOString() }).eq('id', it.appId));
+      return { key: it.key, ok: !r.error, final: true, msg: r.error ? friendly(r.error) : `${c.name} · ${it.form || 'application'} ${it.arn ? 'submitted · ARN ' + it.arn : 'filled on the portal'}` };
+    }
     if (it.type === 'info') {          // v106 stage 2: ledgers, TDS / TCS credit, applications … read from the portal
       const r = await safe(sb.from('gst_portal_info').upsert({ client_id: c.id, data: it.data || {}, fetched_at: new Date(it.at || Date.now()).toISOString(), fetched_by: me.id }, { onConflict: 'client_id' }));
       if (r.error) return { key: it.key, final: /gst_portal_info/.test(r.error.message || ''), msg: /gst_portal_info/.test(r.error.message || '') ? 'Run update-portal-info.sql in Supabase' : friendly(r.error) };
@@ -1043,12 +1047,12 @@ const GF_FORMS = {
     ['Opt for composition levy', 'CMP-02', 'Move to composition', 'addon', 3], ['Withdraw from composition', 'CMP-04', 'Leave composition', 'addon', 3],
     ['Cancellation of registration', 'REG-16', 'Ask to cancel the GSTIN', 'addon', 3], ['Revocation of cancellation', 'REG-21', 'Get a cancelled GSTIN back', 'addon', 3],
     ['Declaration for specified premises', 'Annexure', 'Restaurant service in specified premises', 'addon', 3], ['Aadhaar authentication persons', 'Rule 14B', 'Select persons for Aadhaar authentication', 'addon', 3],
-    ['Track application status', 'ARN', 'Officer status of every application', 'addon', 2]]]],
+    ['Track application status', 'ARN', 'Officer status of every application', 'addon', 1]]]],
   annual: [['Annual returns', [
     ['GSTR-9', 'Annual return', '12 months of GSTR-1 and 3B workings into the GSTR-9 tables', 'api', 4],
     ['GSTR-9C', 'Reconciliation statement', 'Books vs GSTR-9 — turnover above ₹5 crore', 'api', 4]]]],
   lut: [['Letter of undertaking', [
-    ['Furnish LUT', 'RFD-11', 'Exports / SEZ supplies without paying IGST — one per client per year', 'addon', 3],
+    ['Furnish LUT', 'RFD-11', 'Exports / SEZ supplies without paying IGST — one per client per year', 'addon', 1],
     ['View my submitted LUTs', 'RFD-11 ARN', 'Earlier LUTs kept against the client', 'addon', 1]]]],
   other: [
     ['Other returns', [['GSTR-1A', 'Amend GSTR-1', 'Same month, before 3B is filed', 'api', 5], ['IFF', 'QRMP', 'Invoice furnishing facility for quarterly clients', 'api', 5],
@@ -1092,6 +1096,7 @@ VIEWS.filing = async v => {
   if (gfTab === 'downloads') return gfDownloads(body, ym);
   if (gfTab === 'portal') return gfPortal(body);
   if (gfTab === 'lut') return gfLut(body);
+  if (gfTab === 'reg') return gfApps(body);
   return gfFormList(body, gfTab);
 };
 function gfFormCard(f) {
@@ -1242,8 +1247,113 @@ async function gfLut(body) {
         return `<tr><td class="wrap"><b>${esc(x.c.name)}</b><div class="muted small">${esc(x.c.gstin)}</div></td><td>${l ? esc(gfPick(l, 'arn', 'caseId')) : '<span class="muted">No LUT on the portal</span>'}</td>
           <td class="small">${l ? esc(gfPick(l, 'applnDate', 'creationDate', 'createdDate', 'caseCrtDt', 'dateOfFiling')) : ''}</td><td class="small">${l ? esc(gfPick(l, 'status', 'caseStatus', 'statusDesc')) : ''}</td><td class="small">${x.L.length || ''}</td><td class="small muted">${fmtDate(x.at.slice(0, 10))}</td></tr>`; }).join('')}</tbody></table></div>`
       : '<div class="empty small">No client read from the portal yet.</div>'}
-    <div id="gfLutForms"></div>`;
-  gfFormList($('#gfLutForms', body), 'lut');
+    <h3 style="margin:18px 0 8px">LUTs prepared in the tracker</h3><div id="gfLutApps"></div>`;
+  gfApps($('#gfLutApps', body), 'RFD-11');
+}
+// v107 stage 3: GST applications register (LUT, REG-14, CMP-02/04, REG-16/21 …) — prepared here, filled on the portal by the add-on, ARN tracked
+const GF_STATES = ['Andaman and Nicobar Islands', 'Andhra Pradesh', 'Arunachal Pradesh', 'Assam', 'Bihar', 'Chandigarh', 'Chhattisgarh', 'Dadra and Nagar Haveli and Daman and Diu', 'Delhi', 'Goa', 'Gujarat', 'Haryana', 'Himachal Pradesh', 'Jammu and Kashmir', 'Jharkhand', 'Karnataka', 'Kerala', 'Ladakh', 'Lakshadweep', 'Madhya Pradesh', 'Maharashtra', 'Manipur', 'Meghalaya', 'Mizoram', 'Nagaland', 'Odisha', 'Puducherry', 'Punjab', 'Rajasthan', 'Sikkim', 'Tamil Nadu', 'Telangana', 'Tripura', 'Uttar Pradesh', 'Uttarakhand', 'West Bengal'];
+const GF_APPFORMS = [['RFD-11', 'LUT — letter of undertaking', 'fill'], ['REG-14 non-core', 'Amendment — non-core fields', 'open'], ['REG-14 core', 'Amendment — core fields', 'open'], ['REG-04', 'Reply to clarification (REG-03)', 'open'],
+  ['CMP-02', 'Opt for composition', 'open'], ['CMP-04', 'Withdraw from composition', 'open'], ['REG-16', 'Cancellation of registration', 'open'], ['REG-21', 'Revocation of cancellation', 'open'],
+  ['REG-01', 'New registration', 'open'], ['Geocoding', 'Geocoding business address', 'open'], ['Rule 14B', 'Aadhaar authentication persons', 'open'], ['Specified premises', 'Declaration for specified premises', 'open'], ['Other', 'Other application', 'open']];
+const GF_APPST = { prepared: ['Prepared', ''], sent: ['Sent to add-on', 'b'], filled: ['Filled on portal', 'b'], submitted: ['Submitted', 'b'], clarification: ['Clarification asked', 'r'], approved: ['Approved', 'g'], rejected: ['Rejected', 'r'], withdrawn: ['Withdrawn', ''] };
+const gfFy = (off = 0) => { const d = new Date(), y = (d.getMonth() >= 3 ? d.getFullYear() : d.getFullYear() - 1) + off; return `${y}-${String(y + 1).slice(2)}`; };
+async function gfApps(body, only) {
+  const [a, I] = await Promise.all([safe(sb.from('gst_applications').select('*').order('created_at', { ascending: false }).limit(2000)), gfInfoRows()]);
+  if (a.error) { body.innerHTML = `<p class="note warn">${/gst_applications/.test(a.error.message || '') ? 'Run <b>update-gst-applications.sql</b> in Supabase first.' : esc(friendly(a.error))}</p><div id="gfAppForms"></div>`; gfFormList($('#gfAppForms', body), only === 'RFD-11' ? 'lut' : 'reg'); return; }
+  let L = (a.data || []).filter(x => clientById(x.client_id) && (!only || x.form === only));
+  const info = I.rows || new Map(), arnMap = new Map();
+  info.forEach((r, cid) => ((r.data || {}).arns || []).forEach(x => { if (x && x.arn) arnMap.set(String(x.arn).toUpperCase(), { ...x, cid }); }));
+  const known = new Set(L.map(x => (x.arn || '').toUpperCase()).filter(Boolean));
+  const onPortal = [...arnMap.values()].filter(x => !known.has(String(x.arn).toUpperCase()) && (!only || /RFD-?11|LUT/i.test(x.frmno || x.frmdc || '')));
+  const st = x => { const s = GF_APPST[x.status] || [x.status, '']; return `<span class="pill ${s[1]}">${esc(s[0])}</span>`; };
+  body.innerHTML = `<div class="toolbar" style="margin-top:0"><button class="btn primary" data-ap="lut">+ Prepare LUT</button>${only ? '' : '<button class="btn" data-ap="new">+ Record an application</button>'}<span class="spacer"></span>
+      <span class="muted small">The add-on fills the LUT on the portal and stops before the declarations and signing. Other forms open on the portal with your notes beside them.</span></div>
+    ${L.length ? `<div class="table-wrap"><table><thead><tr><th>Client</th><th>Form</th><th>Status</th><th>ARN</th><th>Portal says</th><th></th></tr></thead><tbody>
+      ${L.map(x => { const c = clientById(x.client_id), p = x.arn && arnMap.get(x.arn.toUpperCase()), F = GF_APPFORMS.find(f => f[0] === x.form);
+        return `<tr data-id="${x.id}"><td class="wrap"><b>${esc(c.name)}</b><div class="muted small">${esc(c.gstin || '')}</div></td>
+          <td>${esc(x.form)}${x.fy ? ` <span class="muted small">FY ${esc(x.fy)}</span>` : ''}<div class="muted small">${esc((F || [, ''])[1])}${x.notes ? ' · ' + esc(x.notes.slice(0, 60)) : ''}</div></td>
+          <td>${st(x)}</td><td class="small">${esc(x.arn || '')}${x.submitted_on ? `<div class="muted">${fmtDate(x.submitted_on)}</div>` : ''}</td>
+          <td class="small">${p ? esc(p.sts || p.status || '') : '<span class="muted">—</span>'}</td>
+          <td class="row-btns">${['prepared', 'sent', 'filled'].includes(x.status) ? (x.form === 'RFD-11' ? '<button class="btn sm primary" data-ap="fill">Fill on portal</button>' : '<button class="btn sm" data-ap="open">Open on portal</button>') : ''}
+            <button class="btn sm" data-ap="edit">Edit</button>${['prepared', 'sent', 'filled'].includes(x.status) ? '<button class="link small danger-t" data-ap="del">Delete</button>' : ''}</td></tr>`; }).join('')}</tbody></table></div>`
+      : `<div class="empty small">No ${only ? 'LUT' : 'application'} in the tracker yet.</div>`}
+    ${onPortal.length ? `<h3 style="margin:18px 0 8px">On the portal, not in the tracker <span class="muted small">(last 6 months, read by the add-on)</span></h3><div class="table-wrap"><table><thead><tr><th>Client</th><th>Form</th><th>ARN</th><th>Submitted</th><th>Status</th><th></th></tr></thead><tbody>
+      ${onPortal.map(x => { const c = clientById(x.cid) || { name: '—' }; return `<tr><td>${esc(c.name)}</td><td class="small">${esc(x.frmno || '')}<div class="muted">${esc(x.frmdc || '')}</div></td><td class="small">${esc(x.arn)}</td><td class="small">${esc(x.subdt || '')}</td><td class="small">${esc(x.sts || '')}</td>
+        <td><button class="btn sm" data-addarn="${esc(x.arn)}">Add to tracker</button></td></tr>`; }).join('')}</tbody></table></div>` : ''}
+    <div id="gfAppForms"></div>`;
+  gfFormList($('#gfAppForms', body), only === 'RFD-11' ? 'lut' : 'reg');
+  body.onclick = async e => {
+    const ad = e.target.closest('[data-addarn]'); if (ad) { const x = arnMap.get(ad.dataset.addarn.toUpperCase()); if (!x) return;
+      const form = /RFD-?11/i.test(x.frmno || '') ? 'RFD-11' : /REG-14/i.test(x.frmno || '') ? (/non/i.test(x.frmdc || '') ? 'REG-14 non-core' : 'REG-14 core') : /CMP-02/i.test(x.frmno || '') ? 'CMP-02' : /CMP-04/i.test(x.frmno || '') ? 'CMP-04' : /REG-16/i.test(x.frmno || '') ? 'REG-16' : /REG-21/i.test(x.frmno || '') ? 'REG-21' : 'Other';
+      const r = await safe(sb.from('gst_applications').insert({ client_id: x.cid, form, arn: x.arn, status: /approv/i.test(x.sts || '') ? 'approved' : /reject/i.test(x.sts || '') ? 'rejected' : /clarif/i.test(x.sts || '') ? 'clarification' : 'submitted', submitted_on: anyDate(x.subdt || '') || null, portal_status: x.sts || null, notes: x.frmdc || null, updated_by: me.id }));
+      if (r.error) return toast(friendly(r.error), true); toast('Added'); return gfApps(body, only); }
+    const b = e.target.closest('[data-ap]'); if (!b) return;
+    const k = b.dataset.ap, tr = b.closest('tr'), x = tr && L.find(y => y.id === tr.dataset.id);
+    if (k === 'lut') return gfLutDialog(null, () => gfApps(body, only));
+    if (k === 'new') return gfAppDialog(null, () => gfApps(body, only));
+    if (k === 'edit') return x.form === 'RFD-11' ? gfLutDialog(x, () => gfApps(body, only)) : gfAppDialog(x, () => gfApps(body, only));
+    if (k === 'del') { if (!confirm('Delete this application from the tracker? (Nothing changes on the portal.)')) return; const r = await safe(sb.from('gst_applications').delete().eq('id', x.id)); if (r.error) return toast(friendly(r.error), true); return gfApps(body, only); }
+    if (k === 'fill' || k === 'open') {
+      const c = clientById(x.client_id); if (!c || !c.gstin) return toast('This client has no GSTIN', true);
+      if (!gfAddon() || gfAddon() < '1.8.0') return toast('Needs the JLR add-on 1.8.0 in this Chrome', true);
+      window.postMessage({ __jlrq: 'apply', job: { id: x.id, gstin: c.gstin.toUpperCase(), client: c.name, form: x.form, fy: x.fy, details: x.details || {}, notes: x.notes || '', by: (me && (me.full_name || me.email)) || '', at: new Date().toISOString() } }, location.origin);
+      if (x.status === 'prepared') await safe(sb.from('gst_applications').update({ status: 'sent', updated_by: me.id, updated_at: new Date().toISOString() }).eq('id', x.id));
+      toast(`Sent to the JLR add-on — log in to ${c.name} on the GST portal and press “${k === 'fill' ? 'Fill' : 'Open'} ${x.form}” in the JLR panel`);
+      if (confirm(`Open the GST portal login for ${c.name} now?`)) gstQuickLogin(c.id);
+      return gfApps(body, only);
+    }
+  };
+}
+async function gfLastLut(clientId) { const r = await safe(sb.from('gst_applications').select('details').eq('client_id', clientId).eq('form', 'RFD-11').order('created_at', { ascending: false }).limit(1)); return ((r.data || [])[0] || {}).details || null; }
+function gfLutDialog(x, done) {
+  const v = x ? { ...(x.details || {}) } : {}, fys = [gfFy(0), gfFy(1)];
+  const wit = (n, w = {}) => `<fieldset class="gf-fs"><legend>Witness ${n}</legend><div class="form-grid">
+      <label>Name<input name="w${n}name" value="${esc(w.name || '')}" required></label><label>Occupation<input name="w${n}occ" value="${esc(w.occupation || '')}"></label>
+      <label>Building / flat no<input name="w${n}bno" value="${esc(w.buildno || '')}"></label><label>Floor<input name="w${n}floor" value="${esc(w.floorno || '')}"></label>
+      <label>Building / premises name<input name="w${n}bname" value="${esc(w.buildname || '')}"></label><label>Road / street<input name="w${n}street" value="${esc(w.street || '')}"></label>
+      <label>City / town<input name="w${n}city" value="${esc(w.city || '')}"></label><label>State<select name="w${n}state"><option value="">Select</option>${GF_STATES.map(s => `<option ${w.state === s ? 'selected' : ''}>${s}</option>`).join('')}</select></label>
+      <label>District<input name="w${n}dist" value="${esc(w.dist || '')}" placeholder="as on the portal"></label><label>PIN code<input name="w${n}pin" value="${esc(w.pincode || '')}" inputmode="numeric" maxlength="6"></label></div></fieldset>`;
+  const m = modal(x ? 'LUT (RFD-11)' : 'Prepare LUT (RFD-11)', `<p class="muted small" style="margin-top:0">Saved in the tracker, then <b>Fill on portal</b> lets the JLR add-on fill the LUT form. The declarations, signatory check and signing (DSC / EVC) stay with you.</p>
+    <div class="form-grid"><label>Client<select name="client" ${x ? 'disabled' : ''}>${clients.filter(c => c.active !== false && c.gstin).sort((a, b) => a.name.localeCompare(b.name)).map(c => `<option value="${c.id}" ${x && x.client_id === c.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></label>
+      <label>Financial year<select name="fy">${fys.map(f => `<option ${(x ? x.fy : fys[1]) === f ? 'selected' : ''}>${f}</option>`).join('')}</select></label>
+      <label>Place of filing<input name="place" value="${esc(v.place || '')}"></label><label>Authorised signatory (name as on the portal)<input name="sign" value="${esc(v.signatory || '')}"></label>
+      <label>Place (signatory)<input name="splace" value="${esc(v.signPlace || '')}"></label></div>
+    <div data-wits>${wit(1, v.w1)}${wit(2, v.w2)}</div>
+    <label class="small" style="display:block;margin-top:8px">Notes<textarea name="notes" rows="2">${esc((x && x.notes) || '')}</textarea></label>
+    ${!x ? '<p class="muted small" data-lastlut></p>' : ''}`, {
+    wide: true, saveText: 'Save', onSave: async el => {
+      const f = n => ($(`[name=${n}]`, el) || {}).value || '', w = n => ({ name: f(`w${n}name`).trim(), occupation: f(`w${n}occ`).trim(), buildno: f(`w${n}bno`).trim(), floorno: f(`w${n}floor`).trim(), buildname: f(`w${n}bname`).trim(), street: f(`w${n}street`).trim(), city: f(`w${n}city`).trim(), state: f(`w${n}state`), dist: f(`w${n}dist`).trim(), pincode: f(`w${n}pin`).trim() });
+      const d = { place: f('place').trim(), signatory: f('sign').trim(), signPlace: f('splace').trim(), w1: w(1), w2: w(2) };
+      if (!d.w1.name || !d.w2.name) { toast('Both witnesses are needed', true); return false; }
+      if ([d.w1, d.w2].some(z => z.pincode && !/^\d{6}$/.test(z.pincode))) { toast('PIN code must be 6 digits', true); return false; }
+      const row = { form: 'RFD-11', fy: f('fy'), details: d, notes: f('notes').trim() || null, updated_by: me.id, updated_at: new Date().toISOString() };
+      const r = x ? await safe(sb.from('gst_applications').update(row).eq('id', x.id)) : await safe(sb.from('gst_applications').insert({ ...row, client_id: f('client'), status: 'prepared' }));
+      if (r.error) { toast(/gst_applications/.test(r.error.message || '') ? 'Run update-gst-applications.sql in Supabase first' : friendly(r.error), true); return false; }
+      toast('LUT saved — press “Fill on portal”'); done && done();
+    } });
+  if (!x) { const sel = $('[name=client]', m.el), fill = async () => { const last = await gfLastLut(sel.value), p = $('[data-lastlut]', m.el); if (!last) { if (p) p.textContent = ''; return; }
+      if (p) p.innerHTML = 'Witnesses and places copied from this client\'s last LUT — check them.';
+      const set = (n, val) => { const i = $(`[name=${n}]`, m.el); if (i && val) i.value = val; };
+      set('place', last.place); set('sign', last.signatory); set('splace', last.signPlace);
+      [1, 2].forEach(n => { const w = last[`w${n}`] || {}; set(`w${n}name`, w.name); set(`w${n}occ`, w.occupation); set(`w${n}bno`, w.buildno); set(`w${n}floor`, w.floorno); set(`w${n}bname`, w.buildname); set(`w${n}street`, w.street); set(`w${n}city`, w.city); set(`w${n}state`, w.state); set(`w${n}dist`, w.dist); set(`w${n}pin`, w.pincode); }); };
+    sel.onchange = fill; fill(); }
+}
+function gfAppDialog(x, done) {
+  const m = modal(x ? `Application — ${x.form}` : 'Record an application', `<div class="form-grid">
+      <label>Client<select name="client" ${x ? 'disabled' : ''}>${clients.filter(c => c.active !== false && c.gstin).sort((a, b) => a.name.localeCompare(b.name)).map(c => `<option value="${c.id}" ${x && x.client_id === c.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></label>
+      <label>Form<select name="form">${GF_APPFORMS.filter(f => f[0] !== 'RFD-11').map(f => `<option value="${esc(f[0])}" ${x && x.form === f[0] ? 'selected' : ''}>${esc(f[0])} — ${esc(f[1])}</option>`).join('')}</select></label>
+      <label>Status<select name="status">${Object.entries(GF_APPST).map(([k, [l]]) => `<option value="${k}" ${(x ? x.status : 'prepared') === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+      <label>ARN<input name="arn" value="${esc((x && x.arn) || '')}"></label><label>Submitted on<input type="date" name="sub" value="${esc((x && x.submitted_on) || '')}"></label>
+      <label>Decided on<input type="date" name="dec" value="${esc((x && x.decided_on) || '')}"></label></div>
+    <label class="small" style="display:block;margin-top:8px">What is being changed / notes (shown beside the portal form)<textarea name="notes" rows="4">${esc((x && x.notes) || '')}</textarea></label>`, {
+    saveText: 'Save', onSave: async el => {
+      const f = n => ($(`[name=${n}]`, el) || {}).value || '';
+      const row = { form: f('form'), status: f('status'), arn: f('arn').trim().toUpperCase() || null, submitted_on: f('sub') || null, decided_on: f('dec') || null, notes: f('notes').trim() || null, updated_by: me.id, updated_at: new Date().toISOString() };
+      const r = x ? await safe(sb.from('gst_applications').update(row).eq('id', x.id)) : await safe(sb.from('gst_applications').insert({ ...row, client_id: f('client') }));
+      if (r.error) { toast(/gst_applications/.test(r.error.message || '') ? 'Run update-gst-applications.sql in Supabase first' : /duplicate|unique/i.test(r.error.message || '') ? 'This ARN is already in the tracker' : friendly(r.error), true); return false; }
+      toast('Saved'); done && done();
+    } });
+  return m;
 }
 const gfDl = { f: '', q: '' };
 function gfLoadZip() { return window.JSZip ? Promise.resolve() : new Promise((ok, bad) => { const s = document.createElement('script'); s.src = 'https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js'; s.onload = ok; s.onerror = bad; document.head.appendChild(s); }); }
@@ -8514,7 +8624,7 @@ const REV = (() => {
 })();
 
 // v78: this tab's code version — when a newer app is uploaded, offer Reload and block mails from old code
-const APP_VER = 'jlr-shell-v106';
+const APP_VER = 'jlr-shell-v107';
 let appStale = false;
 async function checkAppVer() {
   try { const t = await fetch('sw.js?v=' + Date.now(), { cache: 'no-store' }).then(r => r.text()); const live = (t.match(/jlr-shell-v\d+/) || [])[0];
