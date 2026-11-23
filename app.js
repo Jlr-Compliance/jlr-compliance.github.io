@@ -1075,7 +1075,7 @@ const GF_FORMS = {
       ['Search advance ruling', 'Rulings', 'By state and subject', 'addon', 5], ['Cause list', 'Hearings', 'Appeal / proceeding dates', 'addon', 5], ['Locate GSTP', 'Practitioner', 'Find a GST practitioner', 'addon', 5],
       ['Holiday list', 'State-wise', 'Used for due dates', 'tracker', 5], ['My masters', 'Saved masters', 'HSN, customers, suppliers', 'addon', 5]]]]
 };
-const GF_STAGE = { 1: 'Ready', 2: 'Stage 2 · read from portal', 3: 'Stage 3 · applications', 4: 'Stage 4 · annual', 5: 'Stage 5' };
+const GF_STAGE = { 1: 'Ready', 2: 'Stage 2 · read from portal', 3: 'Stage 3 · applications', 4: 'Stage 4 · annual', 5: 'Ready · opened on the portal with your notes' };
 const GF_HOW = { api: ['API + add-on', 'b'], addon: ['Add-on', 'g'], tracker: ['Tracker', ''] };
 let gfTab = (() => { try { return localStorage.getItem('jlr.gfTab') || 'overview'; } catch { return 'overview'; } })();
 const gfAddon = () => document.documentElement.dataset.jlrAddon || '';          // set by the add-on's tracker.js (1.6.0+)
@@ -1098,6 +1098,7 @@ VIEWS.filing = async v => {
   if (gfTab === 'lut') return gfLut(body);
   if (gfTab === 'reg') return gfApps(body);
   if (gfTab === 'annual') return gfAnnual(body);
+  if (gfTab === 'other') return gfOther(body);
   return gfFormList(body, gfTab);
 };
 function gfFormCard(f) {
@@ -1122,7 +1123,7 @@ async function gfOverview(body, ym) {
     ${!gfAddon() ? '<p class="note small">The JLR add-on 1.6.0 is not seen in this Chrome — “File on portal”, PDFs and portal reading need it (Settings → GST → Download the add-on).</p>' : ''}
     <section class="gf-sec"><h3>Monthly returns</h3><div class="gf-grid">
       ${card('GSTR-1', 'Outward supplies', 'Workings → senior → upload JSON → file on portal (EVC)', '', 'returns')}${card('GSTR-3B', 'Summary return', 'Draft 3B, set-off, challan, fill on portal, file (EVC)', '', 'returns')}
-      ${card('Nil returns', 'GSTR-1 / 3B', 'Marked in GST review → Mark as Nil return', '', 'gst')}${card('TDS / TCS credit received', 'GSTR-2X', 'Accept / reject TDS and TCS credit', 'Stage 2', 'other')}</div></section>
+      ${card('Nil returns', 'GSTR-1 / 3B', 'Marked in GST review → Mark as Nil return', '', 'gst')}${card('TDS / TCS credit received', 'GSTR-2X', 'Accept / reject TDS and TCS credit', '', 'portal')}</div></section>
     <section class="gf-sec"><h3>Annual returns <span class="muted small">FY ${fy - 1}-${String(fy).slice(2)}</span></h3><div class="gf-grid">
       ${card('GSTR-9', 'Annual return', `Due 31 Dec ${fy}`, '', 'annual')}${card('GSTR-9C', 'Reconciliation statement', `Due 31 Dec ${fy}`, '', 'annual')}</div></section>
     <section class="gf-sec"><h3>Registration</h3><div class="gf-grid">
@@ -1130,7 +1131,7 @@ async function gfOverview(body, ym) {
       ${card('LUT', 'RFD-11', `FY ${fy + 1}-${String(fy + 2).slice(2)} — file before 1 Apr ${fy + 1}`, 'Stage 3', 'lut')}</div></section>
     <section class="gf-sec"><h3>Downloads</h3><div class="gf-grid">
       ${card('Filed GSTR-1 & 3B', 'PDF + ARN', 'All clients for the month — one at a time or a zip', '', 'downloads')}${card('GSTR-2B / 2A', 'JSON / Excel', 'Fetched in GST review', '', 'gst')}</div></section>
-    <section class="gf-sec"><h3>Other forms</h3><div class="gf-grid">${card('Payments, refunds, ITC forms, user services', 'About 50 portal items', 'See the full list and which stage each comes in', '', 'other')}</div></section>`;
+    <section class="gf-sec"><h3>Other forms</h3><div class="gf-grid">${card('Other returns and forms', 'GSTR-1A, IFF, CMP-08, GSTR-4 / 7 / 8 / 10, refunds, ITC-01–04, DRC-03 …', 'Status from the portal, register with ARN, opened on the portal with your notes', '', 'other')}</div></section>`;
   body.onclick = e => {
     const b = e.target.closest('[data-go]'); if (!b) return;
     if (b.dataset.go === 'gst') { location.hash = '#/gst'; return; }
@@ -1255,19 +1256,29 @@ async function gfLut(body) {
 const GF_STATES = ['Andaman and Nicobar Islands', 'Andhra Pradesh', 'Arunachal Pradesh', 'Assam', 'Bihar', 'Chandigarh', 'Chhattisgarh', 'Dadra and Nagar Haveli and Daman and Diu', 'Delhi', 'Goa', 'Gujarat', 'Haryana', 'Himachal Pradesh', 'Jammu and Kashmir', 'Jharkhand', 'Karnataka', 'Kerala', 'Ladakh', 'Lakshadweep', 'Madhya Pradesh', 'Maharashtra', 'Manipur', 'Meghalaya', 'Mizoram', 'Nagaland', 'Odisha', 'Puducherry', 'Punjab', 'Rajasthan', 'Sikkim', 'Tamil Nadu', 'Telangana', 'Tripura', 'Uttar Pradesh', 'Uttarakhand', 'West Bengal'];
 const GF_APPFORMS = [['RFD-11', 'LUT — letter of undertaking', 'fill'], ['REG-14 non-core', 'Amendment — non-core fields', 'open'], ['REG-14 core', 'Amendment — core fields', 'open'], ['REG-04', 'Reply to clarification (REG-03)', 'open'],
   ['CMP-02', 'Opt for composition', 'open'], ['CMP-04', 'Withdraw from composition', 'open'], ['REG-16', 'Cancellation of registration', 'open'], ['REG-21', 'Revocation of cancellation', 'open'],
-  ['REG-01', 'New registration', 'open'], ['Geocoding', 'Geocoding business address', 'open'], ['Rule 14B', 'Aadhaar authentication persons', 'open'], ['Specified premises', 'Declaration for specified premises', 'open'], ['Other', 'Other application', 'open']];
+  ['REG-01', 'New registration', 'open'], ['Geocoding', 'Geocoding business address', 'open'], ['Rule 14B', 'Aadhaar authentication persons', 'open'], ['Specified premises', 'Declaration for specified premises', 'open'],
+  // v109 stage 5: other returns and forms — opened on the portal with the tracker's notes, ARN saved when the portal shows it
+  ['GSTR-1A', 'Amend GSTR-1 (same month, before 3B)', 'open', 'ret'], ['IFF', 'Invoice furnishing facility (QRMP)', 'open', 'ret'], ['CMP-08', 'Composition — quarterly statement', 'open', 'ret'], ['GSTR-4', 'Composition — annual return', 'open', 'ret'],
+  ['GSTR-7', 'TDS deductor return', 'open', 'ret'], ['GSTR-8', 'TCS return (e-commerce operator)', 'open', 'ret'], ['GSTR-10', 'Final return after cancellation', 'open', 'ret'], ['GSTR-11', 'UIN holder — inward supplies', 'open', 'ret'],
+  ['GSTR-2X', 'Accept / reject TDS and TCS credit', 'open', 'ret'], ['RFD-01', 'Refund application', 'open', 'ret'], ['RFD-01W', 'Withdraw a refund application', 'open', 'ret'],
+  ['ITC-01', 'Special ITC — new registration / leaving composition', 'open', 'ret'], ['ITC-02', 'Transfer of ITC on sale / merger', 'open', 'ret'], ['ITC-03', 'ITC reversal on opting composition', 'open', 'ret'], ['ITC-04', 'Job work', 'open', 'ret'],
+  ['DRC-03', 'Voluntary payment', 'open', 'ret'], ['DRC-03A', 'Link DRC-03 to a demand', 'open', 'ret'], ['DRC-01B', 'Reply — GSTR-1 liability higher than 3B', 'open', 'ret'], ['DRC-01C', 'Reply — 2B ITC lower than 3B ITC', 'open', 'ret'],
+  ['PMT-09', 'Transfer within cash ledger', 'open', 'ret'], ['GSTP', 'Engage / disengage GST practitioner', 'open', 'ret'], ['GTA', 'GTA — forward charge option', 'open', 'ret'],
+  ['Other', 'Other application', 'open']];
+const GF_RETFORMS = GF_APPFORMS.filter(f => f[3] === 'ret').map(f => f[0]);
 const GF_APPST = { prepared: ['Prepared', ''], sent: ['Sent to add-on', 'b'], filled: ['Filled on portal', 'b'], submitted: ['Submitted', 'b'], clarification: ['Clarification asked', 'r'], approved: ['Approved', 'g'], rejected: ['Rejected', 'r'], withdrawn: ['Withdrawn', ''] };
 const gfFy = (off = 0) => { const d = new Date(), y = (d.getMonth() >= 3 ? d.getFullYear() : d.getFullYear() - 1) + off; return `${y}-${String(y + 1).slice(2)}`; };
 async function gfApps(body, only) {
   const [a, I] = await Promise.all([safe(sb.from('gst_applications').select('*').order('created_at', { ascending: false }).limit(2000)), gfInfoRows()]);
   if (a.error) { body.innerHTML = `<p class="note warn">${/gst_applications/.test(a.error.message || '') ? 'Run <b>update-gst-applications.sql</b> in Supabase first.' : esc(friendly(a.error))}</p><div id="gfAppForms"></div>`; gfFormList($('#gfAppForms', body), only === 'RFD-11' ? 'lut' : 'reg'); return; }
-  let L = (a.data || []).filter(x => clientById(x.client_id) && (!only || x.form === only));
+  const inOnly = f => !only || (Array.isArray(only) ? only.includes(f) : f === only), isRet = Array.isArray(only);
+  let L = (a.data || []).filter(x => clientById(x.client_id) && inOnly(x.form) && (only || !GF_RETFORMS.includes(x.form)));
   const info = I.rows || new Map(), arnMap = new Map();
   info.forEach((r, cid) => ((r.data || {}).arns || []).forEach(x => { if (x && x.arn) arnMap.set(String(x.arn).toUpperCase(), { ...x, cid }); }));
   const known = new Set(L.map(x => (x.arn || '').toUpperCase()).filter(Boolean));
-  const onPortal = [...arnMap.values()].filter(x => !known.has(String(x.arn).toUpperCase()) && (!only || /RFD-?11|LUT/i.test(x.frmno || x.frmdc || '')));
+  const onPortal = [...arnMap.values()].filter(x => !known.has(String(x.arn).toUpperCase()) && (!only ? !/RFD-?0?1\b|ITC-0|DRC-|PMT-/i.test(x.frmno || '') : isRet ? /RFD-?0?1\b|ITC-0|DRC-|PMT-/i.test(x.frmno || '') : /RFD-?11|LUT/i.test(x.frmno || x.frmdc || '')));
   const st = x => { const s = GF_APPST[x.status] || [x.status, '']; return `<span class="pill ${s[1]}">${esc(s[0])}</span>`; };
-  body.innerHTML = `<div class="toolbar" style="margin-top:0"><button class="btn primary" data-ap="lut">+ Prepare LUT</button>${only ? '' : '<button class="btn" data-ap="new">+ Record an application</button>'}<span class="spacer"></span>
+  body.innerHTML = `<div class="toolbar" style="margin-top:0">${isRet ? '<button class="btn primary" data-ap="newret">+ Record a return / form</button>' : `<button class="btn primary" data-ap="lut">+ Prepare LUT</button>${only ? '' : '<button class="btn" data-ap="new">+ Record an application</button>'}`}<span class="spacer"></span>
       <span class="muted small">The add-on fills the LUT on the portal and stops before the declarations and signing. Other forms open on the portal with your notes beside them.</span></div>
     ${L.length ? `<div class="table-wrap"><table><thead><tr><th>Client</th><th>Form</th><th>Status</th><th>ARN</th><th>Portal says</th><th></th></tr></thead><tbody>
       ${L.map(x => { const c = clientById(x.client_id), p = x.arn && arnMap.get(x.arn.toUpperCase()), F = GF_APPFORMS.find(f => f[0] === x.form);
@@ -1277,12 +1288,12 @@ async function gfApps(body, only) {
           <td class="small">${p ? esc(p.sts || p.status || '') : '<span class="muted">—</span>'}</td>
           <td class="row-btns">${['prepared', 'sent', 'filled'].includes(x.status) ? (x.form === 'RFD-11' ? '<button class="btn sm primary" data-ap="fill">Fill on portal</button>' : '<button class="btn sm" data-ap="open">Open on portal</button>') : ''}
             <button class="btn sm" data-ap="edit">Edit</button>${['prepared', 'sent', 'filled'].includes(x.status) ? '<button class="link small danger-t" data-ap="del">Delete</button>' : ''}</td></tr>`; }).join('')}</tbody></table></div>`
-      : `<div class="empty small">No ${only ? 'LUT' : 'application'} in the tracker yet.</div>`}
+      : `<div class="empty small">No ${isRet ? 'return or form' : only ? 'LUT' : 'application'} in the tracker yet.</div>`}
     ${onPortal.length ? `<h3 style="margin:18px 0 8px">On the portal, not in the tracker <span class="muted small">(last 6 months, read by the add-on)</span></h3><div class="table-wrap"><table><thead><tr><th>Client</th><th>Form</th><th>ARN</th><th>Submitted</th><th>Status</th><th></th></tr></thead><tbody>
       ${onPortal.map(x => { const c = clientById(x.cid) || { name: '—' }; return `<tr><td>${esc(c.name)}</td><td class="small">${esc(x.frmno || '')}<div class="muted">${esc(x.frmdc || '')}</div></td><td class="small">${esc(x.arn)}</td><td class="small">${esc(x.subdt || '')}</td><td class="small">${esc(x.sts || '')}</td>
         <td><button class="btn sm" data-addarn="${esc(x.arn)}">Add to tracker</button></td></tr>`; }).join('')}</tbody></table></div>` : ''}
     <div id="gfAppForms"></div>`;
-  gfFormList($('#gfAppForms', body), only === 'RFD-11' ? 'lut' : 'reg');
+  if (!isRet) gfFormList($('#gfAppForms', body), only === 'RFD-11' ? 'lut' : 'reg');
   body.onclick = async e => {
     const ad = e.target.closest('[data-addarn]'); if (ad) { const x = arnMap.get(ad.dataset.addarn.toUpperCase()); if (!x) return;
       const form = /RFD-?11/i.test(x.frmno || '') ? 'RFD-11' : /REG-14/i.test(x.frmno || '') ? (/non/i.test(x.frmdc || '') ? 'REG-14 non-core' : 'REG-14 core') : /CMP-02/i.test(x.frmno || '') ? 'CMP-02' : /CMP-04/i.test(x.frmno || '') ? 'CMP-04' : /REG-16/i.test(x.frmno || '') ? 'REG-16' : /REG-21/i.test(x.frmno || '') ? 'REG-21' : 'Other';
@@ -1292,11 +1303,12 @@ async function gfApps(body, only) {
     const k = b.dataset.ap, tr = b.closest('tr'), x = tr && L.find(y => y.id === tr.dataset.id);
     if (k === 'lut') return gfLutDialog(null, () => gfApps(body, only));
     if (k === 'new') return gfAppDialog(null, () => gfApps(body, only));
-    if (k === 'edit') return x.form === 'RFD-11' ? gfLutDialog(x, () => gfApps(body, only)) : gfAppDialog(x, () => gfApps(body, only));
+    if (k === 'newret') return gfAppDialog(null, () => gfApps(body, only), true);
+    if (k === 'edit') return x.form === 'RFD-11' ? gfLutDialog(x, () => gfApps(body, only)) : gfAppDialog(x, () => gfApps(body, only), GF_RETFORMS.includes(x.form));
     if (k === 'del') { if (!confirm('Delete this application from the tracker? (Nothing changes on the portal.)')) return; const r = await safe(sb.from('gst_applications').delete().eq('id', x.id)); if (r.error) return toast(friendly(r.error), true); return gfApps(body, only); }
     if (k === 'fill' || k === 'open') {
       const c = clientById(x.client_id); if (!c || !c.gstin) return toast('This client has no GSTIN', true);
-      if (!gfAddon() || gfAddon() < '1.8.0') return toast('Needs the JLR add-on 1.8.0 in this Chrome', true);
+      if (!gfAddon() || gfAddon() < (GF_RETFORMS.includes(x.form) ? '2.0.0' : '1.8.0')) return toast(`Needs the JLR add-on ${GF_RETFORMS.includes(x.form) ? '2.0.0' : '1.8.0'} in this Chrome`, true);
       window.postMessage({ __jlrq: 'apply', job: { id: x.id, gstin: c.gstin.toUpperCase(), client: c.name, form: x.form, fy: x.fy, details: x.details || {}, notes: x.notes || '', by: (me && (me.full_name || me.email)) || '', at: new Date().toISOString() } }, location.origin);
       if (x.status === 'prepared') await safe(sb.from('gst_applications').update({ status: 'sent', updated_by: me.id, updated_at: new Date().toISOString() }).eq('id', x.id));
       toast(`Sent to the JLR add-on — log in to ${c.name} on the GST portal and press “${k === 'fill' ? 'Fill' : 'Open'} ${x.form}” in the JLR panel`);
@@ -1339,17 +1351,17 @@ function gfLutDialog(x, done) {
       [1, 2].forEach(n => { const w = last[`w${n}`] || {}; set(`w${n}name`, w.name); set(`w${n}occ`, w.occupation); set(`w${n}bno`, w.buildno); set(`w${n}floor`, w.floorno); set(`w${n}bname`, w.buildname); set(`w${n}street`, w.street); set(`w${n}city`, w.city); set(`w${n}state`, w.state); set(`w${n}dist`, w.dist); set(`w${n}pin`, w.pincode); }); };
     sel.onchange = fill; fill(); }
 }
-function gfAppDialog(x, done) {
-  const m = modal(x ? `Application — ${x.form}` : 'Record an application', `<div class="form-grid">
+function gfAppDialog(x, done, ret) {
+  const m = modal(x ? `${ret ? 'Return / form' : 'Application'} — ${x.form}` : ret ? 'Record a return / form' : 'Record an application', `<div class="form-grid">
       <label>Client<select name="client" ${x ? 'disabled' : ''}>${clients.filter(c => c.active !== false && c.gstin).sort((a, b) => a.name.localeCompare(b.name)).map(c => `<option value="${c.id}" ${x && x.client_id === c.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></label>
-      <label>Form<select name="form">${GF_APPFORMS.filter(f => f[0] !== 'RFD-11').map(f => `<option value="${esc(f[0])}" ${x && x.form === f[0] ? 'selected' : ''}>${esc(f[0])} — ${esc(f[1])}</option>`).join('')}</select></label>
+      <label>Form<select name="form">${GF_APPFORMS.filter(f => f[0] !== 'RFD-11' && (ret ? f[3] === 'ret' || f[0] === 'Other' : f[3] !== 'ret')).map(f => `<option value="${esc(f[0])}" ${x && x.form === f[0] ? 'selected' : ''}>${esc(f[0])} — ${esc(f[1])}</option>`).join('')}</select></label>
       <label>Status<select name="status">${Object.entries(GF_APPST).map(([k, [l]]) => `<option value="${k}" ${(x ? x.status : 'prepared') === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
-      <label>ARN<input name="arn" value="${esc((x && x.arn) || '')}"></label><label>Submitted on<input type="date" name="sub" value="${esc((x && x.submitted_on) || '')}"></label>
+      ${ret ? `<label>Period / year<input name="fy" value="${esc((x && x.fy) || '')}" placeholder="e.g. Oct 2026, Q3 2026-27, 2025-26"></label>` : ''}<label>ARN<input name="arn" value="${esc((x && x.arn) || '')}"></label><label>Submitted on<input type="date" name="sub" value="${esc((x && x.submitted_on) || '')}"></label>
       <label>Decided on<input type="date" name="dec" value="${esc((x && x.decided_on) || '')}"></label></div>
     <label class="small" style="display:block;margin-top:8px">What is being changed / notes (shown beside the portal form)<textarea name="notes" rows="4">${esc((x && x.notes) || '')}</textarea></label>`, {
     saveText: 'Save', onSave: async el => {
       const f = n => ($(`[name=${n}]`, el) || {}).value || '';
-      const row = { form: f('form'), status: f('status'), arn: f('arn').trim().toUpperCase() || null, submitted_on: f('sub') || null, decided_on: f('dec') || null, notes: f('notes').trim() || null, updated_by: me.id, updated_at: new Date().toISOString() };
+      const row = { form: f('form'), ...(ret ? { fy: f('fy').trim() || null } : {}), status: f('status'), arn: f('arn').trim().toUpperCase() || null, submitted_on: f('sub') || null, decided_on: f('dec') || null, notes: f('notes').trim() || null, updated_by: me.id, updated_at: new Date().toISOString() };
       const r = x ? await safe(sb.from('gst_applications').update(row).eq('id', x.id)) : await safe(sb.from('gst_applications').insert({ ...row, client_id: f('client') }));
       if (r.error) { toast(/gst_applications/.test(r.error.message || '') ? 'Run update-gst-applications.sql in Supabase first' : /duplicate|unique/i.test(r.error.message || '') ? 'This ARN is already in the tracker' : friendly(r.error), true); return false; }
       toast('Saved'); done && done();
@@ -1570,6 +1582,24 @@ async function gf9Excel(c, fy, R, row, kind) {
   }
   sh.column('A').width(8); sh.column('B').width(70); ['C', 'D', 'E', 'F', 'G'].forEach(x => sh.column(x).width(16)); sh.column('H').width(16);
   const blob = await wb.outputAsync(), a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `${kind === 'gstr9' ? 'GSTR-9' : 'GSTR-9C'} ${c.name} FY ${fy}.xlsx`; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+}
+// v109 stage 5: Other forms tab — other returns' status from the portal (Returns dashboard per month) + register of other forms + the full list
+const GF_RTN = { GSTR1A: 'GSTR-1A', IFF: 'IFF', CMP08: 'CMP-08', GSTR4: 'GSTR-4', GSTR4X: 'GSTR-4', GSTR7: 'GSTR-7', GSTR8: 'GSTR-8', GSTR10: 'GSTR-10', GSTR11: 'GSTR-11', GSTR5: 'GSTR-5', GSTR6: 'GSTR-6', GSTR5A: 'GSTR-5A', GSTR9: 'GSTR-9', GSTR9C: 'GSTR-9C' };
+const GF_RST = { FIL: ['Filed', 'g'], NF: ['Not filed', 'r'], SUB: ['Submitted', 'b'], FRZ: ['Frozen', ''], NA: ['Not applicable', ''] };
+async function gfOther(body) {
+  const I = await gfInfoRows();
+  const grid = [];
+  if (!I.error) I.rows.forEach((r, cid) => { const c = clientById(cid); if (!c) return; const R = (r.data || {}).returns || {};
+    Object.entries(R).forEach(([prd, list]) => (list || []).forEach(x => { const nm = GF_RTN[String(x.return_ty || '').toUpperCase()]; if (nm) grid.push({ c, prd, nm, st: String(x.status || ''), due: x.due_dt || '' }); })); });
+  grid.sort((a, b) => a.c.name.localeCompare(b.c.name) || b.prd.slice(2).localeCompare(a.prd.slice(2)) || b.prd.localeCompare(a.prd) || a.nm.localeCompare(b.nm));
+  body.innerHTML = `<h3 style="margin:0 0 8px">Other returns on the portal <span class="muted small">(last 3 months, read by the add-on — GSTR-1 / 3B are in their own tab)</span></h3>
+    ${grid.length ? `<div class="table-wrap"><table><thead><tr><th>Client</th><th>Return</th><th>Period</th><th>Due</th><th>Status</th></tr></thead><tbody>
+      ${grid.map(g => { const s = GF_RST[g.st] || [g.st || '—', '']; return `<tr><td>${esc(g.c.name)}</td><td>${esc(g.nm)}</td><td class="small">${esc(g.prd.slice(0, 2) + '/' + g.prd.slice(2))}</td><td class="small">${esc(g.due)}</td><td><span class="pill ${s[1]}">${esc(s[0])}</span></td></tr>`; }).join('')}</tbody></table></div>`
+      : `<p class="muted small">${I.error ? 'Run update-portal-info.sql in Supabase first.' : 'None found yet. Clients that file IFF, CMP-08, GSTR-4, GSTR-7 / 8, GSTR-1A or GSTR-10 show here after the add-on\'s daily portal check.'}</p>`}
+    <h3 style="margin:18px 0 8px">Returns and forms in the tracker</h3><div id="gfOthApps"></div>
+    <div id="gfOthList" style="margin-top:12px"></div>`;
+  gfApps($('#gfOthApps', body), GF_RETFORMS);
+  gfFormList($('#gfOthList', body), 'other');
 }
 const gfDl = { f: '', q: '' };
 function gfLoadZip() { return window.JSZip ? Promise.resolve() : new Promise((ok, bad) => { const s = document.createElement('script'); s.src = 'https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js'; s.onload = ok; s.onerror = bad; document.head.appendChild(s); }); }
@@ -8840,7 +8870,7 @@ const REV = (() => {
 })();
 
 // v78: this tab's code version — when a newer app is uploaded, offer Reload and block mails from old code
-const APP_VER = 'jlr-shell-v108';
+const APP_VER = 'jlr-shell-v109';
 let appStale = false;
 async function checkAppVer() {
   try { const t = await fetch('sw.js?v=' + Date.now(), { cache: 'no-store' }).then(r => r.text()); const live = (t.match(/jlr-shell-v\d+/) || [])[0];
