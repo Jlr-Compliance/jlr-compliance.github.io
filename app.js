@@ -625,6 +625,11 @@ const ADDON_PDF = (() => {
   async function one(it) {
     const c = clients.find(x => (x.gstin || '').toUpperCase() === it.gstin);
     if (!c) return { key: it.key, final: true, msg: `${it.gstin} is not a client in the tracker` };
+    if (it.type === 'info') {          // v106 stage 2: ledgers, TDS / TCS credit, applications … read from the portal
+      const r = await safe(sb.from('gst_portal_info').upsert({ client_id: c.id, data: it.data || {}, fetched_at: new Date(it.at || Date.now()).toISOString(), fetched_by: me.id }, { onConflict: 'client_id' }));
+      if (r.error) return { key: it.key, final: /gst_portal_info/.test(r.error.message || ''), msg: /gst_portal_info/.test(r.error.message || '') ? 'Run update-portal-info.sql in Supabase' : friendly(r.error) };
+      return { key: it.key, ok: true, final: true, quiet: true, msg: `${c.name} · portal data saved` };
+    }
     const period = it.month + '-01', kind = it.kind, label = kind === 'gstr3b' ? 'GSTR-3B' : 'GSTR-1', mon = `${MON3[+it.month.slice(5) - 1]} ${it.month.slice(0, 4)}`;
     const file = fileOf(it);
     if (it.stage === 'draft') {
@@ -653,9 +658,9 @@ const ADDON_PDF = (() => {
     const out = [];
     try { for (const it of items || []) { try { out.push(await one(it)); } catch (e) { out.push({ key: it.key, msg: friendly(e) }); } } }
     finally { busy = false; }
-    const ok = out.filter(r => r.ok);
-    if (out.length) toast(ok.length ? `From the GST portal: ${ok.map(r => r.msg).join(' · ')}` : out.map(r => r.msg).join(' · '), !ok.length);
-    if (ok.length && /^#\/(gst|work|filing|dashboard)/.test(location.hash) && typeof route === 'function') setTimeout(() => route(), 400);
+    const ok = out.filter(r => r.ok && !r.quiet), loud = out.filter(r => !r.quiet);
+    if (loud.length) toast(ok.length ? `From the GST portal: ${ok.map(r => r.msg).join(' · ')}` : loud.map(r => r.msg).join(' · '), !ok.length);
+    if (out.some(r => r.ok) && /^#\/(gst|work|filing|dashboard)/.test(location.hash) && typeof route === 'function') setTimeout(() => route(), 400);
     return out;
   }
   window.addEventListener('message', async e => {
@@ -1028,7 +1033,7 @@ async function gfReturns(v, ym) {
    Stage 1 (built): Overview · GSTR-1 & 3B (file on portal through the add-on) · Filed downloads.
    Later stages are listed so the office can see what is coming.
    ===================================================================== */
-const GF_TABS = [['overview', 'Overview'], ['returns', 'GSTR-1 & 3B'], ['reg', 'Registration'], ['annual', 'GSTR-9 & 9C'], ['lut', 'LUT'], ['downloads', 'Filed downloads'], ['other', 'Other forms']];
+const GF_TABS = [['overview', 'Overview'], ['returns', 'GSTR-1 & 3B'], ['reg', 'Registration'], ['annual', 'GSTR-9 & 9C'], ['lut', 'LUT'], ['downloads', 'Filed downloads'], ['portal', 'Ledgers & portal'], ['other', 'Other forms']];
 // [name, form, what it is, how (api = GST API + add-on, addon = add-on only, tracker), stage]
 const GF_FORMS = {
   reg: [['Registration', [
@@ -1044,22 +1049,22 @@ const GF_FORMS = {
     ['GSTR-9C', 'Reconciliation statement', 'Books vs GSTR-9 — turnover above ₹5 crore', 'api', 4]]]],
   lut: [['Letter of undertaking', [
     ['Furnish LUT', 'RFD-11', 'Exports / SEZ supplies without paying IGST — one per client per year', 'addon', 3],
-    ['View my submitted LUTs', 'RFD-11 ARN', 'Earlier LUTs kept against the client', 'addon', 2]]]],
+    ['View my submitted LUTs', 'RFD-11 ARN', 'Earlier LUTs kept against the client', 'addon', 1]]]],
   other: [
     ['Other returns', [['GSTR-1A', 'Amend GSTR-1', 'Same month, before 3B is filed', 'api', 5], ['IFF', 'QRMP', 'Invoice furnishing facility for quarterly clients', 'api', 5],
       ['GSTR-4 / CMP-08', 'Composition', 'Yearly return and quarterly payment statement', 'api', 5], ['GSTR-7', 'TDS deductors', 'Government departments — monthly', 'api', 5],
       ['GSTR-8', 'TCS', 'E-commerce operators — monthly', 'api', 5], ['GSTR-10', 'Final return', 'After the registration is cancelled', 'api', 5], ['GSTR-11', 'UIN holders', 'Embassies, UN bodies', 'api', 5]]],
-    ['Payments and ledgers', [['Ledgers', 'Cash / credit / liability', 'Balances read from the portal', 'api', 2], ['PMT-06', 'Challan', 'CPIN, paid CIN — already in GST review', 'api', 1],
+    ['Payments and ledgers', [['Ledgers', 'Cash / credit / liability', 'Balances read from the portal', 'api', 1], ['PMT-06', 'Challan', 'CPIN, paid CIN — already in GST review', 'api', 1],
       ['PMT-09', 'Transfer', 'Move cash ledger balance between heads', 'addon', 2], ['RCM ITC statement', 'Opening balance', 'RCM paid vs ITC taken', 'api', 2],
       ['ITC reclaim statement', '4(B)(2) / 4(D)(1)', 'Temporary reversals and reclaims', 'api', 2], ['Negative liability statement', 'GSTR-3B', 'Negative liability carried forward', 'api', 2],
-      ['DRC-03 / DRC-03A', 'Voluntary payment', 'Pay outside 3B, link to a demand', 'addon', 5], ['DRC-03 register', 'Payments made', 'With ARN', 'addon', 2], ['View PMT-03A', 'Re-credit order', 'Ledger re-credit orders', 'addon', 2]]],
+      ['DRC-03 / DRC-03A', 'Voluntary payment', 'Pay outside 3B, link to a demand', 'addon', 5], ['DRC-03 register', 'Payments made', 'With ARN', 'addon', 1], ['View PMT-03A', 'Re-credit order', 'Ledger re-credit orders', 'addon', 1]]],
     ['Refunds', [['RFD-01', 'Refund', 'Export, SEZ, inverted duty, excess cash', 'addon', 5], ['RFD-01W', 'Withdraw', 'Withdraw a refund application', 'addon', 5], ['Refund status', 'RFD-02 / 03 / 04 / 06', 'Acknowledgement, deficiency, orders', 'addon', 5]]],
-    ['ITC forms', [['GSTR-2X', 'TDS / TCS received', 'Accept or reject TDS / TCS credit — goes to the cash ledger', 'api', 2], ['ITC-01', 'New registration / leaving composition', 'Special ITC claim', 'addon', 5],
+    ['ITC forms', [['GSTR-2X', 'TDS / TCS received', 'Accept or reject TDS / TCS credit — goes to the cash ledger', 'api', 1], ['ITC-01', 'New registration / leaving composition', 'Special ITC claim', 'addon', 5],
       ['ITC-02', 'Transfer', 'Sale, merger, amalgamation', 'addon', 5], ['ITC-02 pending for action', 'Transferee', 'Transfers waiting for the client', 'addon', 2], ['ITC-03', 'Reversal', 'On opting for composition', 'addon', 5], ['ITC-04', 'Job work', 'Goods sent to / received from job workers', 'addon', 5]]],
     ['Mismatch intimations', [['DRC-01B', 'Liability mismatch', 'GSTR-1 higher than 3B — reply or pay', 'addon', 2], ['DRC-01C', 'ITC mismatch', '3B ITC higher than 2B — reply or pay', 'addon', 2], ['Notices and orders', 'Incl. additional notices', 'Already under GST notices', 'addon', 1]]],
-    ['User services', [['My applications', 'All applications', 'With ARN and status', 'addon', 2], ['My saved applications', 'Drafts', 'Saved but not submitted', 'addon', 2],
-      ['View my submissions', 'All submissions', 'Everything submitted from the login', 'addon', 2], ['Notices / intimations issued', 'Intimations', 'Issued to the client', 'addon', 2],
-      ['View additional notices / orders', 'Additional tab', 'Pulled into GST notices', 'addon', 2], ['View / download certificates', 'REG-06', 'Registration certificate and others', 'addon', 2],
+    ['User services', [['My applications', 'All applications', 'With ARN and status', 'addon', 1], ['My saved applications', 'Drafts', 'Saved but not submitted', 'addon', 1],
+      ['View my submissions', 'All submissions', 'Everything submitted from the login', 'addon', 2], ['Notices / intimations issued', 'Intimations', 'Issued to the client', 'addon', 1],
+      ['View additional notices / orders', 'Additional tab', 'Pulled into GST notices', 'addon', 2], ['View / download certificates', 'REG-06', 'Registration certificate and others', 'addon', 1],
       ['Consent for Rule 14B', 'Aadhaar', 'Consent of selected persons', 'addon', 3], ['Engage / disengage GSTP', 'Practitioner', 'Link the office as GST practitioner', 'addon', 3],
       ['Communication between taxpayers', 'Messages', 'To / from suppliers and customers', 'addon', 5], ['GTA', 'Forward charge option', 'Goods transport agency option', 'addon', 5],
       ['Search HSN code', 'HSN / SAC', 'Code and rate', 'addon', 5], ['Search BoE', 'Bill of entry', 'Import details (IMPG)', 'addon', 5], ['Verify RFN', 'Reference no', 'Check a portal reference number', 'addon', 5],
@@ -1085,6 +1090,8 @@ VIEWS.filing = async v => {
   if (gfTab === 'returns') return gfReturns(body, ym);
   if (gfTab === 'overview') return gfOverview(body, ym);
   if (gfTab === 'downloads') return gfDownloads(body, ym);
+  if (gfTab === 'portal') return gfPortal(body);
+  if (gfTab === 'lut') return gfLut(body);
   return gfFormList(body, gfTab);
 };
 function gfFormCard(f) {
@@ -1170,6 +1177,73 @@ async function gfDownloads(body, ym) {
       if (!gfAddon()) return toast('The JLR add-on 1.6.0 is not seen in this Chrome', true);
       window.postMessage({ __jlrq: 'want', items: [{ gstin: c.gstin.toUpperCase(), month: ym }] }, location.origin); toast(`The add-on will take ${c.name}'s ${label} PDFs the next time someone logs in to them on the portal`); }
   };
+}
+// v106 stage 2: what the JLR add-on read from the portal — one row per client
+const gfP = { q: '' };
+const gfN = v => '₹' + Math.round(+v || 0).toLocaleString('en-IN');
+async function gfInfoRows() {
+  const r = await safe(sb.from('gst_portal_info').select('client_id,data,fetched_at,fetched_by').limit(5000));
+  if (r.error) return { error: r.error };
+  return { rows: new Map((r.data || []).map(x => [x.client_id, x])) };
+}
+function gfCaseList(d, code) { return (((d || {}).cases || {})[code] || {}).list || []; }
+const gfPick = (o, ...ks) => { for (const k of ks) { const v = o && o[k]; if (v !== undefined && v !== null && v !== '') return v; } return ''; };
+function gf2x(d) { const g = (d || {}).gstr2x || {}, L = []; Object.entries(g).sort().reverse().forEach(([p, v]) => ['tds', 'tcs'].forEach(k => { const x = (v || {})[k]; if (!x) return;
+  const A = x.accepted || {}, R = x.rejected || {}, tot = Math.round(+x.totalRec || 0), pend = Math.max(0, tot - Math.round(+A.tot_count || 0) - Math.round(+R.tot_count || 0)), acc = Math.round(+A.tot_amt || 0);
+  if (tot || acc) L.push({ p, k, pend, acc, tot }); })); return L; }
+async function gfPortal(body) {
+  const I = await gfInfoRows();
+  if (I.error) { body.innerHTML = `<p class="note warn">${/gst_portal_info/.test(I.error.message || '') ? 'Run <b>update-portal-info.sql</b> in Supabase first.' : esc(friendly(I.error))}</p>`; return; }
+  let list = clients.filter(c => c.active !== false && c.gstin).map(c => ({ c, i: I.rows.get(c.id) })).sort((a, b) => (!!b.i - !!a.i) || a.c.name.localeCompare(b.c.name));
+  if (gfP.q) list = list.filter(x => (x.c.name + ' ' + x.c.gstin).toLowerCase().includes(gfP.q.toLowerCase()));
+  const have = list.filter(x => x.i).length;
+  const cell = x => { if (!x.i) return '<td colspan="6" class="muted small">Not read yet — log in to this client on the GST portal (the add-on reads it once a day)</td>';
+    const d = x.i.data || {}, cr = d.credit || {}, ca = d.cash || {}, t2 = gf2x(d), lut = gfCaseList(d, 'LETUT')[0], nCase = Object.values(d.cases || {}).reduce((a, v) => a + (v.list || []).length, 0);
+    const drafts = ((d.drafts || {}).applnDraftList || []).length, pmt = Array.isArray(d.pmt03a) ? d.pmt03a.length : 0, nIss = Array.isArray(d.notices60) ? d.notices60.length : 0;
+    return `<td class="r">${gfN(ca.tot_rng_bal)}</td>
+      <td class="r">${gfN(cr.op_tot)}<div class="muted tiny">I ${gfN(cr.igstTaxBal)} · C ${gfN(cr.cgstTaxBal)} · S ${gfN(cr.sgstTaxBal)}${+cr.blockTotBal ? ` · <span class="late">blocked ${gfN(cr.blockTotBal)}</span>` : ''}</div></td>
+      <td class="small">${t2.length ? t2.slice(0, 2).map(t => `${t.k.toUpperCase()} ${t.p.slice(0, 2)}/${t.p.slice(2)}: ${t.pend ? `<span class="warn-t">${t.pend} of ${t.tot} to accept / reject</span>` : `${gfN(t.acc)} accepted`}`).join('<br>') : '<span class="muted">—</span>'}</td>
+      <td class="small">${lut ? `${esc(gfPick(lut, 'arn', 'caseId'))}<div class="muted tiny">${esc(gfPick(lut, 'applnDate', 'creationDate', 'createdDate', 'caseCrtDt', 'dateOfFiling'))}</div>` : '<span class="muted">none</span>'}</td>
+      <td class="small">${nCase ? `${nCase} filed` : ''}${drafts ? `${nCase ? ' · ' : ''}<span class="warn-t">${drafts} draft${drafts > 1 ? 's' : ''}</span>` : ''}${pmt ? ` · ${pmt} PMT-03A` : ''}${nIss ? ` · <span class="late">${nIss} notice${nIss > 1 ? 's' : ''}</span>` : ''}${!nCase && !drafts && !pmt && !nIss ? '<span class="muted">—</span>' : ''}</td>
+      <td class="small muted">${fmtDate(x.i.fetched_at.slice(0, 10))}${(d.errors || []).length ? `<div class="warn-t tiny">${d.errors.length} not read</div>` : ''}</td>`; };
+  body.innerHTML = `<div class="toolbar"><input type="search" id="gfpQ" placeholder="Search client" value="${esc(gfP.q)}" aria-label="Search client"><span class="spacer"></span><span class="muted small">${have} of ${list.length} clients read from the portal</span></div>
+    <div class="table-wrap"><table><thead><tr><th>Client</th><th class="r">Cash ledger</th><th class="r">Credit ledger</th><th>TDS / TCS credit</th><th>LUT</th><th>Applications · orders · notices</th><th>Read on</th><th></th></tr></thead><tbody>
+    ${list.map(x => `<tr><td class="wrap"><b>${esc(x.c.name)}</b><div class="muted small">${esc(x.c.gstin)}</div></td>${cell(x)}<td>${x.i ? `<button class="btn sm" data-gpi="${x.c.id}">Details</button>` : ''}</td></tr>`).join('')}</tbody></table></div>
+    <p class="muted small">Read only. The JLR add-on reads these once a day when someone logs in to the client on the GST portal (or “Ledgers, TDS / TCS credit, LUT …” in the JLR panel), and saves them here when the tracker is open in the same Chrome.</p>`;
+  const q = $('#gfpQ', body); q.oninput = () => { clearTimeout(q._t); q._t = setTimeout(() => { gfP.q = q.value; gfPortal(body).then(() => { const n = $('#gfpQ', body); if (n) { n.focus(); n.setSelectionRange(n.value.length, n.value.length); } }); }, 350); };
+  body.onclick = e => { const b = e.target.closest('[data-gpi]'); if (!b) return; const x = list.find(y => y.c.id === b.dataset.gpi); if (x) gfInfoModal(x.c, x.i); };
+}
+function gfInfoModal(c, i) {
+  const d = i.data || {}, cr = d.credit || {}, ca = d.cash || {}, H = ['igst', 'cgst', 'sgst', 'cess'];
+  const tbl = (head, rows) => rows.length ? `<div class="table-wrap"><table><thead><tr>${head.map(h => `<th>${h}</th>`).join('')}</tr></thead><tbody>${rows.map(r => `<tr>${r.map(v => `<td>${v}</td>`).join('')}</tr>`).join('')}</tbody></table></div>` : '<p class="muted small">None.</p>';
+  const gen = L => tbl(['Form / type', 'ARN / ref', 'Date', 'Status'], (L || []).map(x => [esc(gfPick(x, 'formNumber', 'form_no', 'frmno', 'caseTypeDesc', 'caseTpeCd')), esc(gfPick(x, 'arn', 'caseId', 'refNo', 'grefId', 'docNo')), esc(gfPick(x, 'applnDate', 'creationDate', 'creation_dt', 'createdDate', 'caseCrtDt', 'issueDate', 'isdt', 'dateOfFiling')), esc(gfPick(x, 'status', 'caseStatus', 'statusDesc', 'stsDesc'))]));
+  const cashTx = ((d.cashTx || {}).tr || []).slice(-15), creTx = ((d.creditTx || {}).tr || []).filter(x => x.ref_no && x.ref_no !== '-').slice(-15);
+  modal(`${c.name} — from the GST portal`, `<p class="muted small" style="margin-top:0">Read ${new Date(i.fetched_at).toLocaleString('en-IN')} · ${esc(profName(i.fetched_by) || '')}${(d.errors || []).length ? ` · <span class="warn-t">not read: ${esc(d.errors.join('; '))}</span>` : ''}</p>
+    <h4>Cash ledger · ${gfN(ca.tot_rng_bal)}</h4>${tbl(['', 'Tax', 'Interest', 'Penalty', 'Fee', 'Other', 'Total'], H.map(h => { const v = ca[h] || {}; return [h.toUpperCase(), gfN(v.tx), gfN(v.intr), gfN(v.pen), gfN(v.fee), gfN(v.oth), `<b>${gfN(v.tot)}</b>`]; }))}
+    ${cashTx.length ? `<details><summary class="small">Last cash entries this year</summary>${tbl(['Date', 'Ref', 'Description', 'Amount', 'Balance'], cashTx.map(x => [esc(x.dt || ''), esc(x.ref_no || ''), esc(x.desc || x.tr_typ || ''), gfN(x.tot_tr_amt ?? x.tot_amt), gfN(x.tot_rng_bal)]))}</details>` : ''}
+    <h4>Credit ledger · ${gfN(cr.op_tot)}</h4>${tbl(['IGST', 'CGST', 'SGST', 'Cess', 'Provisional', 'Blocked'], [[gfN(cr.igstTaxBal), gfN(cr.cgstTaxBal), gfN(cr.sgstTaxBal), gfN(cr.cessTaxBal), gfN(cr.opProTotBal), gfN(cr.blockTotBal)]])}
+    ${creTx.length ? `<details><summary class="small">Credit ledger entries this year</summary>${tbl(['Date', 'Ref', 'Period', 'Description', 'IGST', 'CGST', 'SGST', 'Balance'], creTx.map(x => [esc(x.dt || ''), esc(x.ref_no || ''), esc(x.ret_period || ''), esc(x.desc || x.tr_typ || ''), gfN(x.igstTaxAmt), gfN(x.cgstTaxAmt), gfN(x.sgstTaxAmt), gfN(x.tot_rng_bal)]))}</details>` : ''}
+    <h4>TDS / TCS credit received (GSTR-2X)</h4>${tbl(['Month', 'Kind', 'Entries', 'Not acted on', 'Accepted'], gf2x(d).map(t => [`${t.p.slice(0, 2)}/${t.p.slice(2)}`, t.k.toUpperCase(), t.tot, t.pend ? `<span class="warn-t">${t.pend}</span>` : '—', gfN(t.acc)]))}
+    ${Object.entries(d.cases || {}).map(([k, v]) => `<h4>${esc(v.label)}</h4>${gen(v.list)}`).join('') || '<h4>Applications</h4><p class="muted small">None in the last 2 years (LUT, DRC-03, refund, appeal, composition, advance ruling).</p>'}
+    <h4>Drafts saved on the portal</h4>${tbl(['Form', 'Created', 'Expires', 'Status'], ((d.drafts || {}).applnDraftList || []).map(x => [esc(x.form_no || ''), esc(x.creation_dt || ''), esc(x.expiry_dt || ''), esc(x.status || '')]))}
+    <h4>PMT-03A re-credit orders</h4>${gen(Array.isArray(d.pmt03a) ? d.pmt03a : [])}
+    <h4>Notices / intimations issued (last 60 days)</h4>${gen(Array.isArray(d.notices60) ? d.notices60 : [])}
+    <h4>Certificates</h4>${tbl(['Form', 'Description', 'Issued'], (Array.isArray(d.certs) ? d.certs : []).map(x => [esc(x.frmno || ''), esc(x.frmdc || ''), esc(x.isdt || '—')]))}`, { wide: true });
+}
+// LUT tab: LUTs read from the portal (My Applications → LUT), plus the forms list
+async function gfLut(body) {
+  const I = await gfInfoRows();
+  const fy = (() => { const d = new Date(), y = d.getMonth() >= 3 ? d.getFullYear() : d.getFullYear() - 1; return `${y}-${String(y + 1).slice(2)}`; })();
+  const rows = I.error ? [] : clients.filter(c => c.active !== false && c.gstin && I.rows.has(c.id)).map(c => ({ c, L: gfCaseList(I.rows.get(c.id).data, 'LETUT'), at: I.rows.get(c.id).fetched_at }));
+  body.innerHTML = `${I.error ? `<p class="note warn">${/gst_portal_info/.test(I.error.message || '') ? 'Run <b>update-portal-info.sql</b> in Supabase to see LUTs read from the portal.' : esc(friendly(I.error))}</p>` : ''}
+    <p class="muted small" style="margin-top:0">LUTs filed on the portal (last 2 years), read by the JLR add-on. Current year FY ${fy}. Furnishing a new LUT from here comes in stage 3.</p>
+    ${rows.length ? `<div class="table-wrap"><table><thead><tr><th>Client</th><th>Latest LUT · ARN</th><th>Date</th><th>Status</th><th>All</th><th>Read on</th></tr></thead><tbody>
+      ${rows.sort((a, b) => (!!b.L.length - !!a.L.length) || a.c.name.localeCompare(b.c.name)).map(x => { const l = x.L[0];
+        return `<tr><td class="wrap"><b>${esc(x.c.name)}</b><div class="muted small">${esc(x.c.gstin)}</div></td><td>${l ? esc(gfPick(l, 'arn', 'caseId')) : '<span class="muted">No LUT on the portal</span>'}</td>
+          <td class="small">${l ? esc(gfPick(l, 'applnDate', 'creationDate', 'createdDate', 'caseCrtDt', 'dateOfFiling')) : ''}</td><td class="small">${l ? esc(gfPick(l, 'status', 'caseStatus', 'statusDesc')) : ''}</td><td class="small">${x.L.length || ''}</td><td class="small muted">${fmtDate(x.at.slice(0, 10))}</td></tr>`; }).join('')}</tbody></table></div>`
+      : '<div class="empty small">No client read from the portal yet.</div>'}
+    <div id="gfLutForms"></div>`;
+  gfFormList($('#gfLutForms', body), 'lut');
 }
 const gfDl = { f: '', q: '' };
 function gfLoadZip() { return window.JSZip ? Promise.resolve() : new Promise((ok, bad) => { const s = document.createElement('script'); s.src = 'https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js'; s.onload = ok; s.onerror = bad; document.head.appendChild(s); }); }
@@ -8440,7 +8514,7 @@ const REV = (() => {
 })();
 
 // v78: this tab's code version — when a newer app is uploaded, offer Reload and block mails from old code
-const APP_VER = 'jlr-shell-v105';
+const APP_VER = 'jlr-shell-v106';
 let appStale = false;
 async function checkAppVer() {
   try { const t = await fetch('sw.js?v=' + Date.now(), { cache: 'no-store' }).then(r => r.text()); const live = (t.match(/jlr-shell-v\d+/) || [])[0];
