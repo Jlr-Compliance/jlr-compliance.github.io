@@ -610,11 +610,61 @@ async function boot() {
     if (!/^#\//.test(location.hash)) history.replaceState(null, '', location.pathname + '#/dashboard');
     window.onhashchange = route;
     route();
+    setTimeout(() => ADDON_PDF.ready(), 2500);   // v104: PDFs waiting in the JLR add-on
   } catch (e) {
     root.innerHTML = `<div class="auth-wrap"><div class="card auth"><h2>Could not connect</h2><p class="error">${esc(friendly(e))}</p>
       <p class="muted small">Check the values in config.js and that schema.sql was run in Supabase.</p></div></div>`;
   }
 }
+
+/* v104: GSTR-1 / GSTR-3B PDFs from the JLR GST helper add-on (portal draft → review draft; portal filed → acknowledgement, ARN, Filed) */
+const ADDON_PDF = (() => {
+  let busy = false;
+  const MON3 = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const fileOf = it => { const bin = atob(it.b64), u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i); return new File([u], it.name, { type: 'application/pdf' }); };
+  async function one(it) {
+    const c = clients.find(x => (x.gstin || '').toUpperCase() === it.gstin);
+    if (!c) return { key: it.key, final: true, msg: `${it.gstin} is not a client in the tracker` };
+    const period = it.month + '-01', kind = it.kind, label = kind === 'gstr3b' ? 'GSTR-3B' : 'GSTR-1', mon = `${MON3[+it.month.slice(5) - 1]} ${it.month.slice(0, 4)}`;
+    const file = fileOf(it);
+    if (it.stage === 'draft') {
+      const r = await safe(sb.from('gst_reviews').select('state,draft').eq('client_id', c.id).eq('period', period).eq('kind', kind).maybeSingle());
+      if (r.error) return { key: it.key, msg: friendly(r.error) };
+      const st = r.data && r.data.state;
+      if (['sent', 'approved', 'sent_client'].includes(st)) return { key: it.key, final: true, msg: `${c.name} ${label} ${mon}: already sent for verification — draft PDF not replaced` };
+      await REV.setDraft(c, period, kind, file, 'addon');
+      return { key: it.key, ok: true, final: true, msg: `${c.name} · ${label} ${mon} draft PDF saved` };
+    }
+    // filed: the work item for this client / return / month → acknowledgement (PDF + ARN), status Filed
+    const t = await safe(sb.from('tasks').select('*').eq('client_id', c.id).ilike('return_name', `%${label}%`).limit(300));
+    if (t.error) return { key: it.key, msg: friendly(t.error) };
+    const task = (t.data || []).filter(x => ACK.formMatches(label, 'GST', x.return_name) && periodToMonth(x.period) === it.month)
+      .sort((a, b) => (a.status === 'Filed') - (b.status === 'Filed'))[0];
+    if (!task) return { key: it.key, final: true, msg: `${c.name} · ${label} ${mon}: no work item for this month — upload the PDF from Work` };
+    if (task.status === 'Filed') {
+      const a = await safe(sb.from('filing_acks').select('id,file_path').eq('task_id', task.id));
+      if (!a.error && (a.data || []).some(x => x.file_path)) return { key: it.key, ok: true, final: true, msg: `${c.name} · ${label} ${mon}: filed PDF already in the tracker` };
+    }
+    const res = await ACK.save(task, { kind: 'GST', form: label, arn: it.arn || null, filed_on: ACK.date(it.arnDate || '') || null }, file);
+    return { key: it.key, ok: true, final: true, msg: `${c.name} · ${label} ${mon} filed PDF saved${it.arn ? ' · ARN ' + it.arn : ''}${res.stored ? '' : ' (PDF could not be stored)'}` };
+  }
+  async function take(items) {
+    if (busy || !me || !clients.length) return null; busy = true;
+    const out = [];
+    try { for (const it of items || []) { try { out.push(await one(it)); } catch (e) { out.push({ key: it.key, msg: friendly(e) }); } } }
+    finally { busy = false; }
+    const ok = out.filter(r => r.ok);
+    if (out.length) toast(ok.length ? `From the GST portal: ${ok.map(r => r.msg).join(' · ')}` : out.map(r => r.msg).join(' · '), !ok.length);
+    if (ok.length && /^#\/(gst|work|filing|dashboard)/.test(location.hash) && typeof route === 'function') setTimeout(() => route(), 400);
+    return out;
+  }
+  window.addEventListener('message', async e => {
+    if (e.source !== window || !e.data || e.data.__jlrq !== 'pdfs') return;
+    const res = await take(e.data.items);
+    if (res) window.postMessage({ __jlrq: 'pdfs-done', results: res }, location.origin);
+  });
+  return { take, ready: () => window.postMessage({ __jlrq: 'ready' }, location.origin) };
+})();
 
 async function loadRefs() {
   if (!tgLinked) loadTgLinked().catch(() => {});
@@ -4600,7 +4650,9 @@ function draft3b(m, sm, client, claim = null) {
   add(a5, held2b);
   const blk175 = claim && claim.blocked175 ? add(Z(), claim.blocked175) : Z(); add(a5, blk175);   // v100: blocked 17(5) — in 4(A)(5), reversed in 4(B)(1)
   const A = add(add(add(add(Z(), imp), sm.rcm), isd), a5);
-  const B1 = add(g('rev_perm'), blk175), B2r = add(g('rev_temp'), held2b), C = add(add(add(Z(), A), B1, -1), B2r, -1);
+  // v104: common credit (Rule 42 inputs / services, Rule 43 capital goods) — reversal goes to 4(B)(1)
+  const r42 = R42.on(client) ? R42.calc({ m, claim, client, sm, a, b, c: sm.nilOut, e: sm.nonGst, blk175, w }) : null;
+  const B1 = add(add(g('rev_perm'), blk175), r42 ? r42.rev : null), B2r = add(g('rev_temp'), held2b), C = add(add(add(Z(), A), B1, -1), B2r, -1);
   const L = add(add(Z(), a), b);                                  // zero-rated with IGST is payable too (exports without payment carry 0)
   const RC = sm.rcm, credit = add(add(Z(), C), g('cl_open')), so = GR.setoff(L, credit);
   // RCM liability must be paid in cash; RCM ITC is already in 4(A)(3)
@@ -4609,8 +4661,91 @@ function draft3b(m, sm, client, claim = null) {
   H.forEach(k => { cashNeed[k] = r2(so.cash[k] + (RC[k] || 0) + int51[k] + late51[k]); cashUsed[k] = r2(Math.min(cashNeed[k], Math.max(0, cashLedger[k]))); deposit[k] = r2(cashNeed[k] - cashUsed[k]); });
   const sum = o => r2(H.reduce((s, k) => s + (+o[k] || 0), 0));
   return { from, itcSrc, a, b, c: sm.nilOut, d: RC, e: sm.nonGst, imp, isd, a5, A, B1, B2: B2r, C, D1: g('reclaim'), D2: sm.blocked, L, credit, so, cashNeed, cashUsed, deposit,
-    depositTotal: sum(deposit), cashTotal: sum(cashNeed), w, H, held2b, blk175, int51, late51 };
+    depositTotal: sum(deposit), cashTotal: sum(cashNeed), w, H, held2b, blk175, int51, late51, r42 };
 }
+
+/* =====================================================================
+   v104: COMMON CREDIT — Rule 42 (inputs, input services) and Rule 43 (capital goods)
+   Switched on per client (clients.cc = { on, d2, cap: [capital goods register] }).
+   Each bill whose ITC is claimed this month is marked in gst_months.reco.use[key]:
+   tax · exempt · nonbiz · common · cap_common · cap_tax · cap_exempt   (not marked = common)
+   Reversal (exempt-only, non-business, D1, D2, Te, capital goods not credited) goes to GSTR-3B 4(B)(1).
+   ===================================================================== */
+const R42 = (() => {
+  const H = ['ig', 'cg', 'sg', 'cs'], r2 = v => Math.round((+v || 0) * 100) / 100;
+  const USE = {
+    common: ['Common', 'Used for both taxable and exempt supplies — split by turnover (Rule 42)'],
+    tax: ['Taxable only', 'Used only for taxable / zero-rated supplies — full credit (T4)'],
+    exempt: ['Exempt only', 'Used only for exempt supplies (e.g. patient care) — no credit, reversed (T2)'],
+    nonbiz: ['Non-business', 'Personal / non-business use — no credit, reversed (T1)'],
+    cap_common: ['Capital goods — common', 'Machine / equipment used for both — credit now, exempt share reversed every month for 60 months (Rule 43)'],
+    cap_tax: ['Capital goods — taxable only', 'Machine / equipment used only for taxable supplies — full credit'],
+    cap_exempt: ['Capital goods — exempt / non-business', 'Machine / equipment used only for exempt or non-business — no credit, reversed']
+  };
+  const ORDER = ['common', 'tax', 'exempt', 'nonbiz', 'cap_common', 'cap_tax', 'cap_exempt'];
+  const Z = () => ({ ig: 0, cg: 0, sg: 0, cs: 0 });
+  const add = (a, x, k = 1) => { if (x) H.forEach(h => { a[h] = r2(a[h] + k * (+x[h] || 0)); }); return a; };
+  const mul = (x, f) => { const o = Z(); H.forEach(h => { o[h] = r2((+(x || {})[h] || 0) * f); }); return o; };
+  const tot = x => r2(H.reduce((s, h) => s + (+(x || {})[h] || 0), 0));
+  const on = c => !!(c && c.cc && c.cc.on);
+  const useOf = (reco, k) => (((reco || {}).use || {})[k]) || 'common';
+  const ym = p => String(p || '').slice(0, 7);
+  const monthsBetween = (a, b) => (+b.slice(0, 4) - +a.slice(0, 4)) * 12 + (+b.slice(5, 7) - +a.slice(5, 7));
+  const addMonths = (p, n) => { const d = new Date(ym(p) + '-01T00:00:00'); d.setMonth(d.getMonth() + n); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-01`; };
+  const lifeEnd = x => addMonths(x.p, 59);                       // last month of the 60-month life
+  // capital goods register (client.cc.cap) + capital goods marked in this month's bills that are not in it yet
+  function capList(client, m, took) {
+    const reg = (((client || {}).cc || {}).cap || []).slice(), period = (m && m.period) || '', have = new Set(reg.map(x => x.src).filter(Boolean)), reco = (m && m.reco) || {};
+    (took || []).forEach(t => { const u = useOf(reco, t.k); if (!/^cap_/.test(u)) return; const src = ym(period) + '|' + t.k; if (have.has(src)) return;
+      const d = t.d || {}, b = t.b || {};
+      reg.push({ id: 'new:' + src, src, p: ym(period) + '-01', n: b.n || d.n || '', g: d.g || '', i: b.i || d.i || '', desc: '', ig: r2(d.ig), cg: r2(d.cg), sg: r2(d.sg), cs: r2(d.cs), use: u.slice(4), unsaved: true }); });
+    return reg;
+  }
+  // ITC of one capital good attributable to this month (Tm = Tc ÷ 60) — only common goods within their 60-month life
+  function tmOf(x, period) {
+    if (x.use !== 'common' || !x.p) return null;
+    const k = monthsBetween(ym(x.p), ym(period)); if (k < 0 || k > 59) return null;
+    if (x.out && ym(period) >= ym(x.out)) return null;          // sold / no longer used from this month
+    return mul(x, 1 / 60);
+  }
+  function calc({ m, claim, client, sm, a, b, c, e, blk175, w }) {
+    const period = (m && m.period) || '', reco = (m && m.reco) || {}, cc = (client && client.cc) || {}, typed = (w && w.r42) || {};
+    const has = v => v !== undefined && v !== null && v !== '';
+    const Eauto = r2((+(c || {}).t || 0) + (+(e || {}).t || 0)), Fauto = r2((+(a || {}).t || 0) + (+(b || {}).t || 0) + (+(c || {}).t || 0) + (+(e || {}).t || 0));
+    const E = has(typed.E) ? r2(typed.E) : Eauto, F = has(typed.F) ? r2(typed.F) : Fauto;
+    const ratio = F > 0 ? Math.min(1, Math.max(0, E / F)) : null;
+    const took = (claim && claim.took) || null, g = {}, n = {};
+    ORDER.forEach(u => { g[u] = Z(); n[u] = 0; });
+    if (took) took.forEach(t => { const u = USE[useOf(reco, t.k)] ? useOf(reco, t.k) : 'common'; add(g[u], t.d); n[u]++; });
+    else if (sm && sm.itcBase) { add(g.common, sm.itcBase); }
+    // Rule 42: T = inputs / services claimed, T1 non-business, T2 exempt-only, T3 blocked 17(5) (reversed separately), T4 taxable-only, C2 common
+    const T = add(add(add(add(Z(), g.tax), g.exempt), g.nonbiz), g.common), C2 = g.common;
+    const r = ratio === null ? 0 : ratio;
+    const D1 = mul(C2, r), D2 = cc.d2 ? mul(C2, 0.05) : Z(), C3 = add(add(add(Z(), C2), D1, -1), D2, -1);
+    // Rule 43
+    const cap = capList(client, m, took), Tm = Z();
+    cap.forEach(x => { const t = tmOf(x, period); if (t) add(Tm, t); });
+    const Te = mul(Tm, r);
+    const capNot = g.cap_exempt;                                   // not credited — reversed in full
+    const rev = add(add(add(add(add(add(Z(), g.nonbiz), g.exempt), D1), D2), Te), capNot);
+    return { period, E, F, Eauto, Fauto, typedE: has(typed.E), typedF: has(typed.F), ratio, noTurnover: !(F > 0), g, n, T, T3: blk175 || Z(), C2, D1, D2, C3, cap, Tm, Te, capNot, rev, d2: !!cc.d2, hasBills: !!took };
+  }
+  // small copy kept in gst_months.summary.r42 — used by the year-end recalculation and the workings Excel
+  const snap = r => r ? { E: r.E, F: r.F, ratio: r.ratio === null ? null : Math.round(r.ratio * 1e6) / 1e6, T1: { ...r.g.nonbiz }, T2: { ...r.g.exempt }, T4: { ...r.g.tax }, C2: { ...r.C2 }, D1: { ...r.D1 }, D2: { ...r.D2 },
+    Tm: { ...r.Tm }, Te: { ...r.Te }, capNot: { ...r.capNot }, capA: add(add(Z(), r.g.cap_common), r.g.cap_tax), rev: { ...r.rev }, d2: r.d2 } : null;
+  // Rule 42(2): after the year — D1 and D2 worked out again on the whole year's turnover
+  function yearEnd(snaps, d2) {
+    const L = (snaps || []).filter(x => x && x.s), C2 = Z(), D1m = Z(), D2m = Z(); let E = 0, F = 0;
+    L.forEach(({ s }) => { E = r2(E + (+s.E || 0)); F = r2(F + (+s.F || 0)); add(C2, s.C2); add(D1m, s.D1); add(D2m, s.D2); });
+    const ratio = F > 0 ? Math.min(1, Math.max(0, E / F)) : 0, D1y = mul(C2, ratio), D2y = d2 ? mul(C2, 0.05) : Z();
+    const diff = add(add(add(add(Z(), D1y), D2y), D1m, -1), D2m, -1);
+    return { months: L.length, E, F, ratio, C2, D1y, D2y, D1m, D2m, diff, pay: Object.fromEntries(H.map(h => [h, Math.max(0, diff[h])])), back: Object.fromEntries(H.map(h => [h, Math.max(0, -diff[h])])) };
+  }
+  // interest u/s 50 at 18% a year from 1 April after the year to the date of payment
+  const interest = (amt, fyStart, payDate) => { const from = new Date(`${fyStart + 1}-04-01T00:00:00`), to = new Date(payDate + 'T00:00:00'), days = Math.max(0, Math.round((to - from) / 864e5));
+    return Object.fromEntries(H.map(h => [h, Math.round((+amt[h] || 0) * 0.18 * days / 365)])); };
+  return { USE, ORDER, on, calc, snap, yearEnd, interest, useOf, tmOf, capList, lifeEnd, monthsBetween, tot, Z, add, mul };
+})();
 
 /* =====================================================================
    GSTR-2B RECONCILIATION  - decisions, carry-forward, supplier follow-up, IMS
@@ -4742,6 +4877,8 @@ const RECO = (() => {
     // v75: ITC in 2B that is not taken this month — the portal puts all 2B ITC in 4(A), so this goes to 4(B)(2) temporary reversal
     // v100: a credit note kept pending / rejected is simply not reduced from ITC this month (never a minus figure in 4(B)(2))
     const hold = (o, from2b) => { if (tax(o) < 0) { add(cnHeld, o); return; } add(held0, o); if (from2b) add(held2b, o); };
+    const took = [], add0 = add;   // v104: every document whose ITC is claimed this month (for Rule 42/43 common credit)
+    const addC = (it, d) => { add0(c, d); if (d) took.push({ k: it.k || GR.docKey(d), d, b: it.b || null }); };
     list.forEach(it => {
       const a = GR.effA(reco, it.k), x = it.x, b = it.b;
       if ((x && x.rc) || (b && b.rc)) return;                                  // reverse charge — cash, see draft 3B
@@ -4749,25 +4886,26 @@ const RECO = (() => {
       if (x && x.na && method !== 'books') return;                              // v102: ITC not available as per 2B — never claimed (goes to 4(D)(2)), even when the bill differs or is linked
       if (a === 'block' && tax(x || b) > 0) { add(blocked, x || b); return; }   // v100: blocked u/s 17(5) — shown in 4(A), reversed in 4(B)(1)
       if (method === 'books') {                                                 // credit as per books; 2B only tracked
-        if (b) { if ((dec[it.k] || {}).a === 'noclaim') hold(b, false); else add(c, b); return; }
-        if (it.st === '2b_only') { if (TAKE.includes(a)) add(c, x); else { hold(x, true); if (!a) undecided.push(it); } }
+        if (b) { if ((dec[it.k] || {}).a === 'noclaim') hold(b, false); else addC(it, b); return; }
+        if (it.st === '2b_only') { if (TAKE.includes(a)) addC(it, x); else { hold(x, true); if (!a) undecided.push(it); } }
         return;                                                                 // carried: already claimed when booked
       }
-      if (it.st === 'confirm') { if (TAKE.includes(a)) add(c, x); else { hold(x, true); if (!a) undecided.push(it); } return; }
-      if (it.st === 'matched') add(c, x);
-      else if (it.st === 'carried') { add(c, x); add(carried, x); }
+      if (it.st === 'confirm') { if (TAKE.includes(a)) addC(it, x); else { hold(x, true); if (!a) undecided.push(it); } return; }
+      if (it.st === 'matched') addC(it, x);
+      else if (it.st === 'carried') { addC(it, x); add(carried, x); }
       else if (it.st === 'mismatch') {
         if (!a) undecided.push(it);
         if (a === 'reject') hold(x, true);
-        else if (a === 'acc2b' || a === 'ignore') add(c, x);
-        else add(c, Math.abs(tax(b)) <= Math.abs(tax(x)) ? b : x);             // until decided: the lower of books and 2B
-      } else if (it.st === 'gstin_diff' || it.st === 'suggest') { if (a === 'link' || a === 'fixbooks') add(c, x); else { hold(x, true); if (!a) undecided.push(it); } }
-      else if (it.st === '2b_only') { if (!a) undecided.push(it); if (TAKE.includes(a)) add(c, x); else hold(x, true); }
+        else if (a === 'acc2b' || a === 'ignore') addC(it, x);
+        else addC(it, Math.abs(tax(b)) <= Math.abs(tax(x)) ? b : x);             // until decided: the lower of books and 2B
+      } else if (it.st === 'gstin_diff' || it.st === 'suggest') { if (a === 'link' || a === 'fixbooks') addC(it, x); else { hold(x, true); if (!a) undecided.push(it); } }
+      else if (it.st === '2b_only') { if (!a) undecided.push(it); if (TAKE.includes(a)) addC(it, x); else hold(x, true); }
       else if (it.st === 'books_only') hold(b, false);
     });
-    (o.late || []).forEach(e => { if (!e.x.rc) { add(c, e.x); add(late, e.x); } });
-    if (method !== 'books') (b2rows || []).forEach(x => { if (/IMP|ISD/.test(x.src || '') && !x.na && !x.rc) { if (/IMP/.test(x.src || '') && GR.impHeld(reco, x)) hold(x, false); else add(other, x); } });
+    (o.late || []).forEach(e => { if (!e.x.rc) { addC({ k: e.k }, e.x); add(late, e.x); } });
+    if (method !== 'books') (b2rows || []).forEach(x => { if (/IMP|ISD/.test(x.src || '') && !x.na && !x.rc) { if (/IMP/.test(x.src || '') && GR.impHeld(reco, x)) hold(x, false); else { add(other, x); took.push({ k: GR.docKey(x), d: x }); } } });
     add(c, other);
+    Object.defineProperty(c, 'took', { value: took, enumerable: false });
     if (method !== 'books') Object.defineProperty(c, 'held2b', { value: held2b, enumerable: false });   // read by draft3b
     Object.defineProperty(c, 'blocked175', { value: blocked, enumerable: false });
     return { claim: c, held: held0, held2b, carried, other, late, undecided, blocked, cnHeld };
@@ -4889,6 +5027,12 @@ async function offerRule(c, sug, side, action) {
 }
 const MATCHM = { gstin_inv: ['GSTIN + bill no (standard)', 'A bill matches when the supplier GSTIN and bill no are the same and the tax is within ₹10.'],
   inv_tax: ['Bill no + tax first, then GSTIN', 'First match on bill no and tax amount (within ₹10) even if the GSTIN in books is different or blank — shown as "GSTIN differs". Bills left over are then matched by GSTIN.'] };
+async function setCC(c, cc) {   // v104: common credit settings + capital goods register (clients.cc)
+  const clean = { on: !!cc.on, d2: !!cc.d2, cap: (cc.cap || []).map(x => { const y = { ...x }; delete y.unsaved; return y; }) };
+  const { error } = await safe(sb.rpc('set_common_credit', { p_client: c.id, p_cc: clean }));
+  if (error) { toast(/set_common_credit|cc/.test(error.message || '') ? 'Run update-common-credit.sql in Supabase first' : friendly(error), true); return false; }
+  c.cc = clean; const k = clients.find(x => x.id === c.id); if (k && k !== c) k.cc = clean; return true;
+}
 async function setRecoMatch(c, vm) {   // v69
   const { error } = await safe(sb.rpc('set_reco_match', { p_client: c.id, p_match: vm }));
   if (error) { toast(/set_reco_match|reco_match/.test(error.message || '') ? 'Run update-reco-match.sql in Supabase first' : friendly(error), true); return false; }
@@ -5202,6 +5346,7 @@ const gTax = o => GR.tax(o || {});
 // v90: GST review shows exact amounts (paise) — no rounding to rupees, so ITC / tax match the portal to the paisa
 const gst$ = n => { const v = (Math.round((+n || 0) * 100) / 100) || 0, frac = Math.abs(v % 1) > 0.0001; return '₹' + v.toLocaleString('en-IN', { minimumFractionDigits: frac ? 2 : 0, maximumFractionDigits: 2 }); };
 let grPos = null, grLastStep = {}, grPayX = null;   // v57: open return + step in GST review
+let grCcF = 'all', grCcQ = '';   // v104 common credit list filter / search
 let grOv = true, gr3Last = 's2', grClient = '', grMonth = prevMonth(), grTab = 'g1', grRecFilter = 'books_only', grRecView = 'inv', grImsF = 'all';
 
 VIEWS.gst = async v => {
@@ -5249,7 +5394,7 @@ VIEWS.gst = async v => {
     const next = { ...row, ...patch };
     const sm = gsum(next);
     const st2 = recoHist ? itcState(sm, next) : null, d3s = draft3b(next, sm, c, st2 && st2.ready ? st2.cl.claim : null);
-    patch.summary = { ...sm.trend, sales_n: sm.counts.sales, b2b_n: sm.counts.b2b, cash_draft: d3s.cashTotal, cash: { ...d3s.cashNeed }, cash_total: next.gstr3b && next.gstr3b.cash ? sm.trend.cash : d3s.cashTotal, deposit: d3s.depositTotal, at: new Date().toISOString(), t3b: t3bOf(d3s) };
+    patch.summary = { ...sm.trend, sales_n: sm.counts.sales, b2b_n: sm.counts.b2b, cash_draft: d3s.cashTotal, cash: { ...d3s.cashNeed }, cash_total: next.gstr3b && next.gstr3b.cash ? sm.trend.cash : d3s.cashTotal, deposit: d3s.depositTotal, at: new Date().toISOString(), t3b: t3bOf(d3s), ...(d3s.r42 ? { r42: R42.snap(d3s.r42) } : {}) };
     const { data } = await must(sb.from('gst_months').upsert({ client_id: grClient, period, ...patch }, { onConflict: 'client_id,period' }).select().single());
     row = data || { ...next, ...patch };
     if (before && Object.keys(before).length) pushUndo(before, patch);
@@ -5283,7 +5428,7 @@ VIEWS.gst = async v => {
     try { await save({ reco }); } catch (e) { toast(friendly(e), true); render(); }
   }
   const STEPS = [['s1', 'GSTR-1'], ['s2', 'Purchases & ITC'], ['s3', 'GSTR-3B'], ['s4', 'Check & verify']];
-  const stepFor = t => ({ g1: 's1', g1f: 's1', pur: 's2', b2b: 's2', recon: 's2', sup: 's2', ims: 's2', draft: 's3', checks: 's4', trend: 's4' })[t] || 's1';
+  const stepFor = t => ({ g1: 's1', g1f: 's1', pur: 's2', b2b: 's2', recon: 's2', sup: 's2', ims: 's2', draft: 's3', cc: 's3', checks: 's4', trend: 's4' })[t] || 's1';
   const FIRST = { s1: 'g1', s2: 'recon', s3: 'draft', s4: 'checks' };
   async function loadHist() {
     const from = new Date(period + 'T00:00:00'); from.setMonth(from.getMonth() - 18);
@@ -5381,12 +5526,12 @@ VIEWS.gst = async v => {
       gstr1: [{ key: 'g1d', subs: [] }, { key: 'g1', subs: [] }, { key: 'g1v', subs: [] }, { key: 'g1u', subs: [] }, { key: 'g1f', subs: [] }],
       gstr3b: [{ key: 'pur', subs: [M !== '2b_confirm' && ['pur', 'Books (purchase register)'], ['b2b', 'GSTR-2B']].filter(Boolean) },
         { key: 'recon', subs: [['recon', M === '2b_confirm' ? 'Client confirms 2B' : '2B vs Books'], M !== '2b_confirm' && ['sup', `Supplier follow-up${st.sup.length ? ' · ' + st.sup.length : ''}`], ['ims', 'IMS actions']].filter(Boolean) },
-        { key: 'draft', subs: [['draft', 'Draft GSTR-3B'], ['checks', 'GSTR-1 vs 3B checks'], ['trend', 'Last 6 months']] },
+        { key: 'draft', subs: [['draft', 'Draft GSTR-3B'], R42.on(c) && ['cc', `Common credit (Rule 42/43)${D3.r42 ? ' · ' + gst$(R42.tot(D3.r42.rev)) : ''}`], ['checks', 'GSTR-1 vs 3B checks'], ['trend', 'Last 6 months']].filter(Boolean) },
         { key: 'g3v', subs: [] }, { key: 'g3p', subs: [] }, { key: 'g3f', subs: [] }] };
     const curNo = k => { const i = FL[k].findIndex(x => x.cur); return i >= 0 ? i + 1 : FL[k].length; };
     if (grOv || !grPos) {
       if (grOv) { const t1 = taskOf('gstr1'); grPos = (t1 && t1.status === 'Filed') || (revs.gstr1 && revs.gstr1.state === 'sent_client') ? { ret: 'gstr3b', s: curNo('gstr3b') } : { ret: 'gstr1', s: curNo('gstr1') }; grTab = ''; }
-      else { const P0 = { g1d: ['gstr1', 1], g1: ['gstr1', 2], g1v: ['gstr1', 3], g1u: ['gstr1', 4], g1f: ['gstr1', 5], pur: ['gstr3b', 1], b2b: ['gstr3b', 1], recon: ['gstr3b', 2], sup: ['gstr3b', 2], ims: ['gstr3b', 2], draft: ['gstr3b', 3], checks: ['gstr3b', 3], trend: ['gstr3b', 3], g3v: ['gstr3b', 4], g3p: ['gstr3b', 5], g3f: ['gstr3b', 6] }[grTab] || ['gstr1', 1];
+      else { const P0 = { g1d: ['gstr1', 1], g1: ['gstr1', 2], g1v: ['gstr1', 3], g1u: ['gstr1', 4], g1f: ['gstr1', 5], pur: ['gstr3b', 1], b2b: ['gstr3b', 1], recon: ['gstr3b', 2], sup: ['gstr3b', 2], ims: ['gstr3b', 2], draft: ['gstr3b', 3], cc: ['gstr3b', 3], checks: ['gstr3b', 3], trend: ['gstr3b', 3], g3v: ['gstr3b', 4], g3p: ['gstr3b', 5], g3f: ['gstr3b', 6] }[grTab] || ['gstr1', 1];
         grPos = { ret: P0[0], s: P0[1] }; }
       grOv = false;
     }
@@ -5497,7 +5642,7 @@ VIEWS.gst = async v => {
     const sent = ((rev && rev.client_sent) || []).slice().reverse().map(x => `<li>${esc(x.what || 'Workings')} → ${esc(x.to)} <span class="muted small">${sh(x.at)}${x.auto ? ' · automatic' : ''} · ${esc(profName(x.by) || '')}</span></li>`).join('');
     const dr = rev && rev.draft;
     const draftRow = ['draft', 'changes', 'sent'].includes(RS) ? `<div class="rev-d"><span class="rev-di" aria-hidden="true">PDF</span><div><b>${K.label} draft from the portal</b><br>
-        ${dr ? `<span class="small">${esc(dr.name)} <span class="muted">· ${dr.src === 'api' ? 'fetched' : 'uploaded'} ${sh(dr.at)}</span></span>` : '<span class="small muted">Not added — the tracker\'s own summary PDF (portal format) goes instead.</span>'}</div>
+        ${dr ? `<span class="small">${esc(dr.name)} <span class="muted">· ${dr.src === 'api' ? 'fetched' : dr.src === 'addon' ? 'from the portal (JLR add-on)' : 'uploaded'} ${sh(dr.at)}</span></span>` : '<span class="small muted">Not added — the tracker\'s own summary PDF (portal format) goes instead.</span>'}</div>
         <span class="spacer"></span><button class="btn sm" data-rev="draft" data-rk="${kind}">${dr ? 'Replace' : 'Upload PDF'}</button><button class="btn sm" data-rev="fetch" data-rk="${kind}" title="Uses the GST API">Fetch from portal</button>${dr ? `<button class="link small danger-t" data-rev="undraft" data-rk="${kind}">Remove</button>` : ''}</div>` : '';
     const body = {
       draft: `${locked ? `<p class="note warn small">${K.label} can go for verification only after 2B is complete: ${G3gate.why.map(esc).join(' · ')}</p>` : ''}<p>Send the ${K.label} workings to <b>${sn}</b>: the portal draft PDF and the ${K.short} workings (Excel). The senior approves from the mail — by the button or by replying.</p>
@@ -5612,13 +5757,18 @@ VIEWS.gst = async v => {
     modal(`ITC method — ${c.name}`, `<p class="muted small" style="margin-top:0">How input tax credit is worked out for this client. Applies to every month.</p>
       <div class="itcm">${Object.entries(ITCM).map(([k, [l, d]]) => `<label class="itcm-o"><input type="radio" name="itcm" value="${k}" ${cur === k ? 'checked' : ''}><span><b>${l}</b><small>${d}</small></span></label>`).join('')}</div>
       <h4 style="margin:16px 0 6px">How books are matched with 2B</h4>
-      <div class="itcm">${Object.entries(MATCHM).map(([k, [l, d]]) => `<label class="itcm-o"><input type="radio" name="rmatch" value="${k}" ${curM === k ? 'checked' : ''}><span><b>${l}</b><small>${d}</small></span></label>`).join('')}</div>`, {
+      <div class="itcm">${Object.entries(MATCHM).map(([k, [l, d]]) => `<label class="itcm-o"><input type="radio" name="rmatch" value="${k}" ${curM === k ? 'checked' : ''}><span><b>${l}</b><small>${d}</small></span></label>`).join('')}</div>
+      <h4 style="margin:16px 0 6px">Common credit — Rule 42 / 43</h4>
+      <div class="itcm"><label class="itcm-o"><input type="checkbox" name="ccon" ${R42.on(c) ? 'checked' : ''}><span><b>This client has exempt supplies too</b><small>e.g. a hospital (patient care is exempt). Each purchase is marked taxable only / exempt only / common / capital goods, and the exempt share of common credit is reversed in 3B 4(B)(1) every month.</small></span></label>
+        <label class="itcm-o"><input type="checkbox" name="ccd2" ${(c.cc || {}).d2 ? 'checked' : ''}><span><b>Also reverse 5% of common credit for non-business use (D2)</b><small>Only if common inputs are partly used for non-business purposes.</small></span></label></div>`, {
       saveText: 'Save', onSave: async el => {
+        const ccOn = !!($('[name=ccon]', el) || {}).checked, ccD2 = !!($('[name=ccd2]', el) || {}).checked;
+        if (ccOn !== R42.on(c) || ccD2 !== !!(c.cc || {}).d2) { if (!await setCC(c, { ...(c.cc || {}), on: ccOn, d2: ccD2 })) return false; toast(ccOn ? 'Common credit is on — see GSTR-3B step 3 → Common credit' : 'Common credit is off'); if (ccOn) { grTab = 'cc'; grPos = { ret: 'gstr3b', s: 3 }; } }
         const vm = ($('[name=rmatch]:checked', el) || {}).value;
         if (vm && vm !== curM) {   // v69
           if (!await setRecoMatch(c, vm)) return false; recoHist = null;
         }
-        const v = ($('[name=itcm]:checked', el) || {}).value; if (!v || v === cur) { if (vm !== curM) render(); return; }
+        const v = ($('[name=itcm]:checked', el) || {}).value; if (!v || v === cur) { render(); return; }
         const { error } = await safe(sb.rpc('set_itc_method', { p_client: c.id, p_method: v }));
         if (error) { toast(/set_itc_method|itc_method/.test(error.message || '') ? 'Run update-session16.sql in Supabase first' : friendly(error), true); return false; }
         c.itc_method = v; recoHist = null; toast('ITC method saved'); render();
@@ -5632,6 +5782,7 @@ VIEWS.gst = async v => {
     const o = $('#grOut', body), row4 = (l, x, cls = '') => `<tr class="${cls}"><td>${l}</td><td class="r">${gst$(x.t)}</td><td class="r">${gst$(x.ig)}</td><td class="r">${gst$(x.cg)}</td><td class="r">${gst$(x.sg)}</td><td class="r">${gst$(x.cs)}</td></tr>`;
     const th = '<thead><tr><th></th><th class="r">Taxable</th><th class="r">IGST</th><th class="r">CGST</th><th class="r">SGST</th><th class="r">Cess</th></tr></thead>';
     if (grTab === 'draft') { renderDraft3b(o, sm, st); return; }
+    if (grTab === 'cc') { renderCC(o, sm, st); return; }
     if (grTab === 'g1f') { renderG1Filed(o); return; }
     if (grTab === 'pur' || grTab === 'b2b') { renderBills(o, grTab === 'pur' ? 'purchases' : 'gstr2b', sm); return; }
     if (grTab === 'recon') { grRecView = 'inv'; renderReco(o, sm, st); return; }
@@ -5749,7 +5900,7 @@ VIEWS.gst = async v => {
         <tr class="sub"><td colspan="5"><b>(A) ITC available (whether in full or part)</b></td></tr>
         ${tr('(1) Import of goods', D.imp, '', h4)}${tr('(2) Import of services', { ig: 0, cg: 0, sg: 0, cs: 0 }, '', h4)}${tr('(3) Inward supplies liable to reverse charge', D.d, '', h4)}${tr('(4) Inward supplies from ISD', D.isd, '', h4)}${tr('(5) All other ITC', D.a5, '', h4)}
         <tr class="sub"><td colspan="5"><b>(B) ITC reversed</b></td></tr>
-        ${tr(`(1) As per rules 38, 42 &amp; 43 of CGST Rules and section 17(5)${D.blk175 && gTax(D.blk175) ? ` <span class="muted small">— incl. ${gst$(gTax(D.blk175))} blocked u/s 17(5)</span>` : ''}`, D.B1, '', h4)}${tr(`(2) Others (temporary reversal)${D.held2b && gTax(D.held2b) ? ` <span class="muted small">— incl. ${gst$(gTax(D.held2b))} in 2B not taken this month${gTax(D.B2) - gTax(D.held2b) > 0.5 ? ` + ${gst$(gTax(D.B2) - gTax(D.held2b))} typed` : ''}</span>` : ''}`, D.B2, gTax(D.B2) ? 'warn-row' : '', h4)}
+        ${tr(`(1) As per rules 38, 42 &amp; 43 of CGST Rules and section 17(5)${[D.blk175 && gTax(D.blk175) ? `${gst$(gTax(D.blk175))} blocked u/s 17(5)` : '', D.r42 && R42.tot(D.r42.rev) ? `${gst$(R42.tot(D.r42.rev))} common credit — <button class="link small" data-gt="cc">Rule 42/43 working</button>` : ''].filter(Boolean).map((x, i, A) => `${i ? '' : ' <span class="muted small">— incl. '}${x}${i === A.length - 1 ? '</span>' : ' + '}`).join('')}`, D.B1, '', h4)}${tr(`(2) Others (temporary reversal)${D.held2b && gTax(D.held2b) ? ` <span class="muted small">— incl. ${gst$(gTax(D.held2b))} in 2B not taken this month${gTax(D.B2) - gTax(D.held2b) > 0.5 ? ` + ${gst$(gTax(D.B2) - gTax(D.held2b))} typed` : ''}</span>` : ''}`, D.B2, gTax(D.B2) ? 'warn-row' : '', h4)}
         ${tr('<b>(C) Net ITC available (A) − (B)</b>', D.C, 'tot', h4)}
         <tr class="sub"><td colspan="5"><b>(D) Other details</b></td></tr>
         ${tr('(1) ITC reclaimed which was reversed under 4(B)(2) earlier', D.D1, '', h4)}${tr('(2) Ineligible ITC under section 16(4) &amp; ITC restricted due to PoS rules / not available in 2B', D.D2, '', h4)}
@@ -5782,6 +5933,160 @@ VIEWS.gst = async v => {
       rsv.disabled = true; try { await save({ reco }); toast('Unregistered RCM saved — added to 3.1(d), cash and 4(A)(3)'); } catch (e) { rsv.disabled = false; toast(friendly(e), true); }
     };
     $$('[data-rcmu]', o).forEach(i => i.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); rsv && rsv.click(); } }));
+  }
+  // ===== v104: Common credit (Rule 42 / 43) — mark each claimed bill, turnover split, capital goods register, year-end =====
+  function renderCC(o, sm, st) {
+    st = st || itcState(sm);
+    if (!R42.on(c)) { o.innerHTML = `<p class="muted">Common credit is off for ${esc(c.name)}. Switch it on in <button class="link" data-itcm2>ITC method</button> if this client has exempt supplies (e.g. a hospital).</p>`; const b = $('[data-itcm2]', o); if (b) b.onclick = () => itcMethodDialog(); return; }
+    const D = draft3b(row, sm, c, st.ready ? st.cl.claim : null), R = D.r42, reco = row.reco || {}, use = reco.use || {}, h4 = ['ig', 'cg', 'sg', 'cs'];
+    const took = (st.ready && st.cl.claim && st.cl.claim.took) || [];
+    const pct = R.ratio === null ? '—' : (R.ratio * 100).toFixed(2) + '%';
+    const tr4 = (l, x, cls = '') => `<tr class="${cls}"><td>${l}</td>${h4.map(h => `<td class="r">${gst$((x || {})[h] || 0)}</td>`).join('')}<td class="r"><b>${gst$(R42.tot(x))}</b></td></tr>`;
+    const th4 = '<thead><tr><th></th><th class="r">IGST</th><th class="r">CGST</th><th class="r">SGST</th><th class="r">Cess</th><th class="r">Total</th></tr></thead>';
+    // last month's marking for the same supplier (latest earlier month that marked it)
+    const lastBy = new Map(); (recoHist || []).forEach(h => Object.entries(((h.reco || {}).use) || {}).forEach(([k, u]) => { const g = k.split('|')[0]; if (g) lastBy.set(g, u); }));
+    const rowsAll = took.map(t => { const d = t.d || {}, b = t.b || {}; return { k: t.k, d, b, n: b.n || d.n || '', g: d.g || b.g || '', i: b.i || d.i || '', u: use[t.k] || '', sug: lastBy.get(d.g || b.g || '') || '' }; })
+      .sort((x, y) => String(x.n).localeCompare(String(y.n)) || String(x.i).localeCompare(String(y.i)));
+    const sugN = rowsAll.filter(x => !x.u && x.sug).length, unmarked = rowsAll.filter(x => !x.u).length;
+    const q = grCcQ.trim().toLowerCase();
+    const shown = rowsAll.filter(x => (grCcF === 'all' || (grCcF === 'none' ? !x.u : (x.u || 'common') === grCcF)) && (!q || `${x.n} ${x.g} ${x.i}`.toLowerCase().includes(q)));
+    const cnt = u => rowsAll.filter(x => (x.u || 'common') === u).length;
+    const capRows = R.cap.slice().sort((a, b) => String(b.p).localeCompare(String(a.p)));
+    const sel = (k, u) => `<select data-use="${esc(k)}" aria-label="Use of this bill">${R42.ORDER.map(v => `<option value="${v}" ${(u || 'common') === v ? 'selected' : ''}>${esc(R42.USE[v][0])}</option>`).join('')}</select>`;
+    o.innerHTML = `<div class="rc-head"><div><h3 style="margin:0">Common credit — Rule 42 &amp; 43 · ${RECO.monthName(period)}</h3><p class="muted small" style="margin:2px 0 0">Mark how each purchase is used. Bills not marked count as <b>Common</b>. The reversal goes to GSTR-3B 4(B)(1).</p></div><span class="spacer"></span>
+        <button class="btn sm" data-ccye>Year-end recalculation</button><button class="btn sm" data-itcm2>Settings</button></div>
+      <div class="rc-sum rc4">${[['Exempt ÷ total turnover', pct, R.noTurnover ? 'no turnover — type below' : `${gst$(R.E)} ÷ ${gst$(R.F)}`], ['Common credit (C2)', gst$(R42.tot(R.C2)), `${cnt('common')} bill${cnt('common') === 1 ? '' : 's'}`],
+        ['Capital goods share (Te)', gst$(R42.tot(R.Te)), `Tm ${gst$(R42.tot(R.Tm))} a month`], ['Reversed in 4(B)(1)', gst$(R42.tot(R.rev)), 'Rule 42 + 43']]
+        .map(([l, v, sub], i) => `<div class="rc-b ${i === 3 ? 'warn' : ''}"><small>${l}</small><b>${v}</b><small class="muted">${esc(sub)}</small></div>`).join('')}</div>
+      ${!st.ready ? '<p class="note warn small">The 2B vs Books match is not ready, so every bill can\'t be listed yet — all ITC is counted as Common until then.</p>' : ''}
+      ${R.noTurnover && !R.typedF ? '<p class="note warn small">No turnover in this month. Rule 42 says use the figures of the last month that had turnover — type them below.</p>' : ''}
+      <details class="gr-fold" open><summary>Turnover for the split · exempt ${gst$(R.E)} of total ${gst$(R.F)} = ${pct}</summary>
+        <p class="muted small" style="margin:6px 0">From draft 3B: exempt = 3.1(c) nil / exempt ${gst$(R.Eauto - (+((D.e || {}).t) || 0))} + 3.1(e) non-GST ${gst$((D.e || {}).t || 0)}; total = 3.1(a) + (b) + (c) + (e). For a hospital, patient care (health care services) is exempt — if it is not in the sales register / GSTR-1, type the month's figures here. Leave blank to use the 3B figures.</p>
+        <div class="toolbar"><label class="small">Exempt turnover (E) <input type="number" step="0.01" min="0" data-ccE value="${R.typedE ? esc(String(R.E)) : ''}" placeholder="${esc(String(R.Eauto))}" style="width:150px"></label>
+          <label class="small">Total turnover (F) <input type="number" step="0.01" min="0" data-ccF value="${R.typedF ? esc(String(R.F)) : ''}" placeholder="${esc(String(R.Fauto))}" style="width:150px"></label><button class="btn sm primary" data-ccEF>Save</button></div></details>
+      <details class="gr-fold" open><summary>Working · reversal ${gst$(R42.tot(R.rev))}</summary>
+        <div class="table-wrap"><table class="gr-t">${th4}<tbody>
+          <tr class="sub"><td colspan="6"><b>Rule 42 — inputs and input services</b></td></tr>
+          ${tr4('T — ITC claimed on inputs / services', R.T)}${tr4('T1 — non-business (reversed)', R.g.nonbiz)}${tr4('T2 — exempt only (reversed)', R.g.exempt)}
+          ${R42.tot(R.T3) ? tr4('T3 — blocked u/s 17(5) (already reversed in 4(B)(1))', R.T3, 'muted') : ''}${tr4('T4 — taxable only (full credit)', R.g.tax)}${tr4('C2 — common credit', R.C2, 'sub')}
+          ${tr4(`D1 — exempt share = C2 × ${pct}`, R.D1)}${tr4(`D2 — non-business share = 5% of C2${R.d2 ? '' : ' (off in settings)'}`, R.D2)}${tr4('C3 — common credit kept', R.C3)}
+          <tr class="sub"><td colspan="6"><b>Rule 43 — capital goods</b></td></tr>
+          ${tr4('Credit taken this month on capital goods (common + taxable only)', R42.add(R42.add(R42.Z(), R.g.cap_common), R.g.cap_tax))}${tr4('Capital goods exempt / non-business only — not credited (reversed)', R.capNot)}
+          ${tr4(`Tm — ${capRows.filter(x => R42.tmOf(x, period)).length} common capital goods ÷ 60 months`, R.Tm)}${tr4(`Te — exempt share = Tm × ${pct}`, R.Te)}
+          ${tr4('<b>Total reversed in GSTR-3B 4(B)(1)</b> = T1 + T2 + D1 + D2 + Te + not credited', R.rev, 'tot')}</tbody></table></div>
+        <p class="muted small">D1, D2 and Te are worked out every month on that month's turnover. After the year, D1 and D2 are worked out again on the whole year (Rule 42(2)) — use <b>Year-end recalculation</b>. Capital goods have no year-end recalculation.</p></details>
+      <details class="gr-fold" open><summary>Bills · ${rowsAll.length} claimed this month · ${unmarked} not marked</summary>
+        <div class="rc-f" role="tablist">${[['all', 'All', rowsAll.length], ['none', 'Not marked', unmarked], ...R42.ORDER.map(u => [u, R42.USE[u][0], cnt(u)])].map(([k, l, n2]) => `<button role="tab" aria-selected="${grCcF === k}" class="rc-fb ${grCcF === k ? 'on' : ''}" data-ccf="${k}">${esc(l)} · ${n2}</button>`).join('')}</div>
+        <div class="toolbar" style="margin:8px 0"><input type="search" data-ccq placeholder="Search supplier, GSTIN or bill" value="${esc(grCcQ)}" style="min-width:220px">
+          <span class="spacer"></span>${sugN ? `<button class="btn sm" data-ccsug title="For bills not marked yet, use what was marked for the same supplier in an earlier month">Use earlier marking for same suppliers · ${sugN}</button>` : ''}
+          <label class="small">Mark ticked as <select data-ccbulk>${R42.ORDER.map(v => `<option value="${v}">${esc(R42.USE[v][0])}</option>`).join('')}</select></label><button class="btn sm primary" data-ccapply>Apply</button></div>
+        ${shown.length ? `<div class="table-wrap"><table class="reco-t"><thead><tr><th><input type="checkbox" data-ccall aria-label="Tick all shown"></th><th>Supplier</th><th>Bill</th><th class="r">Taxable</th><th class="r">Tax</th><th>Use</th></tr></thead><tbody>
+          ${shown.slice(0, 600).map(x => `<tr><td><input type="checkbox" data-cck="${esc(x.k)}" aria-label="Tick ${esc(x.i)}"></td><td class="wrap"><b>${esc(x.n)}</b><div class="muted small">${esc(x.g)}</div></td><td>${esc(x.i)}<div class="muted small">${esc(GR.docWord(x.d))} ${x.d.d ? fmtDate(x.d.d) : ''}</div></td><td class="r">${gst$(x.d.t)}</td><td class="r">${gst$(gTax(x.d))}</td>
+            <td>${sel(x.k, x.u)}${!x.u ? `<div class="tiny muted">${x.sug ? `Earlier: ${esc(R42.USE[x.sug] ? R42.USE[x.sug][0] : x.sug)}` : 'Not marked — counted as Common'}</div>` : ''}</td></tr>`).join('')}</tbody></table></div>${shown.length > 600 ? '<p class="muted small">Showing the first 600 — search or filter to see the rest.</p>' : ''}`
+          : '<div class="empty">No bills here.</div>'}</details>
+      <details class="gr-fold" ${capRows.length ? 'open' : ''}><summary>Capital goods register (Rule 43) · ${capRows.length} item${capRows.length === 1 ? '' : 's'} · Tm this month ${gst$(R42.tot(R.Tm))}</summary>
+        <p class="muted small" style="margin:6px 0">Bills marked as capital goods are added here by themselves. Add capital goods bought before you started using the tracker with <b>Add capital good</b> (only the ones still inside their 5-year life matter).</p>
+        <div class="toolbar"><button class="btn sm primary" data-capadd>Add capital good</button></div>
+        ${capRows.length ? `<div class="table-wrap"><table class="reco-t"><thead><tr><th>Month</th><th>Supplier · bill</th><th>Description</th><th>Use</th><th class="r">ITC (Tc)</th><th class="r">Tm a month</th><th>Life ends</th><th></th></tr></thead><tbody>
+          ${capRows.map(x => { const tm = R42.tmOf(x, period), left = 59 - R42.monthsBetween(String(x.p).slice(0, 7), period.slice(0, 7));
+            return `<tr class="${x.out && period.slice(0, 7) >= String(x.out).slice(0, 7) ? 'muted' : ''}"><td>${RECO.monthName(x.p)}</td><td class="wrap"><b>${esc(x.n || '')}</b><div class="muted small">${esc(x.i || '')}${x.src ? '' : ' · added by hand'}${x.unsaved ? ' · <span class="late">saving…</span>' : ''}</div></td><td class="wrap small">${esc(x.desc || '')}</td>
+              <td class="small">${esc({ common: 'Common', tax: 'Taxable only', exempt: 'Exempt / non-business' }[x.use] || x.use)}</td><td class="r">${gst$(R42.tot(x))}</td><td class="r">${tm ? gst$(R42.tot(tm)) : '—'}</td>
+              <td class="small">${RECO.monthName(R42.lifeEnd(x))}${x.out ? `<div class="late tiny">Not used from ${RECO.monthName(x.out)}</div>` : left >= 0 && left <= 59 ? `<div class="muted tiny">${left} month${left === 1 ? '' : 's'} left</div>` : ''}</td>
+              <td class="row-btns">${x.unsaved ? '' : `<button class="btn sm" data-capedit="${esc(x.id)}">Edit</button>${x.src ? '' : `<button class="link small danger-t" data-capdel="${esc(x.id)}">Delete</button>`}`}</td></tr>`; }).join('')}</tbody></table></div>` : '<div class="empty">No capital goods yet.</div>'}
+      </details>`;
+    // unsaved capital goods (just marked) → save them to the register
+    renderCC.tried = renderCC.tried || new Set();
+    const fresh = capRows.filter(x => x.unsaved && !renderCC.tried.has(x.src));
+    if (fresh.length && !renderCC.busy) { fresh.forEach(x => renderCC.tried.add(x.src)); renderCC.busy = true; syncCap().finally(() => { renderCC.busy = false; }); }
+    $$('[data-itcm2]', o).forEach(b => b.onclick = () => itcMethodDialog());
+    $('[data-ccye]', o).onclick = () => yearEndDialog();
+    $$('[data-ccf]', o).forEach(b => b.onclick = () => { grCcF = b.dataset.ccf; renderCC(o, sm, st); });
+    const qi = $('[data-ccq]', o); if (qi) qi.oninput = () => { clearTimeout(renderCC.t); renderCC.t = setTimeout(() => { grCcQ = qi.value; renderCC(o, sm, st); const n = $('[data-ccq]', o); if (n) { n.focus(); n.setSelectionRange(n.value.length, n.value.length); } }, 300); };
+    $$('[data-use]', o).forEach(s2 => s2.onchange = () => setUse({ [s2.dataset.use]: s2.value }));
+    const all = $('[data-ccall]', o); if (all) all.onchange = () => $$('[data-cck]', o).forEach(x => { x.checked = all.checked; });
+    $('[data-ccapply]', o).onclick = () => { const ks = $$('[data-cck]:checked', o).map(x => x.dataset.cck); if (!ks.length) return toast('Tick the bills first', true);
+      const v = $('[data-ccbulk]', o).value; setUse(Object.fromEntries(ks.map(k => [k, v]))); };
+    const sg = $('[data-ccsug]', o); if (sg) sg.onclick = () => { const m = Object.fromEntries(rowsAll.filter(x => !x.u && x.sug && R42.USE[x.sug]).map(x => [x.k, x.sug])); setUse(m); };
+    $('[data-ccEF]', o).onclick = async () => {
+      const E = $('[data-ccE]', o).value.trim(), F = $('[data-ccF]', o).value.trim();
+      if ((E === '') !== (F === '')) return toast('Type both — exempt and total turnover — or leave both blank', true);
+      if (E !== '' && num(E) > num(F)) return toast('Exempt turnover cannot be more than total turnover', true);
+      const r0 = JSON.parse(JSON.stringify(row.reco || {})), w = { ...(r0.w3b || {}) };
+      if (E === '') delete w.r42; else w.r42 = { E: num(E), F: num(F) };
+      r0.w3b = { ...w, by: me.id, at: new Date().toISOString() };
+      try { await save({ reco: r0 }); toast('Turnover saved'); } catch (e) { toast(friendly(e), true); }
+    };
+    $('[data-capadd]', o).onclick = () => capDialog(null);
+    $$('[data-capedit]', o).forEach(b => b.onclick = () => capDialog(((c.cc || {}).cap || []).find(x => x.id === b.dataset.capedit)));
+    $$('[data-capdel]', o).forEach(b => b.onclick = async () => { if (!confirm('Delete this capital good from the register?')) return;
+      if (await setCC(c, { ...(c.cc || {}), cap: ((c.cc || {}).cap || []).filter(x => x.id !== b.dataset.capdel) })) render(); });
+  }
+  // save the use of one or more bills; capital goods marked / unmarked are added to / taken out of the register
+  async function setUse(map) {
+    const r0 = JSON.parse(JSON.stringify(row.reco || {})); r0.use = { ...(r0.use || {}) };
+    Object.entries(map).forEach(([k, v]) => { if (v) r0.use[k] = v; else delete r0.use[k]; });
+    try { await save({ reco: r0 }); } catch (e) { toast(friendly(e), true); return; }
+    await syncCap(Object.keys(map)); toast(Object.keys(map).length > 1 ? `${Object.keys(map).length} bills marked` : 'Saved');
+  }
+  // register ⇄ this month's capital-goods bills
+  async function syncCap(changed) {
+    const sm = gsum(row), st = itcState(sm); if (!st.ready || !R42.on(c)) return;
+    const took = (st.cl.claim && st.cl.claim.took) || [], ym = period.slice(0, 7), use = (row.reco || {}).use || {}, cap = ((c.cc || {}).cap || []).slice();
+    let dirty = false;
+    took.forEach(t => { const u = use[t.k] || 'common', src = ym + '|' + t.k, i = cap.findIndex(x => x.src === src);
+      if (/^cap_/.test(u)) { const d = t.d || {}, b = t.b || {};
+        if (i < 0) { cap.push({ id: 'cg' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), src, p: ym + '-01', n: b.n || d.n || '', g: d.g || '', i: b.i || d.i || '', desc: '', ig: GR.r2(d.ig || 0), cg: GR.r2(d.cg || 0), sg: GR.r2(d.sg || 0), cs: GR.r2(d.cs || 0), use: u.slice(4) }); dirty = true; }
+        else if (cap[i].use !== u.slice(4)) { cap[i] = { ...cap[i], use: u.slice(4) }; dirty = true; } }
+      else if (i >= 0) { cap.splice(i, 1); dirty = true; } });
+    void changed;
+    if (dirty && await setCC(c, { ...(c.cc || {}), cap })) render();
+  }
+  function capDialog(x) {
+    const v = x || { p: period, use: 'common' }, h4 = ['ig', 'cg', 'sg', 'cs'], L = { ig: 'IGST', cg: 'CGST', sg: 'SGST', cs: 'Cess' };
+    modal(x ? 'Capital good' : 'Add capital good', `<p class="muted small" style="margin-top:0">Rule 43: credit on a common capital good is spread over 60 months from the month of the bill. Each month, the exempt share of 1/60 is reversed.</p>
+      <div class="form-grid"><label>Month of bill<input type="month" name="p" value="${esc(String(v.p || period).slice(0, 7))}" ${x && x.src ? 'disabled' : ''}></label><label>Used for<select name="use">${[['common', 'Common (taxable + exempt)'], ['tax', 'Taxable only'], ['exempt', 'Exempt / non-business only']].map(([k, l]) => `<option value="${k}" ${v.use === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+        <label>Supplier<input name="n" value="${esc(v.n || '')}" ${x && x.src ? 'disabled' : ''}></label><label>Bill no<input name="i" value="${esc(v.i || '')}" ${x && x.src ? 'disabled' : ''}></label>
+        <label style="grid-column:1/-1">Description<input name="desc" value="${esc(v.desc || '')}" placeholder="e.g. Ultrasound machine, OT lights"></label>
+        <label>Not used from (sold / scrapped)<input type="month" name="out" value="${esc(String(v.out || '').slice(0, 7))}"></label></div>
+      <div class="form-grid g4" style="margin-top:8px">${h4.map(h => `<label>${L[h]}<input type="number" step="0.01" min="0" name="${h}" value="${esc(String(v[h] ?? ''))}" ${x && x.src ? 'disabled' : ''}></label>`).join('')}</div>
+      ${x && x.src ? '<p class="muted small">Amounts come from the bill. To change them, change the bill\'s use in the list.</p>' : ''}`, {
+      saveText: 'Save', onSave: async el => {
+        const f = n => ($(`[name=${n}]`, el) || {}).value || '';
+        const nx = { ...v, id: v.id || 'cg' + Date.now().toString(36), use: f('use'), desc: f('desc').trim(), out: f('out') ? f('out') + '-01' : '' };
+        if (!(x && x.src)) { if (!f('p')) { toast('Pick the month', true); return false; } Object.assign(nx, { p: f('p') + '-01', n: f('n').trim(), i: f('i').trim() }); h4.forEach(h => { nx[h] = num(f(h)); }); if (!R42.tot(nx)) { toast('Type the ITC on the bill', true); return false; } }
+        delete nx.unsaved;
+        const cap = ((c.cc || {}).cap || []).filter(y => y.id !== nx.id).concat([nx]);
+        if (!await setCC(c, { ...(c.cc || {}), cap })) return false; render();
+      } });
+  }
+  // Rule 42(2): D1 and D2 again on the whole financial year
+  async function yearEndDialog() {
+    const y0 = +period.slice(0, 4), m0 = +period.slice(5, 7), cur = m0 >= 4 ? y0 : y0 - 1, def = m0 <= 9 ? cur - 1 : cur;
+    const m = modal(`Year-end recalculation (Rule 42) — ${c.name}`, `<div class="toolbar"><label>Financial year <select data-yefy>${[cur, cur - 1, cur - 2].map(y => `<option value="${y}" ${y === def ? 'selected' : ''}>FY ${y}-${String(y + 1).slice(2)}</option>`).join('')}</select></label>
+      <label>Paid on <input type="date" data-yepay value="${iso(new Date())}"></label></div><div data-yeout><div class="loading">Loading…</div></div>`, { wide: true });
+    const draw = async () => {
+      const fy = +$('[data-yefy]', m.el).value, out = $('[data-yeout]', m.el);
+      const r = await safe(sb.from('gst_months').select('period,summary').eq('client_id', c.id).gte('period', `${fy}-04-01`).lte('period', `${fy + 1}-03-01`).order('period'));
+      const L = (r.data || []).map(x => ({ p: x.period, s: x.summary && x.summary.r42 })), Y = R42.yearEnd(L, !!(c.cc || {}).d2), missing = L.filter(x => !x.s).map(x => RECO.monthName(x.p));
+      const pay = $('[data-yepay]', m.el).value || iso(new Date()), I = R42.interest(Y.pay, fy, pay), h4 = ['ig', 'cg', 'sg', 'cs'];
+      const t = (l, x, cls = '') => `<tr class="${cls}"><td>${l}</td>${h4.map(h => `<td class="r">${gst$((x || {})[h] || 0)}</td>`).join('')}<td class="r"><b>${gst$(R42.tot(x))}</b></td></tr>`;
+      out.innerHTML = `${missing.length ? `<p class="note warn small">Not worked out yet for: ${esc(missing.join(', '))}. Open each month's Common credit tab once (or save the month) so it is counted.</p>` : ''}
+        <p class="small">${Y.months} month${Y.months === 1 ? '' : 's'} · exempt ${gst$(Y.E)} of total ${gst$(Y.F)} = <b>${(Y.ratio * 100).toFixed(2)}%</b></p>
+        <div class="table-wrap"><table class="gr-t"><thead><tr><th></th><th class="r">IGST</th><th class="r">CGST</th><th class="r">SGST</th><th class="r">Cess</th><th class="r">Total</th></tr></thead><tbody>
+          ${t('Common credit C2 — whole year', Y.C2)}${t('D1 on the year\'s turnover', Y.D1y)}${t('D2 (5%) on the year', Y.D2y)}${t('Less: D1 reversed month by month', Y.D1m)}${t('Less: D2 reversed month by month', Y.D2m)}
+          ${t('<b>Still to reverse (pay)</b>', Y.pay, R42.tot(Y.pay) ? 'warn-row' : '')}${t(`Interest 18% from 1 Apr ${fy + 1} to ${fmtDate(pay)}`, I)}${t('<b>Reversed too much — claim back</b>', Y.back, R42.tot(Y.back) ? 'tot' : '')}</tbody></table></div>
+        <p class="muted small">Rule 42(2): do this by the due date of the September return after the year (GSTR-3B for September ${fy + 1}). Extra reversal: show it in 4(B)(1) with interest in 5.1, or pay by DRC-03. Excess reversal: claim it back as ITC. <b>Add to this month's 3B</b> puts the figures into ${RECO.monthName(period)} (4(B)(1), interest in 5.1, claim-back in 4(D)(1) → 4(A)(5)).</p>
+        <div class="toolbar"><button class="btn primary" data-yeadd ${R42.tot(Y.pay) || R42.tot(Y.back) ? '' : 'disabled'}>Add to ${RECO.monthName(period)} GSTR-3B</button></div>`;
+      const b = $('[data-yeadd]', out); if (b) b.onclick = async () => {
+        if (!confirm(`Add the year-end figures for FY ${fy}-${String(fy + 1).slice(2)} to ${RECO.monthName(period)}?\n\nThey are ADDED to anything already typed in 4(B)(1), 5.1 interest and 4(D)(1).`)) return;
+        const r0 = JSON.parse(JSON.stringify(row.reco || {})), w = { ...(r0.w3b || {}) }, plus = (k, x) => { const o2 = { ...(w[k] || {}) }; h4.forEach(h => { const v2 = GR.r2((+o2[h] || 0) + (+x[h] || 0)); if (v2) o2[h] = v2; }); w[k] = o2; };
+        plus('rev_perm', Y.pay); plus('int', I); plus('reclaim', Y.back); w.int_note = [w.int_note, `Rule 42 year-end FY ${fy}-${String(fy + 1).slice(2)}`].filter(Boolean).join(' · ');
+        w.r42ye = { fy, at: new Date().toISOString(), by: me.id, pay: Y.pay, int: I, back: Y.back };
+        r0.w3b = { ...w, by: me.id, at: new Date().toISOString() };
+        try { await save({ reco: r0 }); toast('Added to this month\'s GSTR-3B'); m.close(); } catch (e) { toast(friendly(e), true); }
+      };
+    };
+    $('[data-yefy]', m.el).onchange = draw; $('[data-yepay]', m.el).onchange = draw; draw();
   }
   function w3bDialog() {
     const w = ((row.reco || {}).w3b) || {}, h4 = ['ig', 'cg', 'sg', 'cs'], L = { ig: 'IGST', cg: 'CGST', sg: 'SGST', cs: 'Cess' };
@@ -7593,7 +7898,18 @@ async function fillGstWorkings(XP, templateBytes, data) {
     link(30, refs.cn.concat([cnRow]));   // Less: Credit Note = credit notes in 2B minus those kept pending (their total is shown minus)
     link(31, refs.dn);        // Add: Debit Note
     link(28, [blkRow]);       // Less: Blocked Credits - S.17(5)
-    link(34, [holdRow]);      // Less: Rule 42/43 Reversals = ITC held back
+    // v104: common credit (Rule 42/43) reversal of this month → also in "Less: Rule 42/43 Reversals"
+    const R4 = selM && selM.summary && selM.summary.r42; let r42Row = null;
+    if (R4) {
+      rw++; sh.cell(rw, 1).value('Common credit — Rule 42 / 43 reversal (goes to Summary "Less: Rule 42/43 Reversals" = part of GSTR-3B 4(B)(1)); working in sheet "Rule 42-43"')._styleId = ST.hd; rw++;
+      ['S.No', 'Item', '', 'Taxable value', 'Integrated Tax (₹)', 'Central Tax (₹)', 'State/UT Tax (₹)', 'Cess (₹)', ''].forEach((h, k) => { const cl = sh.cell(rw, k + 1); cl.value(h); cl._styleId = ST.th; }); rw++;
+      const h0 = rw, pc = R4.ratio === null || R4.ratio === undefined ? '—' : (R4.ratio * 100).toFixed(2) + '%';
+      [['T1 — non-business', R4.T1], ['T2 — exempt only', R4.T2], [`D1 — exempt share of common credit (${pc})`, R4.D1], ['D2 — 5% non-business share', R4.D2], [`Te — capital goods exempt share (${pc} of Tm)`, R4.Te], ['Capital goods not credited', R4.capNot]].forEach(([l, x], k) => {
+        [k + 1, l, '', 0, r2((x || {}).ig), r2((x || {}).cg), r2((x || {}).sg), r2((x || {}).cs), ''].forEach((v, j) => { const cl = sh.cell(rw, j + 1); if (v !== '') cl.value(v); cl._styleId = j >= 3 && j <= 7 ? ST.num : ST.lab; }); rw++; });
+      ['', 'Total Rule 42 / 43 reversal', '', ...['D', 'E', 'F', 'G', 'H'].map(cc => `=SUM(${cc}${h0}:${cc}${rw - 1})`), ''].forEach((v, j) => { const cl = sh.cell(rw, j + 1); if (typeof v === 'string' && v[0] === '=') cl.formula(v.slice(1)); else if (v !== '') cl.value(v); cl._styleId = j >= 3 && j <= 7 ? ST.numB : ST.labB; });
+      r42Row = rw; rw++;
+    }
+    link(34, r42Row ? [holdRow, r42Row] : [holdRow]);      // Less: Rule 42/43 Reversals = ITC held back (+ v104 common credit)
     S1.cell('B34')._styleId = S1.cell('C34')._styleId; S1.cell('B28')._styleId = S1.cell('C28')._styleId;
   }
   // v93: 2B detail — "2B ITC Available" / "2B ITC Not Available", one line per document with its status
@@ -7620,6 +7936,27 @@ async function fillGstWorkings(XP, templateBytes, data) {
       if (Object.keys(by).length) sh.cell(rr, 1).value(Object.entries(by).map(([k, v]) => [k, '', '', `${v.n}`, '', '', '', '', '', '', '', v.t, '', '', ''])); rr += Object.keys(by).length;
       [10, 18, 34, 20, 11, 12, 13, 12, 12, 12, 9, 13, 52, 10, 20].forEach((w, k) => sh.column(k + 1).width(w));
     });
+  }
+  // ---------- v104: "Rule 42-43" sheet — common credit working for every month of the year + capital goods register ----------
+  if (data.cc && data.cc.on) {
+    const sh = wb.addSheet('Rule 42-43'), hd = mi.cell('A4')._styleId, th = mi.cell('A3')._styleId; let rr = 1;
+    sh.cell('A1').value(`Common credit — Rule 42 (inputs, input services) and Rule 43 (capital goods) · ${data.client.name} · FY ${data.fy}`)._styleId = hd;
+    sh.cell('A2').value('Per month, as worked out in the tracker (GST review → GSTR-3B step 3 → Common credit). Tax = IGST + CGST + SGST + cess.'); rr = 4;
+    const T = x => r2(['ig', 'cg', 'sg', 'cs'].reduce((a, k) => a + (+(x || {})[k] || 0), 0));
+    const head = ['Month', 'Exempt turnover (E)', 'Total turnover (F)', 'E ÷ F', 'T1 non-business', 'T2 exempt only', 'T4 taxable only', 'C2 common', 'D1 = C2 × E÷F', 'D2 = 5% of C2', 'Tm capital goods', 'Te = Tm × E÷F', 'Capital goods not credited', 'Total reversed 4(B)(1)'];
+    head.forEach((h, k) => { const cl = sh.cell(rr, k + 1); cl.value(h); cl._styleId = th; }); rr++;
+    const first = rr;
+    months.forEach(mm => { const x = mm.summary && mm.summary.r42; if (!x) return;
+      sh.cell(rr, 1).value([[monthName(mm.period), r2(x.E), r2(x.F), x.ratio === null || x.ratio === undefined ? '' : x.ratio, T(x.T1), T(x.T2), T(x.T4), T(x.C2), T(x.D1), T(x.D2), T(x.Tm), T(x.Te), T(x.capNot), T(x.rev)]]); sh.cell(rr, 4).style('numberFormat', '0.00%'); rr++; });
+    if (rr === first) { sh.cell(rr, 1).value('No month worked out yet'); rr++; }
+    else { sh.cell(rr, 1).value('Total'); 'BCEFGHIJKLMN'.split('').forEach(cc => sh.cell(`${cc}${rr}`).formula(`SUM(${cc}${first}:${cc}${rr - 1})`)); sh.cell(rr, 4).formula(`IF(C${rr}>0,B${rr}/C${rr},0)`).style('numberFormat', '0.00%');
+      for (let k = 1; k <= head.length; k++) sh.cell(rr, k)._styleId = th; rr++; }
+    rr += 2; sh.cell(rr, 1).value('Capital goods register (Rule 43) — common goods: Tm = ITC ÷ 60 for 60 months from the month of the bill')._styleId = hd; rr++;
+    ['Month', 'Supplier', 'Bill no', 'Description', 'Used for', 'IGST', 'CGST', 'SGST', 'Cess', 'ITC total', 'Tm a month', 'Not used from'].forEach((h, k) => { const cl = sh.cell(rr, k + 1); cl.value(h); cl._styleId = th; }); rr++;
+    const cap = (data.cc.cap || []).slice().sort((a, b) => String(a.p).localeCompare(String(b.p)));
+    if (cap.length) { sh.cell(rr, 1).value(cap.map(x => [monthName(x.p), x.n || '', x.i || '', x.desc || '', { common: 'Common', tax: 'Taxable only', exempt: 'Exempt / non-business' }[x.use] || x.use, r2(x.ig), r2(x.cg), r2(x.sg), r2(x.cs), T(x), x.use === 'common' ? r2(T(x) / 60) : '', x.out ? monthName(x.out) : ''])); rr += cap.length; }
+    else { sh.cell(rr, 1).value('No capital goods'); rr++; }
+    [12, 16, 16, 9, 14, 14, 14, 14, 15, 13, 14, 14, 16, 16].forEach((w, k) => sh.column(k + 1).width(w));
   }
   // ---------- v71: the copy that goes to the senior / client — current month only, invoice-wise breakup, no Home / Reconciliation ----------
   if (data.send) {
@@ -7690,12 +8027,12 @@ async function downloadGstWorkings(c, period) {
     safe(sb.from('notices').select('*').eq('client_id', c.id).order('notice_date')),
     safe(sb.from('tasks').select('return_name,period,status,filed_on,arn').eq('client_id', c.id).ilike('return_name', 'GSTR-1%').limit(500))
   ]);
-  const months = (gm.data || []).map(r => ({ period: r.period, g1: r.g1, sales: r.sales, gstr1: r.gstr1, purchases: r.purchases, gstr2b: r.gstr2b, gstr3b: r.gstr3b, reco: r.reco, status: r.status }));
+  const months = (gm.data || []).map(r => ({ period: r.period, g1: r.g1, sales: r.sales, gstr1: r.gstr1, purchases: r.purchases, gstr2b: r.gstr2b, gstr3b: r.gstr3b, reco: r.reco, status: r.status, summary: r.summary }));
   if (!months.length) return toast('No GST data saved for this client in FY ' + fy, true);
   const g1tasks = (tk.data || []).map(t => ({ ...t, period: (periodToMonth(t.period) || '') + '-01' })).filter(t => t.period.length === 10 && t.period >= `${fyStart}-04-01` && t.period <= `${fyStart + 1}-03-01`);
   const sel = (gm.data || []).find(r => r.period === period);
   const out = await fillGstWorkings(XP, new Uint8Array(tpl), {
-    client: { name: c.name, gstin: c.gstin, trade: c.trade_name || '' }, fy, month: GW_MONTHS[(m + 8) % 12], months,
+    client: { name: c.name, gstin: c.gstin, trade: c.trade_name || '' }, cc: c.cc || null, fy, month: GW_MONTHS[(m + 8) % 12], months,
     notices: nt.error ? [] : nt.data || [], g1tasks, preparedBy: me.full_name || me.email, verifiedBy: sel && sel.verified_by ? profName(sel.verified_by) : '',
     itc2b: sel ? (() => { try { return REV.itc2bStatus(c, sel); } catch (e) { console.warn(e); return null; } })() : null });   // v99
   const blob = new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
@@ -7746,6 +8083,9 @@ const REV = (() => {
       itc: st && st.ready ? { in2b: tx(sm.itc2b), claim: tx(st.cl.claim), held: tx(st.cl.held), books: tx(sm.itcBooks), matched: L('matched').length, decide: st.decideN, missing: L('books_only').length, notbooks: L('2b_only').length + L('confirm').length } : null,
       missing: L('books_only').slice(0, 25).map(brief), notbooks: [...L('2b_only'), ...L('confirm')].slice(0, 25).map(brief),
       decide: [...L('mismatch'), ...L('suggest'), ...L('gstin_diff')].map(x => [...brief(x), (RECO.decLabel(x.st, (((row.reco || {}).dec || {})[x.k] || {}).a) || 'not decided')]).slice(0, 25),
+      r42: D3.r42 ? (() => { const R = D3.r42, f = x => ['ig', 'cg', 'sg', 'cs'].map(k => r2((x || {})[k] || 0)), pc = R.ratio === null ? '—' : (R.ratio * 100).toFixed(2) + '%';
+        return { pct: pc, E: R.E, F: R.F, rows: [['T1 Non-business (reversed)', ...f(R.g.nonbiz)], ['T2 Exempt only (reversed)', ...f(R.g.exempt)], ['T4 Taxable only (full credit)', ...f(R.g.tax)], ['C2 Common credit', ...f(R.C2)],
+          [`D1 Exempt share (${pc})`, ...f(R.D1)], ['D2 Non-business 5%', ...f(R.D2)], ['Rule 43 Tm (common capital goods / 60)', ...f(R.Tm)], [`Rule 43 Te (${pc} of Tm)`, ...f(R.Te)], ['Capital goods not credited', ...f(R.capNot)], ['Total reversed in 4(B)(1)', ...f(R.rev)]] }; })() : null,
       notes: row.notes || '', nil: ((row.reco || {}).nil) || {}
     };
   }
@@ -7774,6 +8114,7 @@ const REV = (() => {
     T('GSTR-3B — 6.1 Payment of tax', ['Tax', 'Payable', 'Paid by ITC', 'Reverse charge (cash)', 'From cash ledger', 'Cash to deposit'], S.b61);
     if (S.itc) T('ITC — GSTR-2B vs books', ['', 'Amount / count'], [['ITC in GSTR-2B', S.itc.in2b], ['ITC in books', S.itc.books], ['ITC claimed', S.itc.claim], ['Held back', S.itc.held],
       ['Bills matched', String(S.itc.matched)], ['Bills to decide', String(S.itc.decide)], ['In books, not in 2B', String(S.itc.missing)], ['In 2B, not in books', String(S.itc.notbooks)]]);
+    if (S.r42) T(`Common credit — Rule 42 / 43 (exempt ${S.r42.E.toLocaleString('en-IN')} of total ${S.r42.F.toLocaleString('en-IN')} = ${S.r42.pct})`, ['', 'IGST', 'CGST', 'SGST', 'Cess'], S.r42.rows);
     if (S.decide.length) T('Bills decided / to decide', ['Supplier', 'GSTIN', 'Bill', 'Tax (books)', 'Tax (2B)', 'Decision'], S.decide, { left: [1, 2, 5] });
     if (S.missing.length) T('In books, not in GSTR-2B (ITC held back)', ['Supplier', 'GSTIN', 'Bill', 'Tax (books)', 'Tax (2B)'], S.missing, { left: [1, 2] });
     if (S.notbooks.length) T('In GSTR-2B, not in books', ['Supplier', 'GSTIN', 'Bill', 'Tax (books)', 'Tax (2B)'], S.notbooks, { left: [1, 2] });
@@ -7836,9 +8177,9 @@ const REV = (() => {
     const y = +period.slice(0, 4), m = +period.slice(5, 7), fyStart = m >= 4 ? y : y - 1, fy = `${fyStart}-${String((fyStart + 1) % 100).padStart(2, '0')}`;
     const [XP, tpl, gm] = await Promise.all([loadXlsxPopulate(), fetch('gst-workings-master.xlsx', { cache: 'no-store' }).then(r => { if (!r.ok) throw new Error('Master template not found on the site'); return r.arrayBuffer(); }),
       must(sb.from('gst_months').select('*').eq('client_id', c.id).gte('period', `${fyStart}-04-01`).lte('period', `${fyStart + 1}-03-01`).order('period'))]);
-    const months = (gm.data || []).map(r => ({ period: r.period, g1: r.g1, sales: r.sales, gstr1: r.gstr1, purchases: r.purchases, gstr2b: r.gstr2b, gstr3b: r.gstr3b, reco: r.reco, status: r.status }));
+    const months = (gm.data || []).map(r => ({ period: r.period, g1: r.g1, sales: r.sales, gstr1: r.gstr1, purchases: r.purchases, gstr2b: r.gstr2b, gstr3b: r.gstr3b, reco: r.reco, status: r.status, summary: r.summary }));
     const sel = (gm.data || []).find(r => r.period === period);
-    const out = await fillGstWorkings(XP, new Uint8Array(tpl), { client: { name: c.name, gstin: c.gstin, trade: c.trade_name || '' }, fy, month: GW_MONTHS[(m + 8) % 12], months, notices: [], g1tasks: [],
+    const out = await fillGstWorkings(XP, new Uint8Array(tpl), { client: { name: c.name, gstin: c.gstin, trade: c.trade_name || '' }, cc: c.cc || null, fy, month: GW_MONTHS[(m + 8) % 12], months, notices: [], g1tasks: [],
       preparedBy: me.full_name || me.email, verifiedBy: sel && sel.verified_by ? profName(sel.verified_by) : '', send: true, itc2b: sel ? itc2bStatus(c, sel) : null });
     return { blob: new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), name: `GST Workings - ${c.name} - FY ${fy}.xlsx` };
   }
@@ -7934,7 +8275,7 @@ const REV = (() => {
 })();
 
 // v78: this tab's code version — when a newer app is uploaded, offer Reload and block mails from old code
-const APP_VER = 'jlr-shell-v103';
+const APP_VER = 'jlr-shell-v104';
 let appStale = false;
 async function checkAppVer() {
   try { const t = await fetch('sw.js?v=' + Date.now(), { cache: 'no-store' }).then(r => r.text()); const live = (t.match(/jlr-shell-v\d+/) || [])[0];
@@ -12522,6 +12863,6 @@ const GAME = {
   }
 };
 
-window.__tracker = { autoSendAfterAck, REV, draft3b, RULES, gstr1FromApi, GAME, ACK, dashTabs, AUDIT, IDLE, clientProblems, HEALTH, HELP, noticeLetter, BANK, bankReadFile, TDSW, MCA, BILL, parseMcaSheets, mcaPlanAll, fillGstWorkings, G1, GR, RECO, gstr3bFromApi, periodToMonth, strongPassword, periodFor, dueDateFor, parseCSV, toCSV, gstLateFee, gstInterest, tdsCalc, rocCalc, monthsSpan, tdsDepositDue, g1json, clientReportHtml, clientReportMsg, rnStage, anyDate, parseRenewalRows, gstPayDue, tdsPayDue, advInstalment, advCurrent, advDue, recurringPlan, taxMsg, addMonths, fyEndOf, obProgress, rnKind };
+window.__tracker = { autoSendAfterAck, REV, draft3b, R42, ADDON_PDF, RULES, gstr1FromApi, GAME, ACK, dashTabs, AUDIT, IDLE, clientProblems, HEALTH, HELP, noticeLetter, BANK, bankReadFile, TDSW, MCA, BILL, parseMcaSheets, mcaPlanAll, fillGstWorkings, G1, GR, RECO, gstr3bFromApi, periodToMonth, strongPassword, periodFor, dueDateFor, parseCSV, toCSV, gstLateFee, gstInterest, tdsCalc, rocCalc, monthsSpan, tdsDepositDue, g1json, clientReportHtml, clientReportMsg, rnStage, anyDate, parseRenewalRows, gstPayDue, tdsPayDue, advInstalment, advCurrent, advDue, recurringPlan, taxMsg, addMonths, fyEndOf, obProgress, rnKind };
 start();
 })();
