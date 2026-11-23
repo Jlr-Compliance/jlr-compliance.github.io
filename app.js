@@ -1049,8 +1049,8 @@ const GF_FORMS = {
     ['Declaration for specified premises', 'Annexure', 'Restaurant service in specified premises', 'addon', 3], ['Aadhaar authentication persons', 'Rule 14B', 'Select persons for Aadhaar authentication', 'addon', 3],
     ['Track application status', 'ARN', 'Officer status of every application', 'addon', 1]]]],
   annual: [['Annual returns', [
-    ['GSTR-9', 'Annual return', '12 months of GSTR-1 and 3B workings into the GSTR-9 tables', 'api', 4],
-    ['GSTR-9C', 'Reconciliation statement', 'Books vs GSTR-9 — turnover above ₹5 crore', 'api', 4]]]],
+    ['GSTR-9', 'Annual return', '12 months of GSTR-1 and 3B workings into the GSTR-9 tables', 'api', 1],
+    ['GSTR-9C', 'Reconciliation statement', 'Books vs GSTR-9 — turnover above ₹5 crore', 'api', 1]]]],
   lut: [['Letter of undertaking', [
     ['Furnish LUT', 'RFD-11', 'Exports / SEZ supplies without paying IGST — one per client per year', 'addon', 1],
     ['View my submitted LUTs', 'RFD-11 ARN', 'Earlier LUTs kept against the client', 'addon', 1]]]],
@@ -1097,6 +1097,7 @@ VIEWS.filing = async v => {
   if (gfTab === 'portal') return gfPortal(body);
   if (gfTab === 'lut') return gfLut(body);
   if (gfTab === 'reg') return gfApps(body);
+  if (gfTab === 'annual') return gfAnnual(body);
   return gfFormList(body, gfTab);
 };
 function gfFormCard(f) {
@@ -1123,7 +1124,7 @@ async function gfOverview(body, ym) {
       ${card('GSTR-1', 'Outward supplies', 'Workings → senior → upload JSON → file on portal (EVC)', '', 'returns')}${card('GSTR-3B', 'Summary return', 'Draft 3B, set-off, challan, fill on portal, file (EVC)', '', 'returns')}
       ${card('Nil returns', 'GSTR-1 / 3B', 'Marked in GST review → Mark as Nil return', '', 'gst')}${card('TDS / TCS credit received', 'GSTR-2X', 'Accept / reject TDS and TCS credit', 'Stage 2', 'other')}</div></section>
     <section class="gf-sec"><h3>Annual returns <span class="muted small">FY ${fy - 1}-${String(fy).slice(2)}</span></h3><div class="gf-grid">
-      ${card('GSTR-9', 'Annual return', `Due 31 Dec ${fy}`, 'Stage 4', 'annual')}${card('GSTR-9C', 'Reconciliation statement', `Due 31 Dec ${fy}`, 'Stage 4', 'annual')}</div></section>
+      ${card('GSTR-9', 'Annual return', `Due 31 Dec ${fy}`, '', 'annual')}${card('GSTR-9C', 'Reconciliation statement', `Due 31 Dec ${fy}`, '', 'annual')}</div></section>
     <section class="gf-sec"><h3>Registration</h3><div class="gf-grid">
       ${card('Registration applications', 'REG-01 / 14 / 16 / 21, CMP-02 / 04', 'New, amendment, composition, cancellation — with ARN tracking', 'Stage 3', 'reg')}
       ${card('LUT', 'RFD-11', `FY ${fy + 1}-${String(fy + 2).slice(2)} — file before 1 Apr ${fy + 1}`, 'Stage 3', 'lut')}</div></section>
@@ -1354,6 +1355,221 @@ function gfAppDialog(x, done) {
       toast('Saved'); done && done();
     } });
   return m;
+}
+/* =====================================================================
+   v108 stage 4: GSTR-9 and GSTR-9C workpapers
+   Portal column = what the GST portal auto-fills (read by the JLR add-on: /gstr9/details/calc, gstr3bsumm),
+   Tracker column = the 12 months of workings (gst_months.summary.t3b), Final = portal / default, or what staff type.
+   ===================================================================== */
+const G9 = (() => {
+  const H = ['t', 'ig', 'cg', 'sg', 'cs'], HT = ['ig', 'cg', 'sg', 'cs'], Z = () => ({ t: 0, ig: 0, cg: 0, sg: 0, cs: 0 }), r2 = v => Math.round((+v || 0) * 100) / 100;
+  const P = o => o ? { t: r2(o.txval), ig: r2(o.iamt), cg: r2(o.camt), sg: r2(o.samt), cs: r2(o.csamt) } : null;   // portal → ours
+  const add = (a, b, k = 1) => { const o = { ...a }; H.forEach(h => { o[h] = r2((+o[h] || 0) + k * (+((b || {})[h]) || 0)); }); return o; };
+  const sum = (...L) => L.reduce((a, b) => add(a, b), Z());
+  const ty = (arr, t) => P(((arr || []).find(x => x.ty === t)) || null);
+  // rows: [key, label, cols ('all' | 'tax' | 't'), kind ('p' portal / 'in' input / 'f' formula), portal(calc, g3), formula(V)]
+  const ROWS = [
+    ['h4', 'Pt II · 4 — Outward supplies on which tax is payable'],
+    ['4A', 'A  Supplies to unregistered persons (B2C)', 'all', 'p', c => P(c.table4 && c.table4.b2c)], ['4B', 'B  Supplies to registered persons (B2B)', 'all', 'p', c => P(c.table4 && c.table4.b2b)],
+    ['4C', 'C  Zero-rated (export) on payment of tax', 'all', 'p', c => P(c.table4 && c.table4.exp)], ['4D', 'D  Supply to SEZ on payment of tax', 'all', 'p', c => P(c.table4 && c.table4.sez)],
+    ['4E', 'E  Deemed exports', 'all', 'p', c => P(c.table4 && c.table4.deemed)], ['4F', 'F  Advances on which tax paid, invoice not issued', 'all', 'p', c => P(c.table4 && c.table4.at)],
+    ['4G', 'G  Inward supplies on which tax is paid on reverse charge', 'all', 'p', c => P(c.table4 && c.table4.rchrg)], ['4G1', 'G1 Supplies through ECO u/s 9(5) (tax paid by ECO)', 'all', 'p', c => P(c.table4 && c.table4.ecom)],
+    ['4H', 'H  Sub-total (A to G1)', 'all', 'f', null, V => sum(V['4A'], V['4B'], V['4C'], V['4D'], V['4E'], V['4F'], V['4G'], V['4G1'])],
+    ['4I', 'I  Credit notes (−)', 'all', 'p', c => P(c.table4 && c.table4.cr_nt)], ['4J', 'J  Debit notes (+)', 'all', 'p', c => P(c.table4 && c.table4.dr_nt)],
+    ['4K', 'K  Supplies / tax declared through amendments (+)', 'all', 'p', c => P(c.table4 && c.table4.amd_pos)], ['4L', 'L  Supplies / tax reduced through amendments (−)', 'all', 'p', c => P(c.table4 && c.table4.amd_neg)],
+    ['4N', 'N  Supplies and advances on which tax is payable (H − I + J + K − L)', 'all', 'f', null, V => add(add(add(add(V['4H'], V['4I'], -1), V['4J']), V['4K']), V['4L'], -1)],
+    ['h5', 'Pt II · 5 — Outward supplies on which tax is not payable'],
+    ['5A', 'A  Zero-rated (export) without payment of tax', 't', 'p', c => P(c.table5 && c.table5.zero_rtd)], ['5B', 'B  Supply to SEZ without payment of tax', 't', 'p', c => P(c.table5 && c.table5.sez)],
+    ['5C', 'C  Supplies on which tax is paid by the recipient (RCM)', 't', 'p', c => P(c.table5 && c.table5.rchrg)], ['5C1', 'C1 Supplies through ECO u/s 9(5)', 't', 'p', c => P(c.table5 && c.table5.ecom_14)],
+    ['5D', 'D  Exempted', 't', 'p', c => P(c.table5 && c.table5.exmt)], ['5E', 'E  Nil rated', 't', 'p', c => P(c.table5 && c.table5.nil)], ['5F', 'F  Non-GST supply', 't', 'p', c => P(c.table5 && c.table5.non_gst)],
+    ['5G', 'G  Sub-total (A to F)', 't', 'f', null, V => sum(V['5A'], V['5B'], V['5C'], V['5C1'], V['5D'], V['5E'], V['5F'])],
+    ['5H', 'H  Credit notes (−)', 't', 'p', c => P(c.table5 && c.table5.cr_nt)], ['5I', 'I  Debit notes (+)', 't', 'p', c => P(c.table5 && c.table5.dr_nt)],
+    ['5J', 'J  Supplies declared through amendments (+)', 't', 'p', c => P(c.table5 && c.table5.amd_pos)], ['5K', 'K  Supplies reduced through amendments (−)', 't', 'p', c => P(c.table5 && c.table5.amd_neg)],
+    ['5M', 'M  Turnover on which tax is not paid (G − H + I + J − K)', 't', 'f', null, V => add(add(add(add(V['5G'], V['5H'], -1), V['5I']), V['5J']), V['5K'], -1)],
+    ['5N', 'N  Total turnover including advances (4N + 5M − 4G)', 't', 'f', null, V => add(add(V['4N'], V['5M']), V['4G'], -1)],
+    ['h6', 'Pt III · 6 — ITC availed during the year'],
+    ['6A', 'A  Total ITC availed through GSTR-3B (4(A))', 'tax', 'p', c => P(c.table6 && c.table6.itc_3b)],
+    ['6B1', 'B  Inward supplies (other than imports / RCM) — Inputs', 'tax', 'p', (c, g) => ty(g && g.itc_elg && g.itc_elg.itc_avl, 'OTH')], ['6B2', '    — Capital goods', 'tax', 'in'], ['6B3', '    — Input services', 'tax', 'in'],
+    ['6C', 'C  RCM from unregistered persons (other than imports) — Inputs + capital goods + services', 'tax', 'in'],
+    ['6D', 'D  RCM from registered persons', 'tax', 'p', (c, g) => ty(g && g.itc_elg && g.itc_elg.itc_avl, 'ISRC')],
+    ['6E', 'E  Import of goods (incl. SEZ)', 'tax', 'p', (c, g) => ty(g && g.itc_elg && g.itc_elg.itc_avl, 'IMPG')], ['6F', 'F  Import of services', 'tax', 'p', (c, g) => ty(g && g.itc_elg && g.itc_elg.itc_avl, 'IMPS')],
+    ['6G', 'G  Input Tax Distributor (ISD)', 'tax', 'p', c => P(c.table6 && c.table6.isd)], ['6H', 'H  ITC reclaimed (other than B above)', 'tax', 'in'],
+    ['6I', 'I  Sub-total (B to H)', 'tax', 'f', null, V => sum(V['6B1'], V['6B2'], V['6B3'], V['6C'], V['6D'], V['6E'], V['6F'], V['6G'], V['6H'])],
+    ['6J', 'J  Difference (A − I) — should be nil', 'tax', 'f', null, V => add(V['6A'], V['6I'], -1)],
+    ['6K', 'K  Transition credit TRAN-I', 'tax', 'p', c => P(c.table6 && c.table6.tran1)], ['6L', 'L  Transition credit TRAN-II', 'tax', 'p', c => P(c.table6 && c.table6.tran2)], ['6M', 'M  Any other ITC availed', 'tax', 'in'],
+    ['6O', 'O  Total ITC availed (I + K + L + M)', 'tax', 'f', null, V => sum(V['6I'], V['6K'], V['6L'], V['6M'])],
+    ['h7', 'Pt III · 7 — ITC reversed and ineligible'],
+    ['7A', 'A  Rule 37', 'tax', 'in'], ['7B', 'B  Rule 39', 'tax', 'in'], ['7C', 'C  Rule 42', 'tax', 'in'], ['7D', 'D  Rule 43', 'tax', 'in'], ['7E', 'E  Section 17(5)', 'tax', 'in'],
+    ['7F', 'F  Reversal of TRAN-I credit', 'tax', 'in'], ['7G', 'G  Reversal of TRAN-II credit', 'tax', 'in'], ['7H', 'H  Other reversals', 'tax', 'in'],
+    ['7I', 'I  Total ITC reversed (A to H)', 'tax', 'f', null, V => sum(V['7A'], V['7B'], V['7C'], V['7D'], V['7E'], V['7F'], V['7G'], V['7H'])],
+    ['7J', 'J  Net ITC available for utilisation (6O − 7I)', 'tax', 'f', null, V => add(V['6O'], V['7I'], -1)],
+    ['h8', 'Pt III · 8 — Other ITC information'],
+    ['8A', 'A  ITC as per GSTR-2B (table 8A)', 'tax', 'p', c => P(c.table8 && c.table8.itc_2b)], ['8B', 'B  ITC as per 6B + 6H', 'tax', 'f', null, V => sum(V['6B1'], V['6B2'], V['6B3'], V['6H'])],
+    ['8C', 'C  ITC on inward supplies of this year availed in April–November of next year', 'tax', 'in'],
+    ['8D', 'D  Difference A − (B + C)', 'tax', 'f', null, V => add(V['8A'], add(V['8B'], V['8C']), -1)],
+    ['8E', 'E  ITC available but not availed', 'tax', 'in'], ['8F', 'F  ITC available but ineligible', 'tax', 'in'],
+    ['8G', 'G  IGST paid on import of goods (incl. SEZ)', 'tax', 'in'], ['8H', 'H  IGST credit availed on import of goods (= 6E)', 'tax', 'f', null, V => ({ ...V['6E'] })],
+    ['8I', 'I  Difference (G − H)', 'tax', 'f', null, V => add(V['8G'], V['8H'], -1)], ['8J', 'J  ITC on imports not availed', 'tax', 'in'],
+    ['8K', 'K  Total ITC to lapse this year (E + F + J)', 'tax', 'f', null, V => sum(V['8E'], V['8F'], V['8J'])],
+    ['h10', 'Pt V · 10–14 — Transactions of this year declared in next year’s returns (April–November)'],
+    ['10', '10  Supplies / tax declared through amendments (+) (net of debit notes)', 'all', 'in'], ['11', '11  Supplies / tax reduced through amendments (−) (net of credit notes)', 'all', 'in'],
+    ['12', '12  Reversal of ITC availed during previous financial year', 'tax', 'in'], ['13', '13  ITC availed for the previous financial year', 'tax', 'in']];
+  // tracker (12 months of workings) totals shown beside some rows
+  function trackerSums(months) {
+    const T = {}, k = ['a', 'b', 'c', 'd', 'e', 'imp', 'rcm', 'isd', 'a5', 'B1', 'B2', 'C', 'D1', 'D2'];
+    k.forEach(x => { T[x] = Z(); });
+    let cash = Z(), n = 0;
+    months.forEach(m => { const t = (m.summary || {}).t3b; if (!t) return; n++; k.forEach(x => { if (t[x]) T[x] = add(T[x], t[x]); }); if ((m.summary || {}).cash && typeof m.summary.cash === 'object') cash = add(cash, m.summary.cash); });
+    return { n, '4N': add(T.a, T.d), '4G': T.d, '5D': T.c, '5F': T.e, '5N': sum(T.a, T.b, T.c, T.e), '6A': sum(T.imp, T.rcm, T.isd, T.a5), '6B1': T.a5, '6D': T.rcm, '6E': T.imp, '6G': T.isd, '6H': T.D1, '7I': add(T.B1, T.B2), '7J': T.C, cash };
+  }
+  function compute(calc, g3, saved, months) {
+    const V = {}, S = (saved && saved.v) || {}, A = {}, tr = trackerSums(months || []);
+    // r42 snapshots of the year → defaults for 7C / 7D
+    const r42 = (months || []).map(m => (m.summary || {}).r42).filter(Boolean), z = Z();
+    const d7C = r42.reduce((a, s) => add(add(a, s.D1), s.D2), z), d7D = r42.reduce((a, s) => add(a, s.Te), Z());
+    ROWS.forEach(([k, , cols, kind, pg]) => {
+      if (!cols || kind === 'f') return;
+      let auto = Z();
+      if (kind === 'p' && calc) auto = pg(calc, g3) || Z();
+      if (k === '7C') auto = d7C; if (k === '7D') auto = d7D;
+      if (k === '7H' && g3 && g3.itc_elg) { const rv = add(ty(g3.itc_elg.itc_rev, 'RUL') || Z(), ty(g3.itc_elg.itc_rev, 'OTH') || Z()); auto = add(add(rv, d7C, -1), d7D, -1); HT.forEach(h => { if (auto[h] < 0) auto[h] = 0; }); }
+      A[k] = auto; V[k] = S[k] ? { ...auto, ...S[k] } : { ...auto };
+    });
+    ROWS.forEach(([k, , cols, kind, , f]) => { if (kind === 'f') V[k] = f(V); });
+    return { V, A, S, tr };
+  }
+  return { ROWS, compute, trackerSums, H, HT, Z, add, r2, P };
+})();
+// GSTR-9C — reconciliation of turnover, tax and ITC with audited accounts (self-certified)
+const G9C = {
+  T5: [['5A', 'Turnover (incl. exports) as per audited financial statements', 1, 'in'], ['5B', 'Unbilled revenue at the beginning of the year', 1, 'in'], ['5C', 'Unadjusted advances at the end of the year', 1, 'in'],
+    ['5D', 'Deemed supply under Schedule I', 1, 'in'], ['5E', 'Credit notes issued after the end of the year but reflected in the annual return', 1, 'in'], ['5F', 'Trade discounts accounted for in the financial statements but not permissible under GST', 1, 'in'],
+    ['5H', 'Unbilled revenue at the end of the year', -1, 'in'], ['5I', 'Unadjusted advances at the beginning of the year', -1, 'in'], ['5J', 'Credit notes accounted for in the financial statements but not in the annual return', -1, 'in'],
+    ['5K', 'Adjustments in turnover under composition', -1, 'in'], ['5L', 'Adjustments in turnover under section 15 and rules (±)', 1, 'in'], ['5M', 'Adjustments in turnover due to foreign exchange fluctuations (±)', 1, 'in'],
+    ['5N', 'Adjustments in turnover due to other reasons (±)', 1, 'in']],
+  compute(d, g9) {
+    const n = k => +((d || {})[k]) || 0, r2 = G9.r2;
+    const o = {}; o['5O'] = r2(G9C.T5.reduce((a, [k, , sg]) => a + sg * n(k), 0)); o['5P'] = r2(((g9 || {})['5N'] || {}).t || 0); o['5Q'] = r2(o['5O'] - o['5P']);
+    o['7A'] = o['5O']; o['7B'] = r2(n('7B')); o['7C'] = r2(n('7C')); o['7D'] = r2(n('7D')); o['7E'] = r2(o['7A'] - o['7B'] - o['7C'] - o['7D']);
+    const g = g9 || {}; o['7F'] = r2(((g['4N'] || {}).t || 0) - ((g['4G'] || {}).t || 0) - ((g['4F'] || {}).t || 0) + ((g['5C'] || {}).t ? 0 : 0)); o['7G'] = r2(o['7E'] - o['7F']);
+    G9.HT.forEach(h => { const bk = r2(n('9_' + h)), paid = r2(((g['4N'] || {})[h] || 0) - ((g['4G'] || {})[h] || 0)); o['9_' + h] = { books: bk, paid, diff: r2(bk - paid) }; });
+    o['12A'] = r2(n('12A')); o['12B'] = r2(n('12B')); o['12C'] = r2(n('12C')); o['12D'] = r2(o['12A'] + o['12B'] - o['12C']);
+    o['12E'] = r2(G9.HT.reduce((a, h) => a + (+((g['7J'] || {})[h]) || 0), 0)); o['12F'] = r2(o['12D'] - o['12E']);
+    return o;
+  }
+};
+const gf9 = { client: '', fy: '', kind: 'gstr9' };
+async function gfAnnual(body) {
+  const cl = clients.filter(c => c.active !== false && c.gstin).sort((a, b) => a.name.localeCompare(b.name));
+  if (!gf9.client || !cl.some(c => c.id === gf9.client)) gf9.client = (cl[0] || {}).id || '';
+  if (!gf9.fy) gf9.fy = gfFy(-1);
+  const c = clientById(gf9.client); if (!c) { body.innerHTML = '<div class="empty">No GST clients.</div>'; return; }
+  const fy = gf9.fy, y0 = +fy.slice(0, 4), from = `${y0}-04-01`, to = `${y0 + 1}-03-01`;
+  body.innerHTML = '<div class="loading">Loading…</div>';
+  const [mq, sq, iq] = await Promise.all([safe(sb.from('gst_months').select('period,summary').eq('client_id', c.id).gte('period', from).lte('period', to).order('period')),
+    safe(sb.from('gst_annual').select('*').eq('client_id', c.id).eq('fy', fy)), safe(sb.from('gst_portal_info').select('data,fetched_at').eq('client_id', c.id).maybeSingle())]);
+  const months = mq.data || [], rows = sq.error ? [] : (sq.data || []), row9 = rows.find(r => r.kind === 'gstr9'), row9c = rows.find(r => r.kind === 'gstr9c');
+  const P9 = iq.data && iq.data.data && iq.data.data.gstr9 && iq.data.data.gstr9.fy === fy ? iq.data.data.gstr9 : null;
+  const R = G9.compute(P9 && P9.calc, P9 && P9.g3, row9 && row9.data, months);
+  const head = `<div class="toolbar" style="margin-top:0"><label class="small muted">Client <select id="g9C">${cl.map(x => `<option value="${x.id}" ${x.id === c.id ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select></label>
+      <label class="small muted">Financial year <select id="g9Y">${[gfFy(-1), gfFy(-2), gfFy(0)].map(f => `<option ${f === fy ? 'selected' : ''}>${f}</option>`).join('')}</select></label>
+      <div class="seg">${[['gstr9', 'GSTR-9'], ['gstr9c', 'GSTR-9C']].map(([k, l]) => `<button data-g9k="${k}" class="${gf9.kind === k ? 'on' : ''}">${l}</button>`).join('')}</div><span class="spacer"></span>
+      <span class="muted small">Due 31 Dec ${y0 + 1}</span></div>
+    ${sq.error ? `<p class="note warn">${/gst_annual/.test(sq.error.message || '') ? 'Run <b>update-gst-annual.sql</b> in Supabase to save GSTR-9 / 9C workings.' : esc(friendly(sq.error))}</p>` : ''}
+    <p class="small ${P9 ? 'muted' : 'warn-t'}">${P9 ? `Portal figures read by the JLR add-on on ${fmtDate(iq.data.fetched_at.slice(0, 10))}.` : `No portal figures for FY ${fy} yet — log in to ${esc(c.name)} on the GST portal (the add-on reads them with the daily check, or JLR panel → “Ledgers … GSTR-9 figures”).`} Tracker workings: ${R.tr.n} of 12 months.</p>`;
+  if (gf9.kind === 'gstr9c') return gf9cDraw(body, head, c, fy, R, row9c);
+  const st = (row9 && row9.status) || 'draft', ed = st !== 'filed';
+  const cell = (k, cols, kind, v) => G9.H.map(h => { const show = cols === 'all' || (cols === 't' ? h === 't' : h !== 't');
+    if (!show) return '<td></td>'; const val = (v || {})[h] || 0;
+    return kind === 'f' || !ed ? `<td class="r">${val ? inrS(val) : '<span class="muted">0</span>'}</td>` : `<td class="r"><input class="g9in ${R.S[k] && R.S[k][h] !== undefined ? 'g9ov' : ''}" data-k="${k}" data-h="${h}" value="${val || ''}" inputmode="decimal" aria-label="${k} ${h}"></td>`; }).join('');
+  const trc = k => { const t = R.tr[k]; if (!t || !R.tr.n) return '<td></td>'; const v = R.V[k] || {}, keys = G9.H.filter(h => (t[h] || 0) || (v[h] || 0)), off = keys.filter(h => Math.abs((t[h] || 0) - (v[h] || 0)) > 1);
+    return `<td class="small ${off.length ? 'warn-t' : 'muted'}" title="Tracker workings, 12 months">${keys.length ? keys.map(h => `${{ t: 'Val', ig: 'I', cg: 'C', sg: 'S', cs: 'Cess' }[h]} ${inrS(t[h])}`).join(' · ') : '0'}${off.length ? ' ⚠' : ''}</td>`; };
+  const T9 = (P9 && P9.calc && P9.calc.table9) || null;
+  body.innerHTML = head + `<div class="toolbar"><span class="pill ${st === 'verified' ? 'g' : st === 'filed' ? 'g' : st === 'review' ? 'b' : ''}">${{ draft: 'Draft', review: 'With the senior', verified: 'Verified', filed: 'Filed' }[st]}</span>${row9 && row9.arn ? `<span class="small">ARN ${esc(row9.arn)}</span>` : ''}
+      <span class="spacer"></span>${ed ? '<button class="btn" id="g9Clear">Clear my changes</button><button class="btn primary" id="g9Save">Save</button>' : ''}<button class="btn" id="g9Xl">Download Excel</button>
+      ${st === 'draft' ? '<button class="btn" data-g9s="review">Send to senior</button>' : ''}${st === 'review' && isManager() ? '<button class="btn" data-g9s="verified">Mark verified</button><button class="btn" data-g9s="draft">Send back</button>' : ''}${st === 'verified' ? '<button class="btn" data-g9s="filed">Filed (ARN)</button>' : ''}</div>
+    <div class="table-wrap"><table class="g9t"><thead><tr><th>Table</th><th class="r">Taxable value</th><th class="r">IGST</th><th class="r">CGST</th><th class="r">SGST</th><th class="r">Cess</th><th>Tracker workings</th></tr></thead><tbody>
+      ${G9.ROWS.map(([k, l, cols, kind]) => !cols ? `<tr class="sub"><td colspan="7"><b>${esc(l)}</b></td></tr>`
+        : `<tr class="${kind === 'f' ? 'tot' : ''}"><td class="wrap"><b>${esc(k.replace(/^(\d+)([A-Z]\d?)$/, '$1$2'))}</b> ${esc(l)}${kind === 'p' && P9 ? '<span class="muted tiny"> · portal</span>' : kind === 'in' ? '<span class="muted tiny"> · type</span>' : ''}</td>${cell(k, cols, kind, R.V[k])}${trc(k)}</tr>`).join('')}
+    </tbody></table></div>
+    <h4>9 — Tax payable and paid (from the portal)</h4>
+    ${T9 ? `<div class="table-wrap"><table><thead><tr><th></th><th class="r">Payable</th><th class="r">Paid in cash</th><th class="r">Paid through ITC</th><th class="r">Difference</th></tr></thead><tbody>
+      ${[['iamt', 'IGST'], ['camt', 'CGST'], ['samt', 'SGST'], ['csamt', 'Cess'], ['intr', 'Interest'], ['fee', 'Late fee']].map(([k, l]) => { const x = T9[k] || {}, itc = Object.entries(x).filter(([kk]) => /^tax_paid_itc/.test(kk)).reduce((a, [, v]) => a + (+v || 0), 0);
+        return `<tr><td>${l}</td><td class="r">${inrS(x.txpyble || 0)}</td><td class="r">${inrS(x.txpaid_cash || 0)}</td><td class="r">${inrS(itc)}</td><td class="r ${Math.abs(+x.diff_tax_paid || 0) > 1 ? 'late' : ''}">${inrS(x.diff_tax_paid || 0)}</td></tr>`; }).join('')}</tbody></table></div>` : '<p class="muted small">Comes with the portal figures.</p>'}
+    <p class="muted small">Table 6B: the portal gives one figure (inputs) — split capital goods and input services yourself. Table 7: Rule 42 / 43 come from the tracker's common-credit workings; the rest of the 3B reversals start in 7H — move them to the right row. Tables 15–18 (demands, refunds, job work, HSN) are filled on the portal for now.</p>`;
+  gf9Bind(body, c, fy, R, row9, 'gstr9');
+}
+function gf9cDraw(body, head, c, fy, R, row) {
+  const d = (row && row.data) || {}, o = G9C.compute(d, R.V), st = (row && row.status) || 'draft', ed = st !== 'filed';
+  const inp = (k, v) => ed ? `<input class="g9in" data-c="${k}" value="${v ?? ''}" inputmode="decimal" aria-label="${k}">` : inrS(v || 0);
+  body.innerHTML = head + `<div class="toolbar"><span class="pill ${st === 'verified' || st === 'filed' ? 'g' : st === 'review' ? 'b' : ''}">${{ draft: 'Draft', review: 'With the senior', verified: 'Verified', filed: 'Filed' }[st]}</span><span class="spacer"></span>
+      ${ed ? '<button class="btn primary" id="g9Save">Save</button>' : ''}<button class="btn" id="g9Xl">Download Excel</button>${st === 'draft' ? '<button class="btn" data-g9s="review">Send to senior</button>' : ''}${st === 'review' && isManager() ? '<button class="btn" data-g9s="verified">Mark verified</button><button class="btn" data-g9s="draft">Send back</button>' : ''}${st === 'verified' ? '<button class="btn" data-g9s="filed">Filed (ARN)</button>' : ''}</div>
+    <p class="muted small" style="margin-top:0">Self-certified reconciliation (needed when turnover is above ₹5 crore). Type the figures from the audited accounts; GSTR-9 figures come from the GSTR-9 tab.</p>
+    <div class="table-wrap"><table class="g9t"><tbody>
+      <tr class="sub"><td colspan="2"><b>Pt II · 5 — Reconciliation of turnover</b></td></tr>
+      ${G9C.T5.map(([k, l, sg]) => `<tr><td><b>${k}</b> ${esc(l)} <span class="muted tiny">${sg < 0 ? '(−)' : ''}</span></td><td class="r">${inp(k, d[k])}</td></tr>`).join('')}
+      <tr class="tot"><td><b>5O</b> Annual turnover after adjustments</td><td class="r">${inrS(o['5O'])}</td></tr><tr><td><b>5P</b> Turnover as per GSTR-9 (5N)</td><td class="r">${inrS(o['5P'])}</td></tr>
+      <tr class="tot"><td><b>5Q</b> Unreconciled turnover (O − P)</td><td class="r ${Math.abs(o['5Q']) > 1 ? 'late' : 'ok-t'}">${inrS(o['5Q'])}</td></tr>
+      <tr><td colspan="2"><label class="small">6 — Reasons for unreconciled turnover<textarea data-c="r6" rows="2">${esc(d.r6 || '')}</textarea></label></td></tr>
+      <tr class="sub"><td colspan="2"><b>7 — Reconciliation of taxable turnover</b></td></tr>
+      <tr><td><b>7A</b> Annual turnover after adjustments (5O)</td><td class="r">${inrS(o['7A'])}</td></tr>
+      <tr><td><b>7B</b> Value of exempted, nil, non-GST and no-supply turnover</td><td class="r">${inp('7B', d['7B'])}</td></tr><tr><td><b>7C</b> Zero-rated supplies without payment of tax</td><td class="r">${inp('7C', d['7C'])}</td></tr>
+      <tr><td><b>7D</b> Supplies on which tax is paid by the recipient (RCM)</td><td class="r">${inp('7D', d['7D'])}</td></tr>
+      <tr class="tot"><td><b>7E</b> Taxable turnover as per adjustments (A − B − C − D)</td><td class="r">${inrS(o['7E'])}</td></tr><tr><td><b>7F</b> Taxable turnover as per GSTR-9 (4N − 4G − 4F)</td><td class="r">${inrS(o['7F'])}</td></tr>
+      <tr class="tot"><td><b>7G</b> Unreconciled taxable turnover</td><td class="r ${Math.abs(o['7G']) > 1 ? 'late' : 'ok-t'}">${inrS(o['7G'])}</td></tr>
+      <tr><td colspan="2"><label class="small">8 — Reasons<textarea data-c="r8" rows="2">${esc(d.r8 || '')}</textarea></label></td></tr>
+      <tr class="sub"><td colspan="2"><b>9 — Tax: as per books vs paid as per GSTR-9 (4N − 4G)</b></td></tr>
+      ${G9.HT.map(h => `<tr><td>${{ ig: 'IGST', cg: 'CGST', sg: 'SGST', cs: 'Cess' }[h]} as per books ${inp('9_' + h, d['9_' + h])}</td><td class="r small">paid ${inrS(o['9_' + h].paid)} · <span class="${Math.abs(o['9_' + h].diff) > 1 ? 'late' : 'ok-t'}">difference ${inrS(o['9_' + h].diff)}</span></td></tr>`).join('')}
+      <tr><td colspan="2"><label class="small">10 — Reasons / additional liability<textarea data-c="r10" rows="2">${esc(d.r10 || '')}</textarea></label></td></tr>
+      <tr class="sub"><td colspan="2"><b>Pt IV · 12 — Reconciliation of ITC</b></td></tr>
+      <tr><td><b>12A</b> ITC availed as per audited financial statements</td><td class="r">${inp('12A', d['12A'])}</td></tr><tr><td><b>12B</b> ITC booked in earlier years claimed this year</td><td class="r">${inp('12B', d['12B'])}</td></tr>
+      <tr><td><b>12C</b> ITC booked this year to be claimed in later years</td><td class="r">${inp('12C', d['12C'])}</td></tr><tr class="tot"><td><b>12D</b> ITC as per books after adjustments (A + B − C)</td><td class="r">${inrS(o['12D'])}</td></tr>
+      <tr><td><b>12E</b> ITC claimed in GSTR-9 (7J)</td><td class="r">${inrS(o['12E'])}</td></tr><tr class="tot"><td><b>12F</b> Unreconciled ITC (D − E)</td><td class="r ${Math.abs(o['12F']) > 1 ? 'late' : 'ok-t'}">${inrS(o['12F'])}</td></tr>
+      <tr><td colspan="2"><label class="small">13 — Reasons for unreconciled ITC<textarea data-c="r13" rows="2">${esc(d.r13 || '')}</textarea></label></td></tr>
+    </tbody></table></div>`;
+  gf9Bind(body, c, fy, R, row, 'gstr9c');
+}
+const inrS = v => (Math.round((+v || 0) * 100) / 100).toLocaleString('en-IN', { maximumFractionDigits: 2 });
+function gf9Bind(body, c, fy, R, row, kind) {
+  $('#g9C', body).onchange = e => { gf9.client = e.target.value; gfAnnual(body); };
+  $('#g9Y', body).onchange = e => { gf9.fy = e.target.value; gfAnnual(body); };
+  $$('[data-g9k]', body).forEach(b => b.onclick = () => { gf9.kind = b.dataset.g9k; gfAnnual(body); });
+  const collect = () => {
+    if (kind === 'gstr9c') { const d = { ...((row && row.data) || {}) }; $$('[data-c]', body).forEach(i => { d[i.dataset.c] = i.tagName === 'TEXTAREA' ? i.value : (i.value.trim() === '' ? '' : num(i.value)); }); return d; }
+    const d = { ...((row && row.data) || {}) }, v = {};
+    $$('[data-k]', body).forEach(i => { const k = i.dataset.k, h = i.dataset.h, a = ((R.A[k] || {})[h]) || 0, x = i.value.trim() === '' ? 0 : num(i.value);
+      if (Math.abs(x - a) > 0.004 || (R.S[k] && R.S[k][h] !== undefined && i.value.trim() !== '')) { v[k] = v[k] || {}; v[k][h] = x; } });
+    d.v = v; return d; };
+  const save = async (patch = {}) => {
+    const rowN = { client_id: c.id, fy, kind, data: patch.data || collect(), updated_by: me.id, updated_at: new Date().toISOString(), ...patch.extra };
+    const r = await safe(sb.from('gst_annual').upsert(rowN, { onConflict: 'client_id,fy,kind' }));
+    if (r.error) { toast(/gst_annual/.test(r.error.message || '') ? 'Run update-gst-annual.sql in Supabase first' : friendly(r.error), true); return false; } return true; };
+  const sv = $('#g9Save', body); if (sv) sv.onclick = async () => { if (await save()) { toast('Saved'); gfAnnual(body); } };
+  const cl = $('#g9Clear', body); if (cl) cl.onclick = async () => { if (!confirm('Clear every figure you typed and go back to the portal / default figures?')) return; const d = { ...((row && row.data) || {}) }; d.v = {}; if (await save({ data: d })) gfAnnual(body); };
+  $$('[data-g9s]', body).forEach(b => b.onclick = async () => {
+    const s = b.dataset.g9s, extra = { status: s };
+    if (s === 'filed') { const arn = prompt(`${kind === 'gstr9' ? 'GSTR-9' : 'GSTR-9C'} FY ${fy} — ${c.name}\nARN from the portal:`, ''); if (arn === null) return; extra.arn = arn.trim().toUpperCase() || null; extra.filed_on = today(); }
+    if (await save({ extra })) { toast({ review: 'Sent to the senior', verified: 'Verified', draft: 'Sent back', filed: 'Marked filed' }[s]); gfAnnual(body); } });
+  $('#g9Xl', body).onclick = () => gf9Excel(c, fy, R, row, kind).catch(e => toast(friendly(e), true));
+}
+async function gf9Excel(c, fy, R, row, kind) {
+  const XP = await loadXlsxPopulate(), wb = await XP.fromBlankAsync(), sh = wb.sheet(0);
+  sh.name(kind === 'gstr9' ? 'GSTR-9' : 'GSTR-9C');
+  sh.cell('A1').value(`${kind === 'gstr9' ? 'GSTR-9 annual return' : 'GSTR-9C reconciliation'} — ${c.name} (${c.gstin}) — FY ${fy}`).style('bold', true);
+  let r = 3;
+  if (kind === 'gstr9') {
+    sh.cell(r, 1).value([['Table', 'Description', 'Taxable value', 'IGST', 'CGST', 'SGST', 'Cess', 'Source']]); sh.row(r).style('bold', true); r++;
+    G9.ROWS.forEach(([k, l, cols, kd]) => { if (!cols) { sh.cell(r, 1).value(l).style('bold', true); r++; return; }
+      const v = R.V[k] || {}; sh.cell(r, 1).value([[k, l.replace(/^\s*[A-Z]\d?\s+/, ''), cols === 'tax' ? '' : v.t || 0, cols === 't' ? '' : v.ig || 0, cols === 't' ? '' : v.cg || 0, cols === 't' ? '' : v.sg || 0, cols === 't' ? '' : v.cs || 0, kd === 'f' ? 'Total' : R.S[k] ? 'Typed' : kd === 'p' ? 'Portal' : 'Typed / default']]); r++; });
+  } else {
+    const d = (row && row.data) || {}, o = G9C.compute(d, R.V);
+    sh.cell(r, 1).value([['Table', 'Description', 'Amount']]); sh.row(r).style('bold', true); r++;
+    G9C.T5.forEach(([k, l]) => { sh.cell(r, 1).value([[k, l, +d[k] || 0]]); r++; });
+    [['5O', 'Annual turnover after adjustments'], ['5P', 'Turnover as per GSTR-9'], ['5Q', 'Unreconciled turnover'], ['7E', 'Taxable turnover as per adjustments'], ['7F', 'Taxable turnover as per GSTR-9'], ['7G', 'Unreconciled taxable turnover'], ['12D', 'ITC as per books after adjustments'], ['12E', 'ITC as per GSTR-9 (7J)'], ['12F', 'Unreconciled ITC']].forEach(([k, l]) => { sh.cell(r, 1).value([[k, l, o[k]]]); r++; });
+    ['r6', 'r8', 'r10', 'r13'].forEach(k => { if (d[k]) { sh.cell(r, 1).value([[k.replace('r', 'Table '), d[k], '']]); r++; } });
+  }
+  sh.column('A').width(8); sh.column('B').width(70); ['C', 'D', 'E', 'F', 'G'].forEach(x => sh.column(x).width(16)); sh.column('H').width(16);
+  const blob = await wb.outputAsync(), a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `${kind === 'gstr9' ? 'GSTR-9' : 'GSTR-9C'} ${c.name} FY ${fy}.xlsx`; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 4000);
 }
 const gfDl = { f: '', q: '' };
 function gfLoadZip() { return window.JSZip ? Promise.resolve() : new Promise((ok, bad) => { const s = document.createElement('script'); s.src = 'https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js'; s.onload = ok; s.onerror = bad; document.head.appendChild(s); }); }
@@ -8624,7 +8840,7 @@ const REV = (() => {
 })();
 
 // v78: this tab's code version — when a newer app is uploaded, offer Reload and block mails from old code
-const APP_VER = 'jlr-shell-v107';
+const APP_VER = 'jlr-shell-v108';
 let appStale = false;
 async function checkAppVer() {
   try { const t = await fetch('sw.js?v=' + Date.now(), { cache: 'no-store' }).then(r => r.text()); const live = (t.match(/jlr-shell-v\d+/) || [])[0];
