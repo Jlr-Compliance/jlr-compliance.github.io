@@ -726,7 +726,7 @@ const navIcon = k => `<svg aria-hidden="true" width="18" height="18" viewBox="0 
 function navGroups() {
   const G = [
     ['Overview', [['dashboard', 'Dashboard'], ['calendar', 'Due-date calendar'], ['work', isManager() ? 'All work' : 'My work']]],
-    ['GST', [['work-gst', isManager() ? 'GST work' : 'My GST work', 'gstw'], ['gst', 'GST review', 'gst'], ['filing', 'Filing desk', 'filing'], ['gstin', 'GSTIN check', 'gst']]],
+    ['GST', [['work-gst', isManager() ? 'GST work' : 'My GST work', 'gstw'], ['gst', 'GST review', 'gst'], ['filing', 'GST features', 'filing'], ['gstin', 'GSTIN check', 'gst']]],
     ['TDS', [['work-tds', isManager() ? 'TDS / TCS work' : 'My TDS work', 'tds'], ['tds', 'TDS working', 'tdsw']]],
     ['MCA', [['work-mca', isManager() ? 'MCA / ROC work' : 'My MCA work', 'mca'], ['mca', 'Companies & LLPs', 'companies']]],
     !settings.notices_off && ['Notices', [['notices', 'All notices', 'notices'], ['notices-gst', 'GST notices', 'notices'], ['notices-tds', 'TDS notices', 'notices'], ['notices-mca', 'MCA notices', 'notices']]],
@@ -950,32 +950,34 @@ async function payGateMsg(task) {
     safe(sb.from('tax_intimations').select('paid_on').eq('client_id', task.client_id).eq('kind', 'GST').eq('period', monthLabel(ym)).maybeSingle())]);
   if (g.error || t.error) return null;                       // tables not there yet: no gate
   const cash = gstCash((g.data || {}).summary || {});
-  return cash > 0 && !(t.data && t.data.paid_on) ? `GSTR-3B ${task.period}: ${inr(cash)} cash to pay. Record the payment (CPIN / CIN) on the Filing desk first.` : null;
+  return cash > 0 && !(t.data && t.data.paid_on) ? `GSTR-3B ${task.period}: ${inr(cash)} cash to pay. Record the payment (CPIN / CIN) in GST features → GSTR-1 & 3B first.` : null;
 }
 let fdMonth = null, fdTab = 'ready', fdQ = '';
-VIEWS.filing = async v => {
-  await loadRefs();
-  if (!fdMonth) fdMonth = prevMonth();
-  const ym = fdMonth, per = ym + '-01', label = monthLabel(ym), td = today();
-  v.innerHTML = `<div class="page-head"><h2>GST filing desk</h2><span class="muted">Returns approved by the senior → pay → file → acknowledgement to client</span><span class="spacer"></span>
-      <label class="small muted" for="fdM">Return month</label><input type="month" id="fdM" value="${esc(ym)}"></div>
-    <div id="fdBody"><div class="loading">Loading…</div></div>`;
-  $('#fdM', v).onchange = e => { fdMonth = e.target.value || prevMonth(); route(); };
-  const body = $('#fdBody', v);
+// v105: the old Filing desk is now the "GSTR-1 & 3B" tab of GST features
+async function fdLoad(ym) {
+  const per = ym + '-01', label = monthLabel(ym), td = today();
   const [tq, rq, gq, pq] = await Promise.all([
     safe(sb.from('tasks').select('*').eq('period', label).limit(5000)),
     safe(sb.from('gst_reviews').select('client_id,kind,state,sent_at').eq('period', per).limit(5000)),
     safe(sb.from('gst_months').select('client_id,status,summary').eq('period', per).limit(5000)),
     safe(sb.from('tax_intimations').select('*').eq('kind', 'GST').eq('period', label).limit(5000))]);
-  if (tq.error) { body.innerHTML = `<p class="note warn">${esc(friendly(tq.error))}</p>`; return; }
+  if (tq.error) return { error: tq.error };
   const rv = new Map((rq.data || []).map(r => [r.client_id + '|' + (r.kind || 'gstr3b'), r])), gm = new Map((gq.data || []).map(r => [r.client_id, r])), tp = new Map((pq.data || []).map(r => [r.client_id, r]));
-  const rows = (tq.data || []).filter(t => REV.kindOf(t.return_name) && t.status !== 'Not applicable').map(t => {
+  const all = (tq.data || []).filter(t => REV.kindOf(t.return_name) && t.status !== 'Not applicable').map(t => {
     const k = REV.kindOf(t.return_name), c = clientById(t.client_id) || { name: '—' }, r = rv.get(t.client_id + '|' + k), RS = r ? r.state : 'draft';
     const g = gm.get(t.client_id), cash = k === 'gstr3b' ? gstCash((g || {}).summary || {}) : 0, pay = tp.get(t.client_id), paid = !!(pay && pay.paid_on);
     const ok = ['approved', 'sent_client'].includes(RS), filed = t.status === 'Filed';
     const stage = filed ? 'filed' : !ok ? 'approval' : k === 'gstr3b' && cash > 0 && !paid ? 'pay' : 'ready';
     return { t, k, c, RS, g, cash, pay, paid, stage, late: !filed && t.due_date && t.due_date < td, today: !filed && t.due_date === td };
-  }).filter(x => !fdQ || (x.c.name + ' ' + (x.c.client_code || '') + ' ' + (x.c.gstin || '')).toLowerCase().includes(fdQ.toLowerCase()));
+  });
+  return { rows: all };
+}
+async function gfReturns(v, ym) {
+  const label = monthLabel(ym);
+  v.innerHTML = '<div id="fdBody"><div class="loading">Loading…</div></div>';
+  const body = $('#fdBody', v), L = await fdLoad(ym);
+  if (L.error) { body.innerHTML = `<p class="note warn">${esc(friendly(L.error))}</p>`; return; }
+  const rows = L.rows.filter(x => !fdQ || (x.c.name + ' ' + (x.c.client_code || '') + ' ' + (x.c.gstin || '')).toLowerCase().includes(fdQ.toLowerCase()));
   const N = s => rows.filter(x => s === 'all' ? x.stage !== 'filed' : x.stage === s).length;
   const TABS = [['ready', 'Ready to file'], ['pay', 'Waiting for payment'], ['approval', 'Waiting for approval'], ['filed', 'Filed'], ['all', 'All open']];
   const list = rows.filter(x => fdTab === 'all' ? x.stage !== 'filed' : x.stage === fdTab).sort((a, b) => (a.t.due_date || '9').localeCompare(b.t.due_date || '9') || a.c.name.localeCompare(b.c.name));
@@ -996,10 +998,10 @@ VIEWS.filing = async v => {
             ${x.stage === 'approval' ? '<button class="btn sm" data-a="open">Open review</button>' : ''}
             ${x.stage === 'pay' ? '<button class="btn sm primary" data-a="pay">Record payment</button>' : ''}
             ${x.stage !== 'approval' ? `<button class="btn sm" data-a="sheet">${x.k === 'gstr1' ? 'GSTR-1 JSON' : 'Portal sheet'}</button><button class="btn sm" data-a="logins" title="GST portal login">🔑</button><button class="btn sm" data-a="otp" title="Copy a message asking the client for the OTP">Ask OTP</button>` : ''}
-            ${x.stage === 'ready' ? '<button class="btn sm primary" data-a="ack">Upload ack</button><button class="btn sm" data-a="filed">Filed (ARN)</button>' : ''}
+            ${x.stage === 'ready' ? `<button class="btn sm primary" data-a="file" title="Opens ${esc(x.t.return_name)} on the GST portal through the JLR add-on — it checks the figures and stops at EVC">File on portal</button><button class="btn sm" data-a="ack">Upload ack</button><button class="btn sm" data-a="filed">Filed (ARN)</button>` : ''}
             ${x.k === 'gstr3b' && x.paid ? '<button class="link small" data-a="pay">payment</button>' : ''}`}</td></tr>`; }).join('')}</tbody></table></div>`
       : `<p class="muted" style="padding:16px 4px">${fdTab === 'ready' ? `Nothing ready to file for ${label}. Returns appear here after the senior verifies them${N('pay') ? ' and the GSTR-3B cash is paid' : ''}.` : 'Nothing here.'}</p>`}
-    <p class="muted small">Only GSTR-1 and GSTR-3B work items for <b>${label}</b> are listed. A GSTR-3B with cash to pay can't be marked filed until the payment (CPIN / CIN) is recorded. After filing, “Upload ack” marks it Filed and sends the acknowledgement and workings to the client (if auto-send is on).</p>`;
+    <p class="muted small">Only GSTR-1 and GSTR-3B work items for <b>${label}</b> are listed. A GSTR-3B with cash to pay can't be marked filed until the payment (CPIN / CIN) is recorded. <b>File on portal</b> opens the return on the GST portal through the JLR add-on: it checks the portal's figures against the verified workings and stops at EVC — staff tick the declaration, pick the signatory and type the OTP. The filed PDF and ARN then come back by themselves; “Upload ack” is still there for returns filed another way.</p>`;
   $$('[data-fdt]', body).forEach(b => b.onclick = () => { fdTab = b.dataset.fdt; route(); });
   const q = $('#fdQ', body); q.oninput = () => { clearTimeout(q._t); q._t = setTimeout(() => { fdQ = q.value; route(); }, 350); };
   body.onclick = async e => {
@@ -1007,6 +1009,7 @@ VIEWS.filing = async v => {
     const x = rows[+b.closest('tr').dataset.i], a = b.dataset.a;
     if (a === 'open' || (a === 'sheet' && x.k === 'gstr1')) { grClient = x.t.client_id; grMonth = ym; grOv = false; grTab = ''; grLastStep = {}; grPos = { ret: x.k, s: a === 'sheet' ? 4 : x.k === 'gstr1' ? 3 : 4 }; location.hash = '#/gst'; if (a === 'sheet') toast('GSTR-1 step 4 → “Download GSTR-1 JSON” downloads the file for the portal'); return; }
     if (a === 'logins') return openLogins(x.c);
+    if (a === 'file') return gfFileOnPortal(x, ym);
     if (a === 'otp') { const msg = `Dear ${x.c.name},\nWe are filing your ${x.t.return_name} for ${x.t.period} now. You will get an OTP from GSTN on your registered mobile / email — please send it to us as soon as it arrives.\nThank you,\n${firmName()}`;
       navigator.clipboard.writeText(msg).then(() => toast('Message copied — paste it to the client (Telegram / call)')).catch(() => window.prompt('Copy this message:', msg)); return; }
     if (a === 'sheet') return fdPortalSheet(x, label);
@@ -1020,6 +1023,168 @@ VIEWS.filing = async v => {
     }
   };
 };
+/* =====================================================================
+   v105 GST FEATURES — was "Filing desk": tabs for every GST return / form.
+   Stage 1 (built): Overview · GSTR-1 & 3B (file on portal through the add-on) · Filed downloads.
+   Later stages are listed so the office can see what is coming.
+   ===================================================================== */
+const GF_TABS = [['overview', 'Overview'], ['returns', 'GSTR-1 & 3B'], ['reg', 'Registration'], ['annual', 'GSTR-9 & 9C'], ['lut', 'LUT'], ['downloads', 'Filed downloads'], ['other', 'Other forms']];
+// [name, form, what it is, how (api = GST API + add-on, addon = add-on only, tracker), stage]
+const GF_FORMS = {
+  reg: [['Registration', [
+    ['New registration', 'REG-01', 'New GSTIN for a client', 'addon', 3], ['Multi-state registration', 'Same PAN, another state', 'Extra registration in another state', 'addon', 3],
+    ['Reply to clarification', 'REG-03 → REG-04', 'Officer asked for details — reply within 7 working days', 'addon', 3], ['Geocoding business addresses', 'Principal / additional place', 'Confirm the map location of each address', 'addon', 3],
+    ['Amendment — core fields', 'REG-14', 'Name, address, partners / directors — officer approves', 'addon', 3], ['Amendment — non-core fields', 'REG-14', 'Phone, email, bank, goods / services — approved at once', 'addon', 3],
+    ['Opt for composition levy', 'CMP-02', 'Move to composition', 'addon', 3], ['Withdraw from composition', 'CMP-04', 'Leave composition', 'addon', 3],
+    ['Cancellation of registration', 'REG-16', 'Ask to cancel the GSTIN', 'addon', 3], ['Revocation of cancellation', 'REG-21', 'Get a cancelled GSTIN back', 'addon', 3],
+    ['Declaration for specified premises', 'Annexure', 'Restaurant service in specified premises', 'addon', 3], ['Aadhaar authentication persons', 'Rule 14B', 'Select persons for Aadhaar authentication', 'addon', 3],
+    ['Track application status', 'ARN', 'Officer status of every application', 'addon', 2]]]],
+  annual: [['Annual returns', [
+    ['GSTR-9', 'Annual return', '12 months of GSTR-1 and 3B workings into the GSTR-9 tables', 'api', 4],
+    ['GSTR-9C', 'Reconciliation statement', 'Books vs GSTR-9 — turnover above ₹5 crore', 'api', 4]]]],
+  lut: [['Letter of undertaking', [
+    ['Furnish LUT', 'RFD-11', 'Exports / SEZ supplies without paying IGST — one per client per year', 'addon', 3],
+    ['View my submitted LUTs', 'RFD-11 ARN', 'Earlier LUTs kept against the client', 'addon', 2]]]],
+  other: [
+    ['Other returns', [['GSTR-1A', 'Amend GSTR-1', 'Same month, before 3B is filed', 'api', 5], ['IFF', 'QRMP', 'Invoice furnishing facility for quarterly clients', 'api', 5],
+      ['GSTR-4 / CMP-08', 'Composition', 'Yearly return and quarterly payment statement', 'api', 5], ['GSTR-7', 'TDS deductors', 'Government departments — monthly', 'api', 5],
+      ['GSTR-8', 'TCS', 'E-commerce operators — monthly', 'api', 5], ['GSTR-10', 'Final return', 'After the registration is cancelled', 'api', 5], ['GSTR-11', 'UIN holders', 'Embassies, UN bodies', 'api', 5]]],
+    ['Payments and ledgers', [['Ledgers', 'Cash / credit / liability', 'Balances read from the portal', 'api', 2], ['PMT-06', 'Challan', 'CPIN, paid CIN — already in GST review', 'api', 1],
+      ['PMT-09', 'Transfer', 'Move cash ledger balance between heads', 'addon', 2], ['RCM ITC statement', 'Opening balance', 'RCM paid vs ITC taken', 'api', 2],
+      ['ITC reclaim statement', '4(B)(2) / 4(D)(1)', 'Temporary reversals and reclaims', 'api', 2], ['Negative liability statement', 'GSTR-3B', 'Negative liability carried forward', 'api', 2],
+      ['DRC-03 / DRC-03A', 'Voluntary payment', 'Pay outside 3B, link to a demand', 'addon', 5], ['DRC-03 register', 'Payments made', 'With ARN', 'addon', 2], ['View PMT-03A', 'Re-credit order', 'Ledger re-credit orders', 'addon', 2]]],
+    ['Refunds', [['RFD-01', 'Refund', 'Export, SEZ, inverted duty, excess cash', 'addon', 5], ['RFD-01W', 'Withdraw', 'Withdraw a refund application', 'addon', 5], ['Refund status', 'RFD-02 / 03 / 04 / 06', 'Acknowledgement, deficiency, orders', 'addon', 5]]],
+    ['ITC forms', [['GSTR-2X', 'TDS / TCS received', 'Accept or reject TDS / TCS credit — goes to the cash ledger', 'api', 2], ['ITC-01', 'New registration / leaving composition', 'Special ITC claim', 'addon', 5],
+      ['ITC-02', 'Transfer', 'Sale, merger, amalgamation', 'addon', 5], ['ITC-02 pending for action', 'Transferee', 'Transfers waiting for the client', 'addon', 2], ['ITC-03', 'Reversal', 'On opting for composition', 'addon', 5], ['ITC-04', 'Job work', 'Goods sent to / received from job workers', 'addon', 5]]],
+    ['Mismatch intimations', [['DRC-01B', 'Liability mismatch', 'GSTR-1 higher than 3B — reply or pay', 'addon', 2], ['DRC-01C', 'ITC mismatch', '3B ITC higher than 2B — reply or pay', 'addon', 2], ['Notices and orders', 'Incl. additional notices', 'Already under GST notices', 'addon', 1]]],
+    ['User services', [['My applications', 'All applications', 'With ARN and status', 'addon', 2], ['My saved applications', 'Drafts', 'Saved but not submitted', 'addon', 2],
+      ['View my submissions', 'All submissions', 'Everything submitted from the login', 'addon', 2], ['Notices / intimations issued', 'Intimations', 'Issued to the client', 'addon', 2],
+      ['View additional notices / orders', 'Additional tab', 'Pulled into GST notices', 'addon', 2], ['View / download certificates', 'REG-06', 'Registration certificate and others', 'addon', 2],
+      ['Consent for Rule 14B', 'Aadhaar', 'Consent of selected persons', 'addon', 3], ['Engage / disengage GSTP', 'Practitioner', 'Link the office as GST practitioner', 'addon', 3],
+      ['Communication between taxpayers', 'Messages', 'To / from suppliers and customers', 'addon', 5], ['GTA', 'Forward charge option', 'Goods transport agency option', 'addon', 5],
+      ['Search HSN code', 'HSN / SAC', 'Code and rate', 'addon', 5], ['Search BoE', 'Bill of entry', 'Import details (IMPG)', 'addon', 5], ['Verify RFN', 'Reference no', 'Check a portal reference number', 'addon', 5],
+      ['Search advance ruling', 'Rulings', 'By state and subject', 'addon', 5], ['Cause list', 'Hearings', 'Appeal / proceeding dates', 'addon', 5], ['Locate GSTP', 'Practitioner', 'Find a GST practitioner', 'addon', 5],
+      ['Holiday list', 'State-wise', 'Used for due dates', 'tracker', 5], ['My masters', 'Saved masters', 'HSN, customers, suppliers', 'addon', 5]]]]
+};
+const GF_STAGE = { 1: 'Ready', 2: 'Stage 2 · read from portal', 3: 'Stage 3 · applications', 4: 'Stage 4 · annual', 5: 'Stage 5' };
+const GF_HOW = { api: ['API + add-on', 'b'], addon: ['Add-on', 'g'], tracker: ['Tracker', ''] };
+let gfTab = (() => { try { return localStorage.getItem('jlr.gfTab') || 'overview'; } catch { return 'overview'; } })();
+const gfAddon = () => document.documentElement.dataset.jlrAddon || '';          // set by the add-on's tracker.js (1.6.0+)
+VIEWS.filing = async v => {
+  await loadRefs();
+  if (!fdMonth) fdMonth = prevMonth();
+  if (!GF_TABS.some(t => t[0] === gfTab)) gfTab = 'overview';
+  const ym = fdMonth;
+  v.innerHTML = `<div class="page-head"><h2>GST features</h2><span class="muted">Every GST return and form for all clients — prepare, approve, pay, file, download</span><span class="spacer"></span>
+      <label class="small muted" for="fdM">Return month</label><input type="month" id="fdM" value="${esc(ym)}"></div>
+    <div class="seg gf-tabs" role="tablist" aria-label="GST features">${GF_TABS.map(([k, l]) => `<button role="tab" aria-selected="${gfTab === k}" class="${gfTab === k ? 'on' : ''}" data-gft="${k}">${l}</button>`).join('')}</div>
+    <div id="gfBody" style="margin-top:14px"><div class="loading">Loading…</div></div>`;
+  $('#fdM', v).onchange = e => { fdMonth = e.target.value || prevMonth(); route(); };
+  $$('[data-gft]', v).forEach(b => b.onclick = () => { gfTab = b.dataset.gft; try { localStorage.setItem('jlr.gfTab', gfTab); } catch { /* ignore */ } route(); });
+  const body = $('#gfBody', v);
+  if (gfTab === 'returns') return gfReturns(body, ym);
+  if (gfTab === 'overview') return gfOverview(body, ym);
+  if (gfTab === 'downloads') return gfDownloads(body, ym);
+  return gfFormList(body, gfTab);
+};
+function gfFormCard(f) {
+  const [n, form, d, how, st] = f, H = GF_HOW[how] || GF_HOW.addon;
+  return `<div class="gf-card"><div class="gf-ch"><b>${esc(n)}</b><span class="pill ${H[1]}">${H[0]}</span></div><span class="muted small">${esc(form)}</span>
+    <p class="small">${esc(d)}</p><span class="small ${st === 1 ? 'ok-t' : 'muted'}">${esc(GF_STAGE[st] || '')}</span></div>`;
+}
+function gfFormList(body, tab) {
+  const G = GF_FORMS[tab] || [];
+  body.innerHTML = `<p class="muted small" style="margin-top:0"><span class="pill b">API + add-on</span> works through the GST API (client OTP) or the JLR add-on on the logged-in portal. <span class="pill g">Add-on</span> the GST API does not offer it — it works through the add-on.
+      Nothing is submitted, paid or filed by itself: the add-on fills and stops before Submit / EVC.</p>
+    ${G.map(([t, L]) => `<section class="gf-sec"><h3>${esc(t)}</h3><div class="gf-grid">${L.map(gfFormCard).join('')}</div></section>`).join('')}`;
+}
+async function gfOverview(body, ym) {
+  const L = await fdLoad(ym), label = monthLabel(ym);
+  const rows = L.rows || [], N = s => rows.filter(x => x.stage === s).length;
+  const tile = (k, l) => `<button class="fd-tile ${k}" data-go="returns" data-fdt="${k}"><b>${N(k)}</b><span>${l}</span></button>`;
+  const card = (t, f, d, st, go) => `<button class="gf-card gf-click" ${go ? `data-go="${go}"` : 'disabled'}><div class="gf-ch"><b>${esc(t)}</b>${st ? `<span class="pill">${esc(st)}</span>` : ''}</div><span class="muted small">${esc(f)}</span><p class="small">${esc(d)}</p></button>`;
+  const fy = +ym.slice(5) >= 4 ? +ym.slice(0, 4) : +ym.slice(0, 4) - 1;
+  body.innerHTML = `${L.error ? `<p class="note warn">${esc(friendly(L.error))}</p>` : `<div class="fd-tiles">${tile('ready', 'Ready to file')}${tile('pay', 'Waiting for payment')}${tile('approval', 'Waiting for approval')}${tile('filed', 'Filed')}</div>
+      <p class="muted small" style="margin:-4px 0 12px">GSTR-1 and GSTR-3B · ${esc(label)}</p>`}
+    ${!gfAddon() ? '<p class="note small">The JLR add-on 1.6.0 is not seen in this Chrome — “File on portal”, PDFs and portal reading need it (Settings → GST → Download the add-on).</p>' : ''}
+    <section class="gf-sec"><h3>Monthly returns</h3><div class="gf-grid">
+      ${card('GSTR-1', 'Outward supplies', 'Workings → senior → upload JSON → file on portal (EVC)', '', 'returns')}${card('GSTR-3B', 'Summary return', 'Draft 3B, set-off, challan, fill on portal, file (EVC)', '', 'returns')}
+      ${card('Nil returns', 'GSTR-1 / 3B', 'Marked in GST review → Mark as Nil return', '', 'gst')}${card('TDS / TCS credit received', 'GSTR-2X', 'Accept / reject TDS and TCS credit', 'Stage 2', 'other')}</div></section>
+    <section class="gf-sec"><h3>Annual returns <span class="muted small">FY ${fy - 1}-${String(fy).slice(2)}</span></h3><div class="gf-grid">
+      ${card('GSTR-9', 'Annual return', `Due 31 Dec ${fy}`, 'Stage 4', 'annual')}${card('GSTR-9C', 'Reconciliation statement', `Due 31 Dec ${fy}`, 'Stage 4', 'annual')}</div></section>
+    <section class="gf-sec"><h3>Registration</h3><div class="gf-grid">
+      ${card('Registration applications', 'REG-01 / 14 / 16 / 21, CMP-02 / 04', 'New, amendment, composition, cancellation — with ARN tracking', 'Stage 3', 'reg')}
+      ${card('LUT', 'RFD-11', `FY ${fy + 1}-${String(fy + 2).slice(2)} — file before 1 Apr ${fy + 1}`, 'Stage 3', 'lut')}</div></section>
+    <section class="gf-sec"><h3>Downloads</h3><div class="gf-grid">
+      ${card('Filed GSTR-1 & 3B', 'PDF + ARN', 'All clients for the month — one at a time or a zip', '', 'downloads')}${card('GSTR-2B / 2A', 'JSON / Excel', 'Fetched in GST review', '', 'gst')}</div></section>
+    <section class="gf-sec"><h3>Other forms</h3><div class="gf-grid">${card('Payments, refunds, ITC forms, user services', 'About 50 portal items', 'See the full list and which stage each comes in', '', 'other')}</div></section>`;
+  body.onclick = e => {
+    const b = e.target.closest('[data-go]'); if (!b) return;
+    if (b.dataset.go === 'gst') { location.hash = '#/gst'; return; }
+    if (b.dataset.fdt) fdTab = b.dataset.fdt;
+    gfTab = b.dataset.go; try { localStorage.setItem('jlr.gfTab', gfTab); } catch { /* ignore */ } route();
+  };
+}
+async function gfDownloads(body, ym) {
+  const label = monthLabel(ym);
+  const t = await safe(sb.from('tasks').select('id,client_id,return_name,period,status,arn,filed_on').eq('period', label).limit(5000));
+  if (t.error) { body.innerHTML = `<p class="note warn">${esc(friendly(t.error))}</p>`; return; }
+  const tasks = (t.data || []).filter(x => REV.kindOf(x.return_name)), ids = tasks.map(x => x.id);
+  const acks = new Map();
+  for (let i = 0; i < ids.length; i += 200) { const a = await safe(sb.from('filing_acks').select('id,task_id,file_path,arn,filed_on').in('task_id', ids.slice(i, i + 200))); (a.data || []).forEach(x => { if (x.file_path && !acks.has(x.task_id)) acks.set(x.task_id, x); }); }
+  const by = new Map(); tasks.forEach(x => { const c = clientById(x.client_id); if (!c) return; const r = by.get(c.id) || { c, g1: null, g3: null }; r[REV.kindOf(x.return_name) === 'gstr1' ? 'g1' : 'g3'] = x; by.set(c.id, r); });
+  let list = [...by.values()].sort((a, b) => a.c.name.localeCompare(b.c.name));
+  const st = x => !x ? 'none' : acks.has(x.id) ? 'pdf' : x.status === 'Filed' ? 'nopdf' : 'open';
+  const f = gfDl.f; if (f === 'missing') list = list.filter(r => [r.g1, r.g3].some(x => st(x) === 'nopdf')); if (f === 'both') list = list.filter(r => st(r.g1) === 'pdf' && st(r.g3) === 'pdf');
+  if (gfDl.q) list = list.filter(r => (r.c.name + ' ' + (r.c.gstin || '')).toLowerCase().includes(gfDl.q.toLowerCase()));
+  const nPdf = [...acks.keys()].length;
+  const cell = x => { const s = st(x); if (s === 'none') return '<span class="muted small">—</span>';
+    if (s === 'pdf') { const a = acks.get(x.id); return `<span class="ok-t small"><b>Filed ${x.filed_on ? fmtDate(x.filed_on) : ''}</b></span><div class="muted small">${esc(x.arn || a.arn || '')}</div><button class="link small" data-pdf="${x.id}">Download PDF</button>`; }
+    if (s === 'nopdf') return `<span class="warn-t small"><b>Filed${x.filed_on ? ' ' + fmtDate(x.filed_on) : ''} — PDF not in the tracker</b></span><div><button class="link small" data-want="${x.id}">Get from portal</button></div>`;
+    return `<span class="muted small">${esc(x.status || 'Not filed')}</span>`; };
+  body.innerHTML = `<div class="toolbar"><label class="small muted">Show <select id="gfdF"><option value="">All clients</option><option value="missing" ${f === 'missing' ? 'selected' : ''}>PDF missing</option><option value="both" ${f === 'both' ? 'selected' : ''}>Both saved</option></select></label>
+      <input type="search" id="gfdQ" placeholder="Search client" value="${esc(gfDl.q)}" aria-label="Search client"><span class="spacer"></span>
+      <button class="btn" id="gfdTick">Download ticked (zip)</button><button class="btn primary" id="gfdAll" ${nPdf ? '' : 'disabled'}>Download all for ${esc(label)} (zip) · ${nPdf}</button></div>
+    ${list.length ? `<div class="table-wrap"><table><thead><tr><th><input type="checkbox" id="gfdAllTick" aria-label="Tick all"></th><th>Client</th><th>GSTR-1</th><th>GSTR-3B</th></tr></thead><tbody>
+      ${list.map(r => `<tr><td><input type="checkbox" data-tick="${r.c.id}" aria-label="Tick ${esc(r.c.name)}"></td><td class="wrap"><b>${esc(r.c.name)}</b><div class="muted small">${esc(r.c.gstin || '')}</div></td><td>${cell(r.g1)}</td><td>${cell(r.g3)}</td></tr>`).join('')}</tbody></table></div>`
+      : '<div class="empty">No GSTR-1 / GSTR-3B work for this month.</div>'}
+    <p class="muted small">PDFs come from the JLR add-on (taken from the portal when staff are logged in) or from “Upload ack”. <b>Get from portal</b> asks the add-on to take that month's PDFs the next time someone logs in to that client on the portal.</p>`;
+  const zip = async rowsSel => {
+    const L2 = []; rowsSel.forEach(r => [r.g1, r.g3].forEach(x => { if (x && acks.has(x.id)) L2.push({ x, a: acks.get(x.id), c: r.c }); }));
+    if (!L2.length) return toast('No PDFs to download', true);
+    try { await gfLoadZip(); } catch { return toast('Could not load the zip tool — check the internet connection', true); }
+    const z = new window.JSZip(); let n = 0;
+    for (const it of L2) { const d = await sb.storage.from('filing-acks').download(it.a.file_path); if (d.error || !d.data) continue;
+      z.file(`${(it.c.name || 'client').replace(/[\\/:*?"<>|]+/g, ' ').trim()} - ${it.x.return_name.replace(/[\\/]/g, '-')} ${label}.pdf`, d.data); n++; }
+    const blob = await z.generateAsync({ type: 'blob' }), a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `GST filed returns ${label}.zip`; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+    toast(`${n} PDF${n === 1 ? '' : 's'} in the zip`);
+  };
+  $('#gfdF', body).onchange = e => { gfDl.f = e.target.value; gfDownloads(body, ym); };
+  const q = $('#gfdQ', body); q.oninput = () => { clearTimeout(q._t); q._t = setTimeout(() => { gfDl.q = q.value; gfDownloads(body, ym).then(() => { const n = $('#gfdQ', body); if (n) { n.focus(); n.setSelectionRange(n.value.length, n.value.length); } }); }, 350); };
+  const at = $('#gfdAllTick', body); if (at) at.onchange = () => $$('[data-tick]', body).forEach(x => { x.checked = at.checked; });
+  $('#gfdAll', body).onclick = () => zip(list);
+  $('#gfdTick', body).onclick = () => { const s2 = new Set($$('[data-tick]:checked', body).map(x => x.dataset.tick)); if (!s2.size) return toast('Tick the clients first', true); zip(list.filter(r => s2.has(r.c.id))); };
+  body.onclick = e => {
+    const p = e.target.closest('[data-pdf]'); if (p) { const a = acks.get(p.dataset.pdf); if (a) ACK.open(a); return; }
+    const w = e.target.closest('[data-want]'); if (w) { const x = tasks.find(y => y.id === w.dataset.want), c = x && clientById(x.client_id); if (!c || !c.gstin) return toast('This client has no GSTIN', true);
+      if (!gfAddon()) return toast('The JLR add-on 1.6.0 is not seen in this Chrome', true);
+      window.postMessage({ __jlrq: 'want', items: [{ gstin: c.gstin.toUpperCase(), month: ym }] }, location.origin); toast(`The add-on will take ${c.name}'s ${label} PDFs the next time someone logs in to them on the portal`); }
+  };
+}
+const gfDl = { f: '', q: '' };
+function gfLoadZip() { return window.JSZip ? Promise.resolve() : new Promise((ok, bad) => { const s = document.createElement('script'); s.src = 'https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js'; s.onload = ok; s.onerror = bad; document.head.appendChild(s); }); }
+// "File on portal": hand the job to the JLR add-on — it opens the return on the portal, compares the figures and stops at EVC
+async function gfFileOnPortal(x, ym) {
+  if (!x.c.gstin) return toast('This client has no GSTIN', true);
+  if (!gfAddon() || gfAddon() < '1.6.0') return toast('Needs the JLR add-on 1.6.0 in this Chrome (Settings → GST → Download the add-on)', true);
+  const gate = await payGateMsg(x.t).catch(() => null); if (gate) return toast(gate, true);
+  const s = (x.g && x.g.summary) || {};
+  const job = { id: `${x.c.gstin.toUpperCase()}|${ym}|${x.k}`, gstin: x.c.gstin.toUpperCase(), month: ym, kind: x.k, client: x.c.name, task_id: x.t.id, at: new Date().toISOString(), by: (me && (me.full_name || me.email)) || '',
+    expect: x.k === 'gstr3b' ? { t3b: s.t3b || null, cash: gstCash(s) } : { sales: Math.round(+s.sales || 0), outTax: Math.round(+s.outTax || 0) } };
+  window.postMessage({ __jlrq: 'file', job }, location.origin);
+  toast(`Sent to the JLR add-on — log in to ${x.c.name} on the GST portal and press “File ${x.k === 'gstr1' ? 'GSTR-1' : 'GSTR-3B'}” in the JLR panel`);
+  if (confirm(`Open the GST portal login for ${x.c.name} now?`)) gstQuickLogin(x.c.id);
+}
 // v57: payment window and 3B portal sheet — used by the Filing desk and by GST review → GSTR-3B step 5
 function fdPayModal(x, label, ym, done) {
   const c0 = ((x.g || {}).summary || {}).cash || {}, p = x.pay || {}, due = (gstPayDue(x.c, ym) || {}).due || x.t.due_date || null;
@@ -8275,7 +8440,7 @@ const REV = (() => {
 })();
 
 // v78: this tab's code version — when a newer app is uploaded, offer Reload and block mails from old code
-const APP_VER = 'jlr-shell-v104';
+const APP_VER = 'jlr-shell-v105';
 let appStale = false;
 async function checkAppVer() {
   try { const t = await fetch('sw.js?v=' + Date.now(), { cache: 'no-store' }).then(r => r.text()); const live = (t.match(/jlr-shell-v\d+/) || [])[0];

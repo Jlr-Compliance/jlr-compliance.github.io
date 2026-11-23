@@ -1461,3 +1461,13 @@ input.otp{font-size:22px;letter-spacing:.35em;text-align:center;font-variant-num
 .gr-up{background:var(--blue-soft);border-radius:10px;padding:10px 12px;margin:8px 0 0}
 /* v66: document type tag (B2B, CRN, IMPG …) in 2B vs Books */
 .tag-ty{display:inline-block;font-size:10.5px;font-weight:600;letter-spacing:.02em;padding:0 5px;border-radius:4px;background:var(--surface-2,#eef1f5);color:var(--text-2,#4a5565);margin-right:2px}
+/* v105 GST features */
+.gf-tabs{flex-wrap:wrap}
+.gf-sec{margin:18px 0 6px}.gf-sec h3{margin:0 0 10px;font-size:1rem}
+.gf-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px}
+.gf-card{box-sizing:border-box;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:12px 14px;display:flex;flex-direction:column;gap:3px;text-align:left;font:inherit;color:inherit}
+.gf-card p{margin:4px 0 2px;color:var(--muted);line-height:1.45}
+.gf-ch{display:flex;justify-content:space-between;align-items:flex-start;gap:8px}
+.gf-click{cursor:pointer}.gf-click:hover:not([disabled]){border-color:var(--accent,#d42a3c)}.gf-click[disabled]{cursor:default;opacity:.85}
+@media (max-width:700px){.fd-tiles{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.gf-ch .pill{white-space:nowrap;flex:none}
