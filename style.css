@@ -1478,3 +1478,4 @@ input.otp{font-size:22px;letter-spacing:.35em;text-align:center;font-variant-num
 .g9t td{vertical-align:middle}.g9t tr.sub td{background:var(--surface-2,#f3f5f9)}.g9t tr.tot td{font-weight:600}
 .g9in{width:110px;text-align:right;font:inherit;font-size:.85rem;padding:4px 6px;border:1px solid var(--line);border-radius:6px;background:var(--surface)}
 .g9in.g9ov{border-color:#d97706;background:#fffbeb}
+.gf-stock{width:100%;table-layout:fixed}.gf-stock th:first-child{width:30%}.gf-stock input{width:100%;min-width:0;padding:6px 8px}.gf-stock td{padding:4px}

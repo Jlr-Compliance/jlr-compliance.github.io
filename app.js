@@ -1043,9 +1043,9 @@ const GF_FORMS = {
   reg: [['Registration', [
     ['New registration', 'REG-01', 'New GSTIN for a client', 'addon', 3], ['Multi-state registration', 'Same PAN, another state', 'Extra registration in another state', 'addon', 3],
     ['Reply to clarification', 'REG-03 → REG-04', 'Officer asked for details — reply within 7 working days', 'addon', 3], ['Geocoding business addresses', 'Principal / additional place', 'Confirm the map location of each address', 'addon', 3],
-    ['Amendment — core fields', 'REG-14', 'Name, address, partners / directors — officer approves', 'addon', 3], ['Amendment — non-core fields', 'REG-14', 'Phone, email, bank, goods / services — approved at once', 'addon', 3],
-    ['Opt for composition levy', 'CMP-02', 'Move to composition', 'addon', 3], ['Withdraw from composition', 'CMP-04', 'Leave composition', 'addon', 3],
-    ['Cancellation of registration', 'REG-16', 'Ask to cancel the GSTIN', 'addon', 3], ['Revocation of cancellation', 'REG-21', 'Get a cancelled GSTIN back', 'addon', 3],
+    ['Amendment — core fields', 'REG-14', 'Name, address, partners / directors — officer approves', 'addon', 3], ['Amendment — non-core fields', 'REG-14', 'Phone, email, bank, goods / services — the add-on fills a new bank account', 'addon', 6],
+    ['Opt for composition levy', 'CMP-02', 'Move to composition', 'addon', 6], ['Withdraw from composition', 'CMP-04', 'Leave composition', 'addon', 6],
+    ['Cancellation of registration', 'REG-16', 'Ask to cancel the GSTIN', 'addon', 6], ['Revocation of cancellation', 'REG-21', 'Get a cancelled GSTIN back', 'addon', 6],
     ['Declaration for specified premises', 'Annexure', 'Restaurant service in specified premises', 'addon', 3], ['Aadhaar authentication persons', 'Rule 14B', 'Select persons for Aadhaar authentication', 'addon', 3],
     ['Track application status', 'ARN', 'Officer status of every application', 'addon', 1]]]],
   annual: [['Annual returns', [
@@ -1059,7 +1059,7 @@ const GF_FORMS = {
       ['GSTR-4 / CMP-08', 'Composition', 'Yearly return and quarterly payment statement', 'api', 5], ['GSTR-7', 'TDS deductors', 'Government departments — monthly', 'api', 5],
       ['GSTR-8', 'TCS', 'E-commerce operators — monthly', 'api', 5], ['GSTR-10', 'Final return', 'After the registration is cancelled', 'api', 5], ['GSTR-11', 'UIN holders', 'Embassies, UN bodies', 'api', 5]]],
     ['Payments and ledgers', [['Ledgers', 'Cash / credit / liability', 'Balances read from the portal', 'api', 1], ['PMT-06', 'Challan', 'CPIN, paid CIN — already in GST review', 'api', 1],
-      ['PMT-09', 'Transfer', 'Move cash ledger balance between heads', 'addon', 2], ['RCM ITC statement', 'Opening balance', 'RCM paid vs ITC taken', 'api', 2],
+      ['PMT-09', 'Transfer', 'Move cash ledger balance between heads', 'addon', 6], ['RCM ITC statement', 'Opening balance', 'RCM paid vs ITC taken', 'api', 2],
       ['ITC reclaim statement', '4(B)(2) / 4(D)(1)', 'Temporary reversals and reclaims', 'api', 2], ['Negative liability statement', 'GSTR-3B', 'Negative liability carried forward', 'api', 2],
       ['DRC-03 / DRC-03A', 'Voluntary payment', 'Pay outside 3B, link to a demand', 'addon', 5], ['DRC-03 register', 'Payments made', 'With ARN', 'addon', 1], ['View PMT-03A', 'Re-credit order', 'Ledger re-credit orders', 'addon', 1]]],
     ['Refunds', [['RFD-01', 'Refund', 'Export, SEZ, inverted duty, excess cash', 'addon', 5], ['RFD-01W', 'Withdraw', 'Withdraw a refund application', 'addon', 5], ['Refund status', 'RFD-02 / 03 / 04 / 06', 'Acknowledgement, deficiency, orders', 'addon', 5]]],
@@ -1075,7 +1075,7 @@ const GF_FORMS = {
       ['Search advance ruling', 'Rulings', 'By state and subject', 'addon', 5], ['Cause list', 'Hearings', 'Appeal / proceeding dates', 'addon', 5], ['Locate GSTP', 'Practitioner', 'Find a GST practitioner', 'addon', 5],
       ['Holiday list', 'State-wise', 'Used for due dates', 'tracker', 5], ['My masters', 'Saved masters', 'HSN, customers, suppliers', 'addon', 5]]]]
 };
-const GF_STAGE = { 1: 'Ready', 2: 'Stage 2 · read from portal', 3: 'Stage 3 · applications', 4: 'Stage 4 · annual', 5: 'Ready · opened on the portal with your notes' };
+const GF_STAGE = { 1: 'Ready', 2: 'Stage 2 · read from portal', 3: 'Stage 3 · applications', 4: 'Stage 4 · annual', 5: 'Ready · opened on the portal with your notes', 6: 'Ready · filled on the portal by the add-on' };
 const GF_HOW = { api: ['API + add-on', 'b'], addon: ['Add-on', 'g'], tracker: ['Tracker', ''] };
 let gfTab = (() => { try { return localStorage.getItem('jlr.gfTab') || 'overview'; } catch { return 'overview'; } })();
 const gfAddon = () => document.documentElement.dataset.jlrAddon || '';          // set by the add-on's tracker.js (1.6.0+)
@@ -1254,8 +1254,8 @@ async function gfLut(body) {
 }
 // v107 stage 3: GST applications register (LUT, REG-14, CMP-02/04, REG-16/21 …) — prepared here, filled on the portal by the add-on, ARN tracked
 const GF_STATES = ['Andaman and Nicobar Islands', 'Andhra Pradesh', 'Arunachal Pradesh', 'Assam', 'Bihar', 'Chandigarh', 'Chhattisgarh', 'Dadra and Nagar Haveli and Daman and Diu', 'Delhi', 'Goa', 'Gujarat', 'Haryana', 'Himachal Pradesh', 'Jammu and Kashmir', 'Jharkhand', 'Karnataka', 'Kerala', 'Ladakh', 'Lakshadweep', 'Madhya Pradesh', 'Maharashtra', 'Manipur', 'Meghalaya', 'Mizoram', 'Nagaland', 'Odisha', 'Puducherry', 'Punjab', 'Rajasthan', 'Sikkim', 'Tamil Nadu', 'Telangana', 'Tripura', 'Uttar Pradesh', 'Uttarakhand', 'West Bengal'];
-const GF_APPFORMS = [['RFD-11', 'LUT — letter of undertaking', 'fill'], ['REG-14 non-core', 'Amendment — non-core fields', 'open'], ['REG-14 core', 'Amendment — core fields', 'open'], ['REG-04', 'Reply to clarification (REG-03)', 'open'],
-  ['CMP-02', 'Opt for composition', 'open'], ['CMP-04', 'Withdraw from composition', 'open'], ['REG-16', 'Cancellation of registration', 'open'], ['REG-21', 'Revocation of cancellation', 'open'],
+const GF_APPFORMS = [['RFD-11', 'LUT — letter of undertaking', 'fill'], ['REG-14 non-core', 'Amendment — non-core fields', 'fill'], ['REG-14 core', 'Amendment — core fields', 'open'], ['REG-04', 'Reply to clarification (REG-03)', 'open'],
+  ['CMP-02', 'Opt for composition', 'fill'], ['CMP-04', 'Withdraw from composition', 'fill'], ['REG-16', 'Cancellation of registration', 'fill'], ['REG-21', 'Revocation of cancellation', 'fill'],
   ['REG-01', 'New registration', 'open'], ['Geocoding', 'Geocoding business address', 'open'], ['Rule 14B', 'Aadhaar authentication persons', 'open'], ['Specified premises', 'Declaration for specified premises', 'open'],
   // v109 stage 5: other returns and forms — opened on the portal with the tracker's notes, ARN saved when the portal shows it
   ['GSTR-1A', 'Amend GSTR-1 (same month, before 3B)', 'open', 'ret'], ['IFF', 'Invoice furnishing facility (QRMP)', 'open', 'ret'], ['CMP-08', 'Composition — quarterly statement', 'open', 'ret'], ['GSTR-4', 'Composition — annual return', 'open', 'ret'],
@@ -1263,9 +1263,45 @@ const GF_APPFORMS = [['RFD-11', 'LUT — letter of undertaking', 'fill'], ['REG-
   ['GSTR-2X', 'Accept / reject TDS and TCS credit', 'open', 'ret'], ['RFD-01', 'Refund application', 'open', 'ret'], ['RFD-01W', 'Withdraw a refund application', 'open', 'ret'],
   ['ITC-01', 'Special ITC — new registration / leaving composition', 'open', 'ret'], ['ITC-02', 'Transfer of ITC on sale / merger', 'open', 'ret'], ['ITC-03', 'ITC reversal on opting composition', 'open', 'ret'], ['ITC-04', 'Job work', 'open', 'ret'],
   ['DRC-03', 'Voluntary payment', 'open', 'ret'], ['DRC-03A', 'Link DRC-03 to a demand', 'open', 'ret'], ['DRC-01B', 'Reply — GSTR-1 liability higher than 3B', 'open', 'ret'], ['DRC-01C', 'Reply — 2B ITC lower than 3B ITC', 'open', 'ret'],
-  ['PMT-09', 'Transfer within cash ledger', 'open', 'ret'], ['GSTP', 'Engage / disengage GST practitioner', 'open', 'ret'], ['GTA', 'GTA — forward charge option', 'open', 'ret'],
+  ['PMT-09', 'Transfer within cash ledger', 'fill', 'ret'], ['GSTP', 'Engage / disengage GST practitioner', 'open', 'ret'], ['GTA', 'GTA — forward charge option', 'open', 'ret'],
   ['Other', 'Other application', 'open']];
 const GF_RETFORMS = GF_APPFORMS.filter(f => f[3] === 'ret').map(f => f[0]);
+/* v113: forms the JLR add-on 2.1.0 fills on the portal (field names read from the portal's own page files on 23 Nov 2026).
+   [key, label, type, options] — type: text | date | sel (options [value, label]) | area | money | stock (REG-16 stock table) */
+const GF_SIGN = [['signatory', 'Authorised signatory (name as on the portal)', 'text'], ['signPlace', 'Place (for the verification)', 'text']];
+const GF_FILL = {
+  'REG-16': [['rsncan', 'Reason for cancellation', 'sel', [['CICB', 'Change in constitution — PAN changes'], ['CTPT', 'No longer liable (s.22 / 24) / opting out of voluntary registration'], ['DCOB', 'Discontinuance of business'], ['TRFB', 'Transfer — amalgamation, demerger or other disposal'], ['VOLR', 'Transfer on death of the proprietor'], ['OTHS', 'Others']]],
+    ['rsnOth', 'If Others — the reason', 'text'], ['candt', 'Cancel with effect from', 'date'], ['txgstin', 'GSTIN of the transferee (transfer / amalgamation)', 'text'], ['dtdeath', 'Date of death (proprietor)', 'date'],
+    ['stock', 'Stock held on the date of cancellation', 'stock'], ...GF_SIGN],
+  'REG-21': [['rsnrevoke', 'Reason for revocation', 'area'], ['rsndelay', 'Reason for delay (only if late)', 'area'], ...GF_SIGN],
+  'CMP-02': [['scheme', 'Composition under', 'sel', [['10(1)', 'Section 10(1) — goods / restaurant'], ['10(2A)', 'Section 10(2A) — services (6%)']]],
+    ['cat', 'Category (for 10(1))', 'sel', [['MGNAG', 'Manufacturer (other than notified goods)'], ['SMRCP', 'Restaurant service (food not alcohol)'], ['OTHRS', 'Any other supplier (trader)']]], ...GF_SIGN],
+  'CMP-04': [['reason', 'Reason for withdrawal (as on the portal list)', 'text'], ['othrsn', 'Other reason (if “Others”)', 'area'], ['wdate', 'Withdrawal from (date)', 'date'], ...GF_SIGN],
+  'REG-14 non-core': [['acno', 'New bank account number', 'text'], ['acty', 'Account type', 'sel', [['Current Account', 'Current Account'], ['Savings Account', 'Savings Account'], ['Cash Credit', 'Cash Credit'], ['Others', 'Others']]],
+    ['ifsc', 'IFSC', 'text'], ['reason', 'Reason for the amendment', 'area']],
+  'PMT-09': [['fromHead', 'Transfer from (major head)', 'sel', [['IGST', 'IGST'], ['CGST', 'CGST'], ['SGST', 'SGST / UTGST'], ['CESS', 'Cess']]],
+    ['fromMinor', 'From minor head', 'sel', [['Tax', 'Tax'], ['Interest', 'Interest'], ['Penalty', 'Penalty'], ['Fee', 'Fee'], ['Others', 'Others']]],
+    ['toHead', 'Transfer to (major head)', 'sel', [['IGST', 'IGST'], ['CGST', 'CGST'], ['SGST', 'SGST / UTGST'], ['CESS', 'Cess']]],
+    ['tax', 'Amount → Tax', 'money'], ['interest', 'Amount → Interest', 'money'], ['penalty', 'Amount → Penalty', 'money'], ['fee', 'Amount → Fee', 'money'], ['others', 'Amount → Others', 'money']]
+};
+const GF_STOCK = [['IP', 'Inputs'], ['IPS', 'Inputs in semi-finished goods'], ['IPF', 'Inputs in finished goods'], ['CGPM', 'Capital goods / plant and machinery']];
+const gfFillable = f => f === 'RFD-11' || !!GF_FILL[f];
+function gfFillHtml(form, d = {}) {
+  const F = GF_FILL[form]; if (!F) return '';
+  const fld = ([k, l, t, o]) => t === 'stock' ? `<div class="full"><span class="small muted">${esc(l)} — value and tax (₹)</span><div class="table-wrap"><table class="gf-stock"><thead><tr><th></th><th>Value</th><th>CGST</th><th>IGST</th><th>SGST</th><th>Cess</th></tr></thead><tbody>
+        ${GF_STOCK.map(([c, n]) => `<tr><td class="wrap small">${esc(n)}</td>${['v', 'cg', 'ig', 'sg', 'cs'].map(h => `<td><input name="gfx_stock_${c}_${h}" inputmode="decimal" value="${esc(((d.stock || {})[c] || {})[h] ?? '')}"></td>`).join('')}</tr>`).join('')}</tbody></table></div></div>`
+    : t === 'sel' ? `<label>${esc(l)}<select name="gfx_${k}"><option value="">—</option>${o.map(([v, n]) => `<option value="${esc(v)}" ${d[k] === v ? 'selected' : ''}>${esc(n)}</option>`).join('')}</select></label>`
+    : t === 'area' ? `<label class="full">${esc(l)}<textarea name="gfx_${k}" rows="2">${esc(d[k] || '')}</textarea></label>`
+    : `<label>${esc(l)}<input name="gfx_${k}" ${t === 'date' ? 'type="date"' : t === 'money' ? 'inputmode="decimal"' : ''} value="${esc(d[k] || '')}"></label>`;
+  return `<fieldset class="gf-fs" data-gfx="${esc(form)}"><legend>Filled on the portal by the add-on</legend><div class="form-grid">${F.map(fld).join('')}</div>
+    <p class="muted small" style="margin:6px 0 0">Declarations, uploads and signing (DSC / EVC) stay with you.${form === 'REG-14 non-core' ? ' Other non-core changes (address, contacts, partners) — write them in the notes; they open beside the form.' : ''}</p></fieldset>`;
+}
+function gfFillRead(el, form) {
+  const F = GF_FILL[form]; if (!F) return null; const d = {}, v = n => (($(`[name="${n}"]`, el) || {}).value || '').trim();
+  F.forEach(([k, , t]) => { if (t === 'stock') { const S = {}; GF_STOCK.forEach(([c]) => { const r = {}; ['v', 'cg', 'ig', 'sg', 'cs'].forEach(h => { const x = v(`gfx_stock_${c}_${h}`); if (x !== '') r[h] = x.replace(/,/g, ''); }); if (Object.keys(r).length) S[c] = r; }); if (Object.keys(S).length) d.stock = S; }
+    else { const x = v('gfx_' + k); if (x) d[k] = t === 'money' ? x.replace(/,/g, '') : k === 'ifsc' || k === 'txgstin' ? x.toUpperCase() : x; } });
+  return d;
+}
 const GF_APPST = { prepared: ['Prepared', ''], sent: ['Sent to add-on', 'b'], filled: ['Filled on portal', 'b'], submitted: ['Submitted', 'b'], clarification: ['Clarification asked', 'r'], approved: ['Approved', 'g'], rejected: ['Rejected', 'r'], withdrawn: ['Withdrawn', ''] };
 const gfFy = (off = 0) => { const d = new Date(), y = (d.getMonth() >= 3 ? d.getFullYear() : d.getFullYear() - 1) + off; return `${y}-${String(y + 1).slice(2)}`; };
 async function gfApps(body, only) {
@@ -1283,10 +1319,10 @@ async function gfApps(body, only) {
     ${L.length ? `<div class="table-wrap"><table><thead><tr><th>Client</th><th>Form</th><th>Status</th><th>ARN</th><th>Portal says</th><th></th></tr></thead><tbody>
       ${L.map(x => { const c = clientById(x.client_id), p = x.arn && arnMap.get(x.arn.toUpperCase()), F = GF_APPFORMS.find(f => f[0] === x.form);
         return `<tr data-id="${x.id}"><td class="wrap"><b>${esc(c.name)}</b><div class="muted small">${esc(c.gstin || '')}</div></td>
-          <td>${esc(x.form)}${x.fy ? ` <span class="muted small">FY ${esc(x.fy)}</span>` : ''}<div class="muted small">${esc((F || [, ''])[1])}${x.notes ? ' · ' + esc(x.notes.slice(0, 60)) : ''}</div></td>
+          <td class="wrap">${esc(x.form)}${x.fy ? ` <span class="muted small">FY ${esc(x.fy)}</span>` : ''}<div class="muted small">${esc((F || [, ''])[1])}${x.notes ? ' · ' + esc(x.notes.slice(0, 60)) : ''}</div></td>
           <td>${st(x)}</td><td class="small">${esc(x.arn || '')}${x.submitted_on ? `<div class="muted">${fmtDate(x.submitted_on)}</div>` : ''}</td>
           <td class="small">${p ? esc(p.sts || p.status || '') : '<span class="muted">—</span>'}</td>
-          <td class="row-btns">${['prepared', 'sent', 'filled'].includes(x.status) ? (x.form === 'RFD-11' ? '<button class="btn sm primary" data-ap="fill">Fill on portal</button>' : '<button class="btn sm" data-ap="open">Open on portal</button>') : ''}
+          <td class="row-btns">${['prepared', 'sent', 'filled'].includes(x.status) ? (gfFillable(x.form) ? '<button class="btn sm primary" data-ap="fill">Fill on portal</button>' : '<button class="btn sm" data-ap="open">Open on portal</button>') : ''}
             <button class="btn sm" data-ap="edit">Edit</button>${['prepared', 'sent', 'filled'].includes(x.status) ? '<button class="link small danger-t" data-ap="del">Delete</button>' : ''}</td></tr>`; }).join('')}</tbody></table></div>`
       : `<div class="empty small">No ${isRet ? 'return or form' : only ? 'LUT' : 'application'} in the tracker yet.</div>`}
     ${onPortal.length ? `<h3 style="margin:18px 0 8px">On the portal, not in the tracker <span class="muted small">(last 6 months, read by the add-on)</span></h3><div class="table-wrap"><table><thead><tr><th>Client</th><th>Form</th><th>ARN</th><th>Submitted</th><th>Status</th><th></th></tr></thead><tbody>
@@ -1308,7 +1344,8 @@ async function gfApps(body, only) {
     if (k === 'del') { if (!confirm('Delete this application from the tracker? (Nothing changes on the portal.)')) return; const r = await safe(sb.from('gst_applications').delete().eq('id', x.id)); if (r.error) return toast(friendly(r.error), true); return gfApps(body, only); }
     if (k === 'fill' || k === 'open') {
       const c = clientById(x.client_id); if (!c || !c.gstin) return toast('This client has no GSTIN', true);
-      if (!gfAddon() || gfAddon() < (GF_RETFORMS.includes(x.form) ? '2.0.0' : '1.8.0')) return toast(`Needs the JLR add-on ${GF_RETFORMS.includes(x.form) ? '2.0.0' : '1.8.0'} in this Chrome`, true);
+      const need = GF_FILL[x.form] ? '2.1.0' : GF_RETFORMS.includes(x.form) ? '2.0.0' : '1.8.0';
+      if (!gfAddon() || gfAddon() < need) return toast(`Needs the JLR add-on ${need} in this Chrome — reload the add-on from Settings → GST`, true);
       window.postMessage({ __jlrq: 'apply', job: { id: x.id, gstin: c.gstin.toUpperCase(), client: c.name, form: x.form, fy: x.fy, details: x.details || {}, notes: x.notes || '', by: (me && (me.full_name || me.email)) || '', at: new Date().toISOString() } }, location.origin);
       if (x.status === 'prepared') await safe(sb.from('gst_applications').update({ status: 'sent', updated_by: me.id, updated_at: new Date().toISOString() }).eq('id', x.id));
       toast(`Sent to the JLR add-on — log in to ${c.name} on the GST portal and press “${k === 'fill' ? 'Fill' : 'Open'} ${x.form}” in the JLR panel`);
@@ -1358,14 +1395,18 @@ function gfAppDialog(x, done, ret) {
       <label>Status<select name="status">${Object.entries(GF_APPST).map(([k, [l]]) => `<option value="${k}" ${(x ? x.status : 'prepared') === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
       ${ret ? `<label>Period / year<input name="fy" value="${esc((x && x.fy) || '')}" placeholder="Oct 2026 · Q3 2026-27"></label>` : ''}<label>ARN<input name="arn" value="${esc((x && x.arn) || '')}"></label><label>Submitted on<input type="date" name="sub" value="${esc((x && x.submitted_on) || '')}"></label>
       <label>Decided on<input type="date" name="dec" value="${esc((x && x.decided_on) || '')}"></label></div>
+    <div data-gfxwrap>${gfFillHtml(x ? x.form : (GF_APPFORMS.find(f => f[0] !== 'RFD-11' && (ret ? f[3] === 'ret' || f[0] === 'Other' : f[3] !== 'ret')) || [])[0], (x && x.details) || {})}</div>
     <label class="small" style="display:block;margin-top:8px">What is being changed / notes (shown beside the portal form)<textarea name="notes" rows="4">${esc((x && x.notes) || '')}</textarea></label>`, {
     saveText: 'Save', onSave: async el => {
       const f = n => ($(`[name=${n}]`, el) || {}).value || '';
-      const row = { form: f('form'), ...(ret ? { fy: f('fy').trim() || null } : {}), status: f('status'), arn: f('arn').trim().toUpperCase() || null, submitted_on: f('sub') || null, decided_on: f('dec') || null, notes: f('notes').trim() || null, updated_by: me.id, updated_at: new Date().toISOString() };
+      const fd = gfFillRead(el, f('form'));
+      const row = { form: f('form'), ...(ret ? { fy: f('fy').trim() || null } : {}), ...(fd ? { details: { ...((x && x.details) || {}), ...fd } } : {}), status: f('status'), arn: f('arn').trim().toUpperCase() || null, submitted_on: f('sub') || null, decided_on: f('dec') || null, notes: f('notes').trim() || null, updated_by: me.id, updated_at: new Date().toISOString() };
       const r = x ? await safe(sb.from('gst_applications').update(row).eq('id', x.id)) : await safe(sb.from('gst_applications').insert({ ...row, client_id: f('client') }));
       if (r.error) { toast(/gst_applications/.test(r.error.message || '') ? 'Run update-gst-applications.sql in Supabase first' : /duplicate|unique/i.test(r.error.message || '') ? 'This ARN is already in the tracker' : friendly(r.error), true); return false; }
       toast('Saved'); done && done();
-    } });
+    }, wide: true });
+  const fs = $('[name=form]', m.el), wrap = $('[data-gfxwrap]', m.el);
+  if (fs && wrap) fs.addEventListener('change', () => { wrap.innerHTML = gfFillHtml(fs.value, x && x.form === fs.value ? (x.details || {}) : {}); });
   return m;
 }
 /* =====================================================================
@@ -8870,7 +8911,7 @@ const REV = (() => {
 })();
 
 // v78: this tab's code version — when a newer app is uploaded, offer Reload and block mails from old code
-const APP_VER = 'jlr-shell-v111';
+const APP_VER = 'jlr-shell-v113';
 let appStale = false;
 async function checkAppVer() {
   try { const t = await fetch('sw.js?v=' + Date.now(), { cache: 'no-store' }).then(r => r.text()); const live = (t.match(/jlr-shell-v\d+/) || [])[0];
