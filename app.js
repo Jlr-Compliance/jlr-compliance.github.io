@@ -78,7 +78,7 @@ const ACC_GROUPS = [
   ['Overview', [['dashboard', 'Dashboard', 'staff', 'fixed'], ['calendar', 'Due-date calendar', 'staff'], ['work', 'All work / My work', 'staff']]],
   ['GST', [['work-gst', 'GST work', 'staff'], ['gst', 'GST review', 'staff'], ['filing', 'GST features', 'staff'],
     ['filing.overview', 'Overview', 'staff', 'fixed', 'filing'], ['filing.returns', 'GSTR-1 & 3B', 'staff', '', 'filing'], ['filing.reg', 'Registration', 'admin', 'grant', 'filing'],
-    ['filing.annual', 'GSTR-9 & 9C', 'staff', '', 'filing'], ['filing.lut', 'LUT', 'staff', '', 'filing'], ['filing.downloads', 'Filed downloads', 'staff', '', 'filing'],
+    ['filing.annual', 'GSTR-9 & 9C', 'staff', '', 'filing'], ['filing.lut', 'LUT', 'staff', '', 'filing'], ['filing.downloads', 'Filed downloads', 'staff', '', 'filing'], ['filing.reports', 'Year reports (GSTR-1, 2A, 2B, 3B, e-way bill …)', 'staff', '', 'filing'],
     ['filing.portal', 'Ledgers & portal', 'staff', '', 'filing'], ['filing.other', 'Other forms', 'admin', 'grant', 'filing'], ['gstin', 'GSTIN check', 'staff']]],
   ['TDS', [['work-tds', 'TDS / TCS work', 'staff'], ['tds', 'TDS working', 'staff']]],
   ['MCA', [['work-mca', 'MCA / ROC work', 'staff'], ['mca', 'Companies & LLPs', 'staff']]],
@@ -1072,7 +1072,7 @@ async function gfReturns(v, ym) {
    Stage 1 (built): Overview · GSTR-1 & 3B (file on portal through the add-on) · Filed downloads.
    Later stages are listed so the office can see what is coming.
    ===================================================================== */
-const GF_TABS = [['overview', 'Overview'], ['returns', 'GSTR-1 & 3B'], ['reg', 'Registration'], ['annual', 'GSTR-9 & 9C'], ['lut', 'LUT'], ['downloads', 'Filed downloads'], ['portal', 'Ledgers & portal'], ['other', 'Other forms']];
+const GF_TABS = [['overview', 'Overview'], ['returns', 'GSTR-1 & 3B'], ['reg', 'Registration'], ['annual', 'GSTR-9 & 9C'], ['lut', 'LUT'], ['downloads', 'Filed downloads'], ['reports', 'Reports'], ['portal', 'Ledgers & portal'], ['other', 'Other forms']];
 // v116/v117: which GST features tabs this login sees — Settings → Access control (Registration and Other forms: Admin only by default)
 const gfTabs = () => GF_TABS.filter(t => t[0] === 'overview' || can('filing.' + t[0]));
 const gfTabOk = k => gfTabs().some(t => t[0] === k);
@@ -1132,6 +1132,7 @@ VIEWS.filing = async v => {
   if (gfTab === 'returns') return gfReturns(body, ym);
   if (gfTab === 'overview') return gfOverview(body, ym);
   if (gfTab === 'downloads') return gfDownloads(body, ym);
+  if (gfTab === 'reports') return gfReports(body);
   if (gfTab === 'portal') return gfPortal(body);
   if (gfTab === 'lut') return gfLut(body);
   if (gfTab === 'reg') return gfApps(body);
@@ -1168,7 +1169,7 @@ async function gfOverview(body, ym) {
       ${can('filing.reg') ? card('Registration applications', 'REG-01 / 14 / 16 / 21, CMP-02 / 04', 'New, amendment, composition, cancellation — with ARN tracking', 'Stage 3', 'reg') : ''}
       ${card('LUT', 'RFD-11', `FY ${fy + 1}-${String(fy + 2).slice(2)} — file before 1 Apr ${fy + 1}`, 'Stage 3', 'lut')}</div></section>
     <section class="gf-sec"><h3>Downloads</h3><div class="gf-grid">
-      ${card('Filed GSTR-1 & 3B', 'PDF + ARN', 'All clients for the month — one at a time or a zip', '', 'downloads')}${card('GSTR-2B / 2A', 'JSON / Excel', 'Fetched in GST review', '', 'gst')}</div></section>
+      ${card('Filed GSTR-1 & 3B', 'PDF + ARN', 'All clients for the month — one at a time or a zip', '', 'downloads')}${card('Year reports', 'Excel per client', 'Full-year GSTR-1, 1A, e-invoices, 2A, 2B, 3B, ledgers, e-way bills, compliance', 'New', 'reports')}${card('GSTR-2B / 2A', 'JSON / Excel', 'Fetched in GST review', '', 'gst')}</div></section>
     ${can('filing.other') ? `<section class="gf-sec"><h3>Other forms</h3><div class="gf-grid">${card('Other returns and forms', 'GSTR-1A, IFF, CMP-08, GSTR-4 / 7 / 8 / 10, refunds, ITC-01–04, DRC-03 …', 'Status from the portal, register with ARN, opened on the portal with your notes', '', 'other')}</div></section>` : ''}`;
   body.onclick = e => {
     const b = e.target.closest('[data-go]'); if (!b) return;
@@ -1177,6 +1178,21 @@ async function gfOverview(body, ym) {
     if (!gfTabOk(b.dataset.go)) return;
     gfTab = b.dataset.go; try { localStorage.setItem('jlr.gfTab', gfTab); } catch { /* ignore */ } route();
   };
+}
+// v121: Reports tab — pick a client, then the report buttons (same as the Reports button in Filed downloads → Whole year)
+let gfRepClient = '';
+async function gfReports(body) {
+  const list = clients.filter(c => c.active !== false && c.gstin && !/not registered/i.test(c.gst_scheme || '')).sort((a, b) => a.name.localeCompare(b.name));
+  const pick = document.createElement('span'); pick.className = 'rp-pick';
+  pick.innerHTML = `<label class="small muted" for="grC">Client</label> <input list="grCl" id="grC" placeholder="Type client name or GSTIN" value="${esc((clientById(gfRepClient) || {}).name || '')}">
+    <datalist id="grCl">${list.map(c => `<option value="${esc(c.name)}">${esc(c.gstin)}</option>`).join('')}</datalist>`;
+  const inp = $('input', pick);
+  inp.onchange = () => { const v = inp.value.trim().toLowerCase(), c = v && (list.find(x => x.name.toLowerCase() === v || x.gstin.toLowerCase() === v) || list.find(x => (x.name + ' ' + x.gstin).toLowerCase().includes(v)));
+    if (c) { gfRepClient = c.id; inp.value = c.name; } go(); };
+  const go = () => { const c = clientById(gfRepClient);
+    if (!c) { body.innerHTML = `<div class="toolbar" id="grT"></div><div class="empty">Pick a client to see the reports. ${list.length} GST clients.</div>`; $('#grT', body).appendChild(pick); return; }
+    YR.panel(body, c, null, pick); };
+  go();
 }
 async function gfDownloads(body, ym) {
   if (gfDl.mode === 'year') return GFY.view(body);
@@ -1782,11 +1798,11 @@ const GFY = (() => {
         <span class="muted small"><b>${tHave}</b> of ${tNeed} PDFs in the tracker</span></div>
       <div class="toolbar"><button class="btn" id="gfyWant" title="Queue the missing months in the JLR add-on">Get missing from portal</button>
         <button class="btn" id="gfyXl">Excel list</button><button class="btn primary" id="gfyZip">Download year zip</button>
-        <span class="muted small">Buttons work on the ticked clients, or on all clients shown when none is ticked. <b>Year report</b> (each row): GSTR-1, 3B, 2B, 2A, books, ITC decisions and ledgers in one Excel.</span></div>
+        <span class="muted small">Buttons work on the ticked clients, or on all clients shown when none is ticked. <b>Reports</b> (each row): full-year GSTR-1, 1A, e-invoices, 2A, 2B, 3B, ledgers, e-way bills, compliance and comparisons — one Excel each.</span></div>
       ${d.noArchive ? '<p class="note warn small">Run <b>update-filed-archive.sql</b> in Supabase so PDFs of months with no work item (earlier years) can be kept.</p>' : ''}
       ${list.length ? `<div class="table-wrap gfy-wrap"><table class="gfy-t"><thead><tr><th><input type="checkbox" id="gfyAll" aria-label="Tick all"></th><th>Client</th>${d.M.map(ym => `<th>${esc(MS[(+ym.slice(5) + 8) % 12])}<div class="muted small">${ym.slice(2, 4)}</div></th>`).join('')}<th>Saved</th><th></th></tr></thead><tbody>
         ${list.map(c => { const n = rowCount(d, c); return `<tr><td><input type="checkbox" data-yt="${c.id}" aria-label="Tick ${esc(c.name)}"></td><td class="wrap"><b>${esc(c.name)}</b><div class="muted small">${esc(c.gstin)}${qrmp(c) ? ' · QRMP' : ''}</div></td>
-          ${d.M.map(ym => `<td class="gfy-m">${chip(c, 'gstr1', ym)}${chip(c, 'gstr3b', ym)}</td>`).join('')}<td class="small ${n.have === n.need ? 'ok-t' : ''}"><b>${n.have}</b>/${n.need}</td><td><button class="btn sm" data-yr="${c.id}" title="GSTR-1, 3B, 2B, 2A, books, ITC decisions and ledgers for the year in one Excel">Year report</button></td></tr>`; }).join('')}</tbody></table></div>`
+          ${d.M.map(ym => `<td class="gfy-m">${chip(c, 'gstr1', ym)}${chip(c, 'gstr3b', ym)}</td>`).join('')}<td class="small ${n.have === n.need ? 'ok-t' : ''}"><b>${n.have}</b>/${n.need}</td><td><button class="btn sm" data-yr="${c.id}" title="Year reports: GSTR-1, 1A, e-invoices, 2A, 2B, 3B, ledgers, e-way bills, compliance, comparisons">Reports</button></td></tr>`; }).join('')}</tbody></table></div>`
         : '<div class="empty">No clients to show.</div>'}
       <p class="muted small"><span class="gfy-c ok">1</span> PDF in the tracker (click to open) · <span class="gfy-c nopdf">1</span> filed, PDF missing · <span class="gfy-c open">1</span> in the tracker, not filed · <span class="gfy-c none">1</span> nothing in the tracker yet · <span class="gfy-c na">·</span> not due (QRMP) — “1” = GSTR-1, “3B” = GSTR-3B.<br>
         <b>Get missing from portal</b>: the JLR add-on (2.3.0) takes each missing month's filed PDFs with the ARN the next time staff log in to that client on the GST portal — about a minute a month. Nothing is filed or changed on the portal. Keep this tracker open in another tab so the PDFs are saved.</p>`;
@@ -1846,7 +1862,7 @@ const GFY = (() => {
     cache = null;
     return { key: it.key, ok: true, final: true, msg: `${c.name} · ${label} ${mon} filed PDF saved (filed returns archive)${it.arn ? ' · ARN ' + it.arn : ''}` };
   }
-  return { view, switchHtml, bindSwitch, archive, months, defFy, load, sheetRows, _reset: () => { cache = null; } };
+  return { view, switchHtml, bindSwitch, archive, months, defFy, load, sheetRows, zipYear, _reset: () => { cache = null; } };
 })();
 /* ---------- v120: GST Year report — one Excel per client per financial year ----------
    Sources (best first): what the JLR add-on read from the portal for the year (gst_year_data), the add-on's monthly copies
@@ -1888,7 +1904,8 @@ const YR = (() => {
         const t = taxes(node), note = !!ntNo, cr = note && !/^d/i.test(node.ntty || node.typ_nt || 'C'), s = cr ? -1 : 1;
         out.push({ sec, g: c.g || '', n: c.n || '', no: String(no), d: day(node.idt || node.nt_dt || node.ntdt), ty: note ? (cr ? 'C' : 'D') : (node.inv_typ || c.exp || ''),
           rc: node.rchrg || node.rev || '', pos: node.pos || c.pos || '', t: s * t.t, ig: s * t.ig, cg: s * t.cg, sg: s * t.sg, cs: s * t.cs, rt: t.rt,
-          sb: node.sbnum || '', sbd: day(node.sbdt), port: node.sbpcode || '', against: note ? (node.inum || '') : '', fd: day(c.fd), fp: c.fp || '' });
+          sb: node.sbnum || '', sbd: day(node.sbdt), port: node.sbpcode || '', against: note ? (node.inum || '') : '', fd: day(c.fd), fp: c.fp || '',
+          irn: node.irn || '', irnd: day(node.irngendate || node.irn_dt), srct: node.srctyp || '' });
         return;
       }
       if (node.hsn_sc) { out.push({ sec: 'HSN', tab: c.tab || '', hsn: String(node.hsn_sc), desc: node.desc || node.user_desc || '', uqc: node.uqc || '', qty: n(node.qty), rt: node.rt != null ? +node.rt : null, t: n(node.txval), ig: n(node.iamt), cg: n(node.camt), sg: n(node.samt), cs: n(node.csamt) }); return; }
@@ -1923,7 +1940,7 @@ const YR = (() => {
     const M = GFY.months(fs), p1 = `${M[0]}-01`, p12 = `${M[11]}-01`;
     const [gm, yd, pl, tk, ar, pi] = await Promise.all([
       safe(sb.from('gst_months').select('period,sales,purchases,gstr2b,gstr1,gstr3b,summary,reco').eq('client_id', c.id).gte('period', p1).lte('period', p12)),
-      safe(sb.from('gst_year_data').select('period,data,fetched_at').eq('client_id', c.id).in('period', [...M, `FY${fyL(fs)}`])),
+      safe(sb.from('gst_year_data').select('period,data,fetched_at').eq('client_id', c.id).in('period', [...M, `FY${fyL(fs)}`, `EWB${fyL(fs)}`])),
       safe(sb.from('gst_portal_pulls').select('period,kind,data,pulled_at').eq('client_id', c.id).gte('period', p1).lte('period', p12)),
       safe(sb.from('tasks').select('return_name,period,status,arn,filed_on').eq('client_id', c.id).limit(2000)),
       safe(sb.from('gst_filed_pdfs').select('kind,month,arn,filed_on').eq('client_id', c.id).in('month', M)),
@@ -1942,6 +1959,11 @@ const YR = (() => {
       if (!x.g1.length && p.gstr1_b2b) x.g1 = rows('B2B', p.gstr1_b2b);
       x.g1sum = (y.g1 && sum1(y.g1.summary)) || (p.gstr1 && sum1(p.gstr1)) || (g.gstr1 && g.gstr1.secs && g.gstr1.secs.map(s => ({ nm: s.nm, t: s.t * (s.sign || 1), ig: s.ig * (s.sign || 1), cg: s.cg * (s.sign || 1), sg: s.sg * (s.sign || 1), cs: s.cs * (s.sign || 1), n: +s.n || 0, signed: true }))) || null;
       x.have.g1 = x.g1.some(r => r.sec !== 'HSN') ? 'detail' : x.g1sum ? 'summary' : '';
+      // v121: GSTR-1A (from Jul-2024) and e-invoices (GSTR-1 documents with an IRN)
+      x.g1a = []; const a1 = y.g1a || null; if (a1 && a1.secs) Object.entries(a1.secs).forEach(([s, j]) => { x.g1a.push(...rows(s, j).filter(r => r.sec !== 'HSN' && r.sec !== 'NIL')); });
+      x.g1aSt = a1 ? (a1.status || (x.g1a.length ? 'filed' : 'nil')) : ''; x.f1a = a1 && (a1.arn || a1.filed) ? { arn: a1.arn || '', on: a1.filed || '' } : null;
+      x.have.g1a = ym < '2024-07' ? 'na' : a1 ? (a1.status === 'error' ? 'err' : 'portal') : '';
+      x.einv = x.g1.filter(r => r.irn);
       // GSTR-3B
       x.g3 = (y.g3 && g3(y.g3)) || (p.gstr3b && g3(p.gstr3b)) || g3track(g.gstr3b);
       x.have.g3 = x.g3 ? (x.g3.full ? 'portal' : 'tracker') : '';
@@ -1959,6 +1981,7 @@ const YR = (() => {
       x.f1 = filed[`gstr1|${ym}`] || null; x.f3 = filed[`gstr3b|${ym}`] || null;
       out.months[ym] = x;
     }
+    const EW = (ydB[`EWB${fyL(fs)}`] || {}).data; out.ewb = EW && (EW.out || EW.in) ? { out: EW.out || [], in: EW.in || [], at: EW.at || (ydB[`EWB${fyL(fs)}`] || {}).fetched_at, errors: EW.errors || [] } : null;
     const L = (ydB[`FY${fyL(fs)}`] || {}).data;
     const curFs = (() => { const d = new Date(); return d.getMonth() >= 3 ? d.getFullYear() : d.getFullYear() - 1; })();
     if (L && (L.creditTx || L.cashTx)) out.ledgers = { ...L, from: 'year' };
@@ -1966,10 +1989,43 @@ const YR = (() => {
     return out;
   }
   // what is missing for "Get from portal"
-  const missing = D => D.M.filter(ym => { const h = D.months[ym].have; return h.g1 !== 'detail' || h.g3 !== 'portal' || !h.g2b || !h.g2a; });
+  const missing = D => D.M.filter(ym => { const h = D.months[ym].have; return h.g1 !== 'detail' || h.g3 !== 'portal' || !h.g2b || !h.g2a || h.g1a === ''; });
+
+  // v121: one report = some sheets of the year workbook (plus the sheets their formulas need)
+  const REPORTS = [
+    ['consolidated', 'Consolidated Report (GSTR-1 vs 2A vs 3B)', ['Consolidated', 'GSTR-1 Summary', 'GSTR-1 B2B', 'GSTR-1 B2C', 'GSTR-1 CDN', 'GSTR-1 EXP', 'GSTR-3B Summary', 'GSTR-2A Summary', 'GSTR-2A Invoices', 'GSTR-2B Summary', 'GSTR-2B Invoices', 'GSTR-1 vs 3B', '2B vs 3B ITC', '2A vs 2B']],
+    ['g1', 'Full Year GSTR-1 (Outward Supply)', ['GSTR-1 Summary', 'GSTR-1 B2B', 'GSTR-1 B2C', 'GSTR-1 CDN', 'GSTR-1 EXP', 'GSTR-1 HSN']],
+    ['g1a', 'Full Year GSTR-1A (Outward Supply)', ['GSTR-1A']],
+    ['einv', 'Full Year GSTR-1 (E-Invoices)', ['E-Invoices']],
+    ['g2a', 'Full Year GSTR-2A (Inward Supply)', ['GSTR-2A Summary', 'GSTR-2A Invoices']],
+    ['g2b', 'Full Year GSTR-2B (Inward Supply)', ['GSTR-2B Summary', 'GSTR-2B Invoices', 'GSTR-2B Supplier-wise', 'Temp Reversal Register']],
+    ['g3b', 'Full Year GSTR-3B', ['GSTR-3B Summary']],
+    ['pdf', 'GSTR-1 / GSTR-3B PDF', null],
+    ['ledger', 'Electronic Ledger Report', ['Credit Ledger', 'Cash Ledger', 'Reclaim Ledger', 'Temp Reversal Register', 'GSTR-3B Summary']],
+    ['ewbout', 'E-Way Bill Report (Outward)', ['E-Way Bills (Outward)', 'GSTR-1 B2B', 'GSTR-1 EXP']],
+    ['ewbin', 'E-Way Bill Report (Inward)', ['E-Way Bills (Inward)', 'GSTR-2B Invoices']],
+    ['compliance', 'Compliance Report', ['Due dates & Late fee', 'GSTR-1 Summary', 'GSTR-1 B2B', 'GSTR-1 B2C', 'GSTR-1 CDN', 'GSTR-1 EXP', 'GSTR-3B Summary', 'GSTR-1A']],
+    ['taxitc', 'Tax liabilities and ITC Comparison', ['GSTR-1 vs 3B', '2B vs 3B ITC', 'GSTR-1 Summary', 'GSTR-1 B2B', 'GSTR-1 B2C', 'GSTR-1 CDN', 'GSTR-1 EXP', 'GSTR-3B Summary', 'GSTR-2B Summary', 'GSTR-2B Invoices']],
+    ['full', 'Full Year report (all sheets)', null]];
+  const repOf = k => REPORTS.find(r => r[0] === k) || REPORTS[REPORTS.length - 1];
+  // what each report needs from the portal, and whether this year has it
+  function ready(D, k) {
+    const ms = D.M, H = f => ms.filter(ym => { const v = D.months[ym].have[f]; return v && v !== 'na' && v !== 'err'; }).length, due = f => ms.filter(ym => D.months[ym].have[f] !== 'na').length;
+    const pc = (a, b) => b ? `${a}/${b} months` : '—';
+    switch (k) {
+      case 'g1': return pc(H('g1'), 12); case 'g1a': return pc(H('g1a'), due('g1a'));
+      case 'einv': { const n = ms.reduce((a, ym) => a + D.months[ym].einv.length, 0); return H('g1') ? `${n} e-invoice${n === 1 ? '' : 's'}` : '—'; }
+      case 'g2a': return pc(H('g2a'), 12); case 'g2b': return pc(H('g2b'), 12); case 'g3b': return pc(H('g3'), 12);
+      case 'consolidated': case 'taxitc': return pc(Math.min(H('g1'), H('g3'), H(k === 'taxitc' ? 'g2b' : 'g2a')), 12);
+      case 'compliance': return pc(ms.filter(ym => D.months[ym].f1 || D.months[ym].f3).length, 12);
+      case 'ledger': return D.ledgers ? 'read' : '—';
+      case 'ewbout': case 'ewbin': { if (!D.ewb) return '—'; const q = D.ewb[k === 'ewbout' ? 'out' : 'in'].length; return `${q} bill${q === 1 ? '' : 's'}`; }
+      default: return '';
+    }
+  }
 
   // ---------- build the workbook ----------
-  async function build(D) {
+  async function build(D, mode) {
     const { c, fs, M } = D, XP = await loadXlsxPopulate();
     const res = await fetch('gst-year-report.xlsx', { cache: 'no-store' });
     if (!res.ok) throw new Error('The year report template (gst-year-report.xlsx) is not on the site yet');
@@ -1979,7 +2035,8 @@ const YR = (() => {
     S('Year Summary').cell('A1').value(`Year summary — FY ${fyL(fs)}`);
     const LBL = M.map(lab);
     ['Year Summary', 'GSTR-1 Summary', 'Sales vs GSTR-1', 'GSTR-3B Summary', 'GSTR-2B Summary', 'GSTR-2A Summary', '2A vs 2B', 'ITC Decisions', 'GSTR-1 vs 3B', '2B vs 3B ITC',
-      'Books vs Returns', 'Reclaim Ledger', 'Due dates & Late fee'].forEach(nm => LBL.forEach((t, i) => S(nm).cell(6 + i, 1).value(t)));
+      'Books vs Returns', 'Reclaim Ledger', 'Due dates & Late fee', 'Consolidated'].forEach(nm => LBL.forEach((t, i) => S(nm).cell(6 + i, 1).value(t)));
+    LBL.forEach((t, i) => { S('E-Invoices').cell(6 + i, 17).value(t); S('GSTR-1A').cell(6 + i, 17).value(t); });
     LBL.forEach((t, i) => { S('Credit Ledger').cell(6 + i, 13).value(t); S('Cash Ledger').cell(6 + i, 15).value(t); });
     M.forEach((ym, i) => S('Due dates & Late fee').cell(6 + i, 2).value(new Date(+ym.slice(0, 4), +ym.slice(5) - 1, 1)));
     // one row of values / formulas ({r} = row number)
@@ -1995,7 +2052,7 @@ const YR = (() => {
       CDN = all1.filter(r => /^CDN/.test(r.sec)), EXP = all1.filter(r => r.sec === 'EXP'), HSN = all1.filter(r => r.sec === 'HSN'), NIL = all1.filter(r => r.sec === 'NIL');
     const ty1 = t => ({ SEWP: 'SEZWP', SEWOP: 'SEZWOP', R: 'R', DE: 'DE', CBW: 'R' })[String(t || 'R').toUpperCase()] || 'R';
     let ws = S('GSTR-1 B2B');
-    B2B.forEach((x, i) => put(ws, 6 + i, [x.m, x.g, x.n, x.no, x.d, ty1(x.ty), /^y/i.test(x.rc) ? 'Y' : 'N', x.pos, '', x.rt, x.t, x.ig, x.cg, x.sg, x.cs, F('=SUM(K{r}:O{r})'), '',
+    B2B.forEach((x, i) => put(ws, 6 + i, [x.m, x.g, x.n, x.no, x.d, ty1(x.ty), /^y/i.test(x.rc) ? 'Y' : 'N', x.pos, '', x.rt, x.t, x.ig, x.cg, x.sg, x.cs, F('=SUM(K{r}:O{r})'), x.irn ? 'Y' : '',
       key(x.g, x.no), F(`=IF(COUNTIF('Sales Register (Books)'!$O:$O,R{r})>0,"Yes","Not in books")`)]));
     filter(ws, 'S', 6, B2B);
     ws = S('GSTR-1 B2C');
@@ -2015,6 +2072,25 @@ const YR = (() => {
       ws.cell(r, 17).formula(`SUMIFS($F$6:$F$${hl},${crit})`); ['H', 'I', 'J', 'K'].forEach((col, k) => ws.cell(r, 18 + k).formula(`SUMIFS($${col}$6:$${col}$${hl},${crit})`));
       ws.cell(r, 22).formula(`SUM(S${r}:U${r})`); });
     if (uq.length) { const tr = 6 + uq.length; ws.cell(tr, 14).value('Total'); for (let col = 17; col <= 22; col++) ws.cell(tr, col).formula(`SUM(${String.fromCharCode(64 + col)}6:${String.fromCharCode(64 + col)}${tr - 1})`); }
+
+    // v121: e-invoices (GSTR-1 documents with an IRN) and GSTR-1A
+    const EI = all1.filter(r => r.irn);
+    ws = S('E-Invoices');
+    EI.forEach((x, i) => put(ws, 6 + i, [x.m, x.sec, x.g, x.n, x.no, x.d, x.ty === 'C' ? 'CRN' : x.ty === 'D' ? 'DBN' : 'INV', x.irn, x.irnd, x.t, x.ig, x.cg, x.sg, x.cs, F('=SUM(K{r}:N{r})')])); filter(ws, 'O', 6, EI);
+    if (EI.length) M.forEach((ym, i) => ws.cell(6 + i, 21).value(all1.filter(r => r.m === lab(ym) && r.no && !r.irn && /^(B2B|EXP|CDNR)/.test(r.sec)).length));
+    else if (all1.length) notes.push('E-invoices: the portal gave no IRN with the GSTR-1 documents');
+    const A1 = M.flatMap(ym => D.months[ym].g1a.map(r => ({ ...r, m: lab(ym) })));
+    ws = S('GSTR-1A');
+    A1.forEach((x, i) => put(ws, 6 + i, [x.m, x.sec, x.g, x.n, x.no, x.d, x.ty, x.pos, x.rt, x.t, x.ig, x.cg, x.sg, x.cs, F('=SUM(K{r}:N{r})')])); filter(ws, 'O', 6, A1);
+    M.forEach((ym, i) => { const x = D.months[ym]; if (x.f1a) { if (x.f1a.on) ws.cell(6 + i, 21).value(day(x.f1a.on)); if (x.f1a.arn) ws.cell(6 + i, 22).value(x.f1a.arn); }
+      else if (x.have.g1a === 'portal' && !x.g1a.length) ws.cell(6 + i, 22).value('Nil / not filed'); });
+    // v121: e-way bills (from the e-way bill portal)
+    const EWBs = (nm, L) => { ws = S(nm); const R = (L || []).map(e => ({ ...e, D: day(e.dt) })).filter(e => e.D).sort((a, b) => a.D - b.D);
+      R.forEach((e, i) => { const ym = iso(e.D).slice(0, 7);
+        put(ws, 6 + i, [lab(ym), e.no, e.D, e.sup || '', e.doc || '', e.dno || '', day(e.ddt), e.gstin || '', e.name || '', e.from || '', e.to || '', e.hsn || '', n(e.t), n(e.ig), n(e.cg), n(e.sg), n(e.cs), n(e.val), e.st || '', day(e.valid), e.veh || '', key(e.gstin, e.dno),
+          F(nm.includes('Outward') ? `=IF(V{r}="","",IF(COUNTIF('GSTR-1 B2B'!$R:$R,V{r})+COUNTIF('GSTR-1 EXP'!$M:$M,V{r})>0,"Yes","Not in GSTR-1"))` : `=IF(V{r}="","",IF(COUNTIF('GSTR-2B Invoices'!$R:$R,V{r})>0,"Yes","Not in 2B"))`)]); });
+      filter(ws, 'W', 6, R); return R.length; };
+    if (D.ewb) { EWBs('E-Way Bills (Outward)', D.ewb.out); EWBs('E-Way Bills (Inward)', D.ewb.in); } else notes.push('E-way bills: not read from the e-way bill portal for this year');
 
     // GSTR-1 Summary: months with only the summary (no invoice detail) get values; nil from NIL section or summary; filed date / ARN
     ws = S('GSTR-1 Summary');
@@ -2164,6 +2240,23 @@ const YR = (() => {
       } else notes.push('Cash ledger: no entries read for this year');
     } else notes.push('Ledgers: not read from the portal for this year');
 
+    // v121: one report — keep its sheets, clear formulas that point to sheets taken out
+    const R = repOf(mode || 'full'), keep = R[2] ? new Set(['Contents', ...R[2]]) : null;
+    if (keep) {
+      const gone = wb.sheets().map(x => x.name()).filter(nm => !keep.has(nm));
+      if (keep.has('GSTR-2A Summary') && !keep.has('Due dates & Late fee')) M.forEach((ym, i) => { const r = 6 + i, d = new Date(+ym.slice(0, 4), +ym.slice(5), 11);
+        S('GSTR-2A Summary').cell(r, 9).formula(`COUNTIFS('GSTR-2A Invoices'!$A:$A,$A${r},'GSTR-2A Invoices'!$E:$E,">"&DATE(${d.getFullYear()},${d.getMonth() + 1},11))`); });
+      const pat = new RegExp(`(^|[^A-Za-z0-9_])'?(${gone.map(g => g.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})'?!`);
+      [...keep].forEach(nm => { const w = S(nm); if (!w) return; const ur = w.usedRange(); if (!ur) return; const hit = new Set();
+        ur.forEach(cell => { const f = cell.formula(); if (f && pat.test(f)) { cell.value(undefined); hit.add(cell.columnNumber()); } });
+        const end = ur.endCell().rowNumber();
+        hit.forEach(col => { let any = false; for (let r = 6; r <= end && !any; r++) { const v = w.cell(r, col); any = v.value() != null || !!v.formula(); } if (!any) w.cell(5, col).value(undefined); }); });
+      const cs0 = S('Contents'), cu = cs0.usedRange();
+      if (cu) for (let r = 6; r <= cu.endCell().rowNumber(); r++) { const v = cs0.cell(r, 1).value(); if (typeof v === 'string' && gone.includes(v)) [1, 2, 3].forEach(col => { const cl = cs0.cell(r, col); cl.value(undefined); if (col === 1) cs0.hyperlink(cl.address(), null); }); }
+      gone.forEach(nm => wb.deleteSheet(nm));
+      wb.moveSheet(R[2][0], 1);
+      cs0.cell('A1').value(`${R[1]} — FY ${fyL(fs)}`);
+    }
     // contents: when and from what
     const src = M.map(ym => { const h = D.months[ym].have; return `${lab(ym)}: GSTR-1 ${h.g1 || '—'}, 3B ${h.g3 || '—'}, 2B ${h.g2b || '—'}, 2A ${h.g2a || '—'}, books ${h.sales ? 'sales' : ''}${h.sales && h.purch ? '+' : ''}${h.purch ? 'purchases' : ''}${!h.sales && !h.purch ? '—' : ''}`; });
     S('Contents').cell('A3').value(`Made by the JLR tracker on ${new Date().toLocaleDateString('en-IN')} by ${me.full_name || me.email}. ${notes.length ? 'Gaps: ' + [...new Set(notes)].slice(0, 12).join(' · ') + (notes.length > 12 ? ' …' : '') : 'All months read.'}`);
@@ -2171,47 +2264,110 @@ const YR = (() => {
     cs.cell(r, 1).value('What was available'); src.forEach((t, i) => cs.cell(r + 1 + i, 2).value(t));
     wb.activeSheet('Contents');
     const blob = await wb.outputAsync(), a = document.createElement('a');
-    a.href = URL.createObjectURL(blob); a.download = `GST Year Report ${(c.client_code || c.name).replace(/[\\/:*?"<>|]+/g, ' ')} FY ${fyL(fs)}.xlsx`; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    a.href = URL.createObjectURL(blob); a.download = `${keep ? R[1].replace(/[()]/g, '').replace(/\s+/g, ' ') : 'GST Year Report'} ${(c.client_code || c.name).replace(/[\\/:*?"<>|]+/g, ' ')} FY ${fyL(fs)}.xlsx`; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
     return { notes, rows: { sales: SR.length, purchases: PR.length, b2b: B2B.length, g2b: B2.length, g2a: A2.length } };
   }
 
-  // ---------- the window ----------
+  // ---------- the window (v121: report buttons) ----------
   async function open(c, fs0) {
     if (!c || !c.gstin) return toast('This client has no GSTIN', true);
-    let fs = fs0 || GFY.defFy();
-    const m = modal(`GST Year report — ${c.name}`, '<div class="loading">Checking what is in the tracker…</div>', { wide: true, saveText: 'Download Year report', onSave: async () => {
-      try { toast('Making the year report…'); const D = await load(c, fs), r = await build(D);
-        toast(`Year report downloaded${r.notes.length ? ' — see Contents for months not complete' : ''}`); } catch (e) { toast(friendly(e), true); }
-      return false; } });
-    const body = $('.modal-body', m.el);
+    const m = modal(`GST reports — ${c.name}`, '<div class="loading">Checking what is in the tracker…</div>', { wide: true });
+    await panel($('.modal-body', m.el), c, fs0);
+  }
+  // cards on the Reports screen: [report key, title, what it is, description, group]
+  const CARDS = [
+    ['g1', 'GSTR-1', 'Excel · 6 sheets', 'Summary, B2B, B2C, credit notes, exports, HSN — all 12 months', 'Returns'],
+    ['g1a', 'GSTR-1A', 'Excel · 1 sheet', 'Documents added or changed in GSTR-1A, month-wise with ARN', 'Returns'],
+    ['einv', 'E-invoices', 'Excel · 1 sheet', 'GSTR-1 invoices with IRN; invoices without IRN each month', 'Returns'],
+    ['g3b', 'GSTR-3B', 'Excel · 1 sheet', '3.1, ITC table 4, payment, interest, late fee, filed date and ARN', 'Returns'],
+    ['g2b', 'GSTR-2B', 'Excel · 4 sheets', 'Summary, every document, supplier-wise, temporary reversal register', 'Purchases / ITC'],
+    ['g2a', 'GSTR-2A', 'Excel · 2 sheets', 'Summary and every document with supplier filing date', 'Purchases / ITC'],
+    ['consolidated', 'GSTR-1 vs 2A vs 3B', 'Excel · consolidated', 'Outward tax GSTR-1 vs 3B; ITC 2A vs 2B vs 3B, month-wise with differences', 'Comparisons'],
+    ['taxitc', 'Tax liability and ITC', 'Excel · 2 sheets', 'GSTR-1 vs 3B (Rule 88C) and 2B vs 3B ITC (Rule 88D) checks', 'Comparisons'],
+    ['ledger', 'Electronic ledgers', 'Excel · 3 sheets', 'Credit, cash and reversal & reclaim ledgers, checked with 3B', 'Ledgers & compliance'],
+    ['compliance', 'Compliance', 'Excel · 1 sheet', 'Due date vs filed date, days late, late fee and interest for GSTR-1 / 3B', 'Ledgers & compliance'],
+    ['ewbout', 'E-way bills — outward', 'Excel · 1 sheet', 'Every e-way bill the client made, matched with GSTR-1', 'E-way bills'],
+    ['ewbin', 'E-way bills — inward', 'Excel · 1 sheet', 'E-way bills made on the client, matched with 2B', 'E-way bills'],
+    ['full', 'Full year report', 'Excel · all sheets', 'All of the above plus books vs returns, ITC decisions and the GSTR-9 helper', 'Everything'],
+    ['pdf', 'Filed GSTR-1 & 3B PDFs', 'Zip', 'The filed PDFs with ARN, one folder', 'Everything']];
+  async function panel(body, c, fs0, slot) {
+    let fs = fs0 || GFY.defFy(), busy = false;
     const draw = async () => {
       body.innerHTML = '<div class="loading">Checking what is in the tracker…</div>';
       const D = await load(c, fs), miss = missing(D), fys = []; for (let y = GFY.defFy() + 1; y >= 2017; y--) fys.push(y);
-      const mark = v => v === 'detail' || v === 'portal' || v === 'yes' ? '<span class="ok-t">✓</span>' : v === 'summary' ? '<span class="warn-t" title="Totals only">totals</span>' : v === 'tracker' ? '<span class="warn-t" title="From GST review">GST review</span>' : '<span class="muted">—</span>';
+      const chip = v => `<span class="gfy-c ${v === 'y' ? 'ok' : v === 'p' ? 'nopdf' : v === 'x' ? 'na' : 'none'}" style="cursor:default">${{ y: '✓', p: '½', x: '·' }[v] || '—'}</span>`;
+      const g = (ym, f) => { const h = D.months[ym].have, x = D.months[ym];
+        switch (f) {
+          case 'g1': return h.g1 === 'detail' ? 'y' : h.g1 === 'summary' ? 'p' : 'n';
+          case 'g1a': return h.g1a === 'na' ? 'x' : h.g1a === 'portal' ? 'y' : h.g1a === 'err' ? 'p' : 'n';
+          case 'g3': return h.g3 === 'portal' ? 'y' : h.g3 ? 'p' : 'n';
+          case 'g2b': return h.g2b === 'portal' ? 'y' : h.g2b ? 'p' : 'n';
+          case 'g2a': return h.g2a ? 'y' : 'n';
+          case 'einv': return x.einv.length ? 'y' : 'n';
+          case 'books': return h.sales && h.purch ? 'y' : h.sales || h.purch ? 'p' : 'n';
+          case 'led': return D.ledgers ? 'y' : 'n';
+          case 'ewb': return D.ewb ? 'y' : 'n';
+        } };
+      const ROWS = [['g1', 'GSTR-1'], ['g1a', 'GSTR-1A'], ['g3', 'GSTR-3B'], ['g2b', 'GSTR-2B'], ['g2a', 'GSTR-2A'], ['einv', 'E-invoices (IRN)'], ['books', 'Sales / purchase register'], ['led', 'Ledgers'], ['ewb', 'E-way bills']];
+      const badge = k => { if (k === 'pdf') return '<span class="pill rp-no" data-pdfb>…</span>';
+        const st = ready(D, k), m = /^(\d+)\/(\d+) months$/.exec(st);
+        if (m) return `<span class="pill ${+m[1] === +m[2] && +m[2] ? 'rp-ok' : +m[1] ? 'rp-wn' : 'rp-no'}">${+m[1] || !+m[2] ? `${m[1]}/${m[2]}` : 'Not read'}</span>`;
+        if (k === 'full') { const n = miss.length; return `<span class="pill ${n ? 'rp-wn' : 'rp-ok'}">${n ? `${12 - n}/12` : '12/12'}</span>`; }
+        if (!st || st === '—') return '<span class="pill rp-no">Not read</span>';
+        if (k === 'einv') return `<span class="pill rp-ok">${esc(st.replace(/ e-invoices?/, ' IRN'))}</span>`;
+        return `<span class="pill rp-ok">${esc(st === 'read' ? 'Read' : st)}</span>`; };
+      const card = ([k, t, f, d]) => { const ewb = /^ewb/.test(k) && !D.ewb;
+        return `<div class="gf-card rp-card"><div class="gf-ch"><b>${esc(t)}</b>${badge(k)}</div><span class="muted small">${esc(f)}</span><p class="small">${esc(d)}</p>
+          <div class="rp-act">${ewb ? '<button class="btn sm" data-ewbget>Get from e-way bill portal</button>' : `<button class="btn sm ${k === 'pdf' ? '' : 'primary'}" data-rep="${k}">${k === 'pdf' ? 'Download zip' : 'Download'}</button>`}</div></div>`; };
+      const grp = nm => CARDS.filter(x => x[4] === nm).map(card).join('');
+      const sec = (nm, cls = 'g2') => `<section class="gf-sec"><h3>${esc(nm)}</h3><div class="gf-grid ${cls}">${grp(nm)}</div></section>`;
       body.innerHTML = `${D.notReadYet ? '<p class="note warn small">Run <b>update-year-report.sql</b> in Supabase so the add-on can keep a whole year from the portal.</p>' : ''}
-        <div class="toolbar"><label class="small muted">Financial year <select id="yrFy">${fys.map(y => `<option value="${y}" ${y === fs ? 'selected' : ''}>FY ${fyL(y)}</option>`).join('')}</select></label><span class="spacer"></span>
-          <button class="btn" id="yrGet" ${miss.length ? '' : 'disabled'}>Get ${miss.length ? miss.length + ' month' + (miss.length === 1 ? '' : 's') : 'nothing'} from the portal</button></div>
-        <div class="table-wrap"><table class="yr-av"><thead><tr><th>Month</th><th>GSTR-1</th><th>GSTR-3B</th><th>GSTR-2B</th><th>GSTR-2A</th><th>Sales register</th><th>Purchase register</th><th>ITC decisions</th></tr></thead><tbody>
-          ${D.M.map(ym => { const h = D.months[ym].have; return `<tr><td><b>${lab(ym)}</b></td><td>${mark(h.g1)}</td><td>${mark(h.g3)}</td><td>${mark(h.g2b)}</td><td>${mark(h.g2a)}</td><td>${mark(h.sales)}</td><td>${mark(h.purch)}</td><td>${mark(h.dec)}</td></tr>`; }).join('')}
-          <tr><td><b>Ledgers</b></td><td colspan="7">${D.ledgers ? `<span class="ok-t">✓</span> credit and cash ledger entries ${D.ledgers.from === 'daily' ? '(daily read, this year)' : ''}` : '<span class="muted">— not read for this year</span>'}</td></tr></tbody></table></div>
-        <p class="muted small"><b>Get from the portal</b>: the JLR add-on (2.4.0) reads GSTR-1 (all tables), GSTR-3B, GSTR-2B, GSTR-2A and the ledgers for these months the next time someone logs in to ${esc(c.name)} on the GST portal in this Chrome — about a minute a month. Keep this tracker open in another tab so it is saved.
-          Sales / purchase registers and ITC decisions come from GST review. The report is made with whatever is here now; Contents lists any month that is not complete.</p>`;
+        <div class="toolbar"><span id="rpSlot"></span><label class="small muted">Financial year <select id="yrFy">${fys.map(y => `<option value="${y}" ${y === fs ? 'selected' : ''}>FY ${fyL(y)}</option>`).join('')}</select></label>
+          <span class="muted small">${esc(c.gstin)}</span><span class="spacer"></span>
+          <button class="btn" id="yrGet" ${miss.length ? '' : 'disabled'} title="GSTR-1, 1A, 3B, 2B, 2A and the ledgers — the add-on reads them after you log in to the client on the GST portal">${miss.length ? `Get ${miss.length} missing month${miss.length === 1 ? '' : 's'} from GST portal` : 'All months in the tracker'}</button></div>
+        <div class="rp-top"><div class="card rp-have"><div class="small" style="margin-bottom:6px"><b>What is in the tracker for FY ${fyL(fs)}</b> <span class="muted">— reports use only what is here; “Get missing months” fills the gaps</span></div>
+          <div class="table-wrap"><table class="rp-t"><thead><tr><th></th>${D.M.map(ym => `<th class="small">${MS[D.M.indexOf(ym)]}</th>`).join('')}</tr></thead><tbody>
+            ${ROWS.map(([f, nm]) => `<tr><td class="small"><b>${nm}</b></td>${D.M.map(ym => `<td>${chip(g(ym, f))}</td>`).join('')}</tr>`).join('')}</tbody></table></div>
+          <div class="muted small" style="margin-top:4px">${chip('y')} in the tracker · ${chip('p')} part · ${chip('n')} not yet · ${chip('x')} not due</div></div>
+          <div class="rp-side"><h3>Everything</h3>${grp('Everything')}</div></div>
+        ${sec('Returns', 'g4')}<div class="rp-row">${sec('Purchases / ITC')}${sec('Comparisons')}</div><div class="rp-row">${sec('Ledgers & compliance')}${sec('E-way bills')}</div>
+        <p class="muted small"><b>Get missing months</b>: the JLR add-on (2.5.0) reads GSTR-1 (with IRN), GSTR-1A, GSTR-3B, GSTR-2B, GSTR-2A and the ledgers the next time someone logs in to ${esc(c.name)} on the GST portal in this Chrome — about a minute a month. Keep this tracker open in another tab so it is saved.</p>`;
+      if (slot) $('#rpSlot', body).appendChild(slot);
       $('#yrFy', body).onchange = e => { fs = +e.target.value; draw(); };
       $('#yrGet', body).onclick = () => {
         if (!gfAddon()) return toast('The JLR add-on is not seen in this Chrome — install it from Settings → GST automation', true);
         window.postMessage({ __jlrq: 'year', items: [{ gstin: c.gstin.toUpperCase(), fy: fyL(fs), months: miss, ledgers: !D.ledgers || D.ledgers.from !== 'year' }] }, location.origin);
         toast(`Asked the add-on for ${miss.length} month${miss.length === 1 ? '' : 's'} — log in to ${c.name} on the GST portal`);
       };
+      $$('[data-ewbget]', body).forEach(b => b.onclick = () => {
+        if (!gfAddon()) return toast('The JLR add-on is not seen in this Chrome — install it from Settings → GST automation', true);
+        if (String(gfAddon()).localeCompare('2.6.0', undefined, { numeric: true }) < 0) return toast('E-way bills need the next add-on update (2.6.0) — it is made after we check the e-way bill portal with a client login', true);
+        window.postMessage({ __jlrq: 'ewb', items: [{ gstin: c.gstin.toUpperCase(), fy: fyL(fs) }] }, location.origin);
+        toast(`Asked the add-on for FY ${fyL(fs)} e-way bills — log in to ${c.name} on ewaybillgst.gov.in`);
+      });
+      $$('[data-rep]', body).forEach(b => b.onclick = async () => {
+        if (busy) return; busy = true; const k = b.dataset.rep, t0 = b.innerHTML; b.classList.add('busy');
+        try {
+          if (k === 'pdf') { const d = await GFY.load(fs); if (d.error) throw d.error; await GFY.zipYear(d, [c], fs, b); return; }
+          b.textContent = 'Making…'; const r = await build(await load(c, fs), k);
+          toast(`Downloaded${r.notes.length ? ' — see Contents for anything not complete' : ''}`);
+        } catch (e) { toast(friendly(e), true); } finally { busy = false; b.classList.remove('busy'); b.innerHTML = t0; b.disabled = false; }
+      });
+      // filed PDFs count (all clients' filed list is cached for a minute)
+      GFY.load(fs).then(d => { const el = $('[data-pdfb]', body); if (!el || d.error) return; let need = 0, have = 0;
+        d.M.forEach(ym => ['gstr1', 'gstr3b'].forEach(k => { const v = d.get(c, k, ym); if (v.st === 'na') return; need++; if (v.st === 'pdf') have++; }));
+        el.textContent = `${have}/${need}`; el.className = `pill ${have && have === need ? 'rp-ok' : have ? 'rp-wn' : 'rp-no'}`; }).catch(() => {});
     };
     await draw();
   }
   // the add-on brought one month (or the year's ledgers) from the portal
   async function save(c, it) {
     const r = await safe(sb.from('gst_year_data').upsert({ client_id: c.id, period: it.period, data: it.data || {}, fetched_at: new Date(it.at || Date.now()).toISOString(), fetched_by: me.id }, { onConflict: 'client_id,period' }));
-    if (r.error) return { key: it.key, final: /gst_year_data/.test(r.error.message || ''), msg: /gst_year_data/.test(r.error.message || '') ? 'Run update-year-report.sql in Supabase' : friendly(r.error) };
+    if (r.error) { const em = r.error.message || '', ck = /period_check|violates check/i.test(em);
+      return { key: it.key, final: ck || /gst_year_data/.test(em), msg: ck ? 'Run update-reports-v121.sql in Supabase (e-way bills)' : /gst_year_data/.test(em) ? 'Run update-year-report.sql in Supabase' : friendly(r.error) }; }
     return { key: it.key, ok: true, final: true, quiet: true, msg: `${c.name} · ${it.period} saved for the year report` };
   }
-  return { load, build, open, save, rows, g3, sum1, missing };
+  return { load, build, open, panel, save, rows, g3, sum1, missing, REPORTS, ready };
 })();
 
 function gfLoadZip() { return window.JSZip ? Promise.resolve() : new Promise((ok, bad) => { const s = document.createElement('script'); s.src = 'https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js'; s.onload = ok; s.onerror = bad; document.head.appendChild(s); }); }
@@ -9519,7 +9675,7 @@ const REV = (() => {
 })();
 
 // v78: this tab's code version — when a newer app is uploaded, offer Reload and block mails from old code
-const APP_VER = 'jlr-shell-v120';
+const APP_VER = 'jlr-shell-v121';
 let appStale = false;
 async function checkAppVer() {
   try { const t = await fetch('sw.js?v=' + Date.now(), { cache: 'no-store' }).then(r => r.text()); const live = (t.match(/jlr-shell-v\d+/) || [])[0];
