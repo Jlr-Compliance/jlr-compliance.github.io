@@ -84,7 +84,7 @@ const ACC_GROUPS = [
   ['MCA', [['work-mca', 'MCA / ROC work', 'staff'], ['mca', 'Companies & LLPs', 'staff']]],
   ['Notices', [['notices', 'All notices', 'staff'], ['notices-gst', 'GST notices', 'staff'], ['notices-tds', 'TDS notices', 'staff'], ['notices-mca', 'MCA notices', 'staff']]],
   ['Tools', [['bank', 'Bank statements', 'staff'], ['acks', 'Filing acknowledgements', 'staff'], ['calc', 'Late fee calculator', 'staff'], ['checklists', 'Checklists', 'staff'], ['updates', 'Law updates', 'staff']]],
-  ['Clients', [['clients', 'Clients list', 'manager', 'grant'], ['clients.edit', 'Add / edit / import clients', 'manager', 'grant', 'clients'], ['docs', 'Documents for the month', 'staff'],
+  ['Clients', [['clients.all', 'All clients (unticked: only their own clients — default staff or work / notice given to them)', 'manager', 'grant'], ['clients', 'Clients list', 'manager', 'grant'], ['clients.edit', 'Add / edit / import clients', 'manager', 'grant', 'clients'], ['docs', 'Documents for the month', 'staff'],
     ['onboarding', 'Onboarding', 'staff'], ['renewals', 'Renewals (DSC, LUT…)', 'staff'], ['inbox', 'Client mail', 'staff'], ['clientreport', 'Monthly client reports', 'staff']]],
   ['Payments & billing', [['taxpay', 'Tax payment intimation', 'staff'], ['billing', 'Billing & fees', 'manager']]],
   ['Office', [['health', 'Client health', 'manager'], ['workload', 'Team workload', 'manager'], ['profit', 'Fees & profitability', 'partner'], ['reports', 'Reports', 'partner'], ['activity', 'Activity log', 'partner']]],
@@ -9012,7 +9012,7 @@ const REV = (() => {
 })();
 
 // v78: this tab's code version — when a newer app is uploaded, offer Reload and block mails from old code
-const APP_VER = 'jlr-shell-v117';
+const APP_VER = 'jlr-shell-v118';
 let appStale = false;
 async function checkAppVer() {
   try { const t = await fetch('sw.js?v=' + Date.now(), { cache: 'no-store' }).then(r => r.text()); const live = (t.match(/jlr-shell-v\d+/) || [])[0];
