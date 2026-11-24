@@ -1038,6 +1038,9 @@ async function gfReturns(v, ym) {
    Later stages are listed so the office can see what is coming.
    ===================================================================== */
 const GF_TABS = [['overview', 'Overview'], ['returns', 'GSTR-1 & 3B'], ['reg', 'Registration'], ['annual', 'GSTR-9 & 9C'], ['lut', 'LUT'], ['downloads', 'Filed downloads'], ['portal', 'Ledgers & portal'], ['other', 'Other forms']];
+// v116: Registration and Other forms are Admin only for now (GST features on hold) — other logins see the rest
+const GF_ADMIN_TABS = ['reg', 'other'];
+const gfTabs = () => GF_TABS.filter(t => isAdmin() || !GF_ADMIN_TABS.includes(t[0]));
 // [name, form, what it is, how (api = GST API + add-on, addon = add-on only, tracker), stage]
 const GF_FORMS = {
   reg: [['Registration', [
@@ -1082,11 +1085,11 @@ const gfAddon = () => document.documentElement.dataset.jlrAddon || '';          
 VIEWS.filing = async v => {
   await loadRefs();
   if (!fdMonth) fdMonth = prevMonth();
-  if (!GF_TABS.some(t => t[0] === gfTab)) gfTab = 'overview';
+  if (!gfTabs().some(t => t[0] === gfTab)) gfTab = 'overview';
   const ym = fdMonth;
   v.innerHTML = `<div class="page-head"><h2>GST features</h2><span class="muted">Every GST return and form for all clients — prepare, approve, pay, file, download</span><span class="spacer"></span>
       <label class="small muted" for="fdM">Return month</label><input type="month" id="fdM" value="${esc(ym)}"></div>
-    <div class="seg gf-tabs" role="tablist" aria-label="GST features">${GF_TABS.map(([k, l]) => `<button role="tab" aria-selected="${gfTab === k}" class="${gfTab === k ? 'on' : ''}" data-gft="${k}">${l}</button>`).join('')}</div>
+    <div class="seg gf-tabs" role="tablist" aria-label="GST features">${gfTabs().map(([k, l]) => `<button role="tab" aria-selected="${gfTab === k}" class="${gfTab === k ? 'on' : ''}" data-gft="${k}">${l}</button>`).join('')}</div>
     <div id="gfBody" style="margin-top:14px"><div class="loading">Loading…</div></div>`;
   $('#fdM', v).onchange = e => { fdMonth = e.target.value || prevMonth(); route(); };
   $$('[data-gft]', v).forEach(b => b.onclick = () => { gfTab = b.dataset.gft; try { localStorage.setItem('jlr.gfTab', gfTab); } catch { /* ignore */ } route(); });
@@ -1096,6 +1099,7 @@ VIEWS.filing = async v => {
   if (gfTab === 'downloads') return gfDownloads(body, ym);
   if (gfTab === 'portal') return gfPortal(body);
   if (gfTab === 'lut') return gfLut(body);
+  if (!isAdmin() && GF_ADMIN_TABS.includes(gfTab)) gfTab = 'overview';
   if (gfTab === 'reg') return gfApps(body);
   if (gfTab === 'annual') return gfAnnual(body);
   if (gfTab === 'other') return gfOther(body);
@@ -1127,15 +1131,16 @@ async function gfOverview(body, ym) {
     <section class="gf-sec"><h3>Annual returns <span class="muted small">FY ${fy - 1}-${String(fy).slice(2)}</span></h3><div class="gf-grid">
       ${card('GSTR-9', 'Annual return', `Due 31 Dec ${fy}`, '', 'annual')}${card('GSTR-9C', 'Reconciliation statement', `Due 31 Dec ${fy}`, '', 'annual')}</div></section>
     <section class="gf-sec"><h3>Registration</h3><div class="gf-grid">
-      ${card('Registration applications', 'REG-01 / 14 / 16 / 21, CMP-02 / 04', 'New, amendment, composition, cancellation — with ARN tracking', 'Stage 3', 'reg')}
+      ${isAdmin() ? card('Registration applications', 'REG-01 / 14 / 16 / 21, CMP-02 / 04', 'New, amendment, composition, cancellation — with ARN tracking', 'Stage 3', 'reg') : ''}
       ${card('LUT', 'RFD-11', `FY ${fy + 1}-${String(fy + 2).slice(2)} — file before 1 Apr ${fy + 1}`, 'Stage 3', 'lut')}</div></section>
     <section class="gf-sec"><h3>Downloads</h3><div class="gf-grid">
       ${card('Filed GSTR-1 & 3B', 'PDF + ARN', 'All clients for the month — one at a time or a zip', '', 'downloads')}${card('GSTR-2B / 2A', 'JSON / Excel', 'Fetched in GST review', '', 'gst')}</div></section>
-    <section class="gf-sec"><h3>Other forms</h3><div class="gf-grid">${card('Other returns and forms', 'GSTR-1A, IFF, CMP-08, GSTR-4 / 7 / 8 / 10, refunds, ITC-01–04, DRC-03 …', 'Status from the portal, register with ARN, opened on the portal with your notes', '', 'other')}</div></section>`;
+    ${isAdmin() ? `<section class="gf-sec"><h3>Other forms</h3><div class="gf-grid">${card('Other returns and forms', 'GSTR-1A, IFF, CMP-08, GSTR-4 / 7 / 8 / 10, refunds, ITC-01–04, DRC-03 …', 'Status from the portal, register with ARN, opened on the portal with your notes', '', 'other')}</div></section>` : ''}`;
   body.onclick = e => {
     const b = e.target.closest('[data-go]'); if (!b) return;
     if (b.dataset.go === 'gst') { location.hash = '#/gst'; return; }
     if (b.dataset.fdt) fdTab = b.dataset.fdt;
+    if (!isAdmin() && GF_ADMIN_TABS.includes(b.dataset.go)) return;
     gfTab = b.dataset.go; try { localStorage.setItem('jlr.gfTab', gfTab); } catch { /* ignore */ } route();
   };
 }
@@ -8938,7 +8943,7 @@ const REV = (() => {
 })();
 
 // v78: this tab's code version — when a newer app is uploaded, offer Reload and block mails from old code
-const APP_VER = 'jlr-shell-v114';
+const APP_VER = 'jlr-shell-v116';
 let appStale = false;
 async function checkAppVer() {
   try { const t = await fetch('sw.js?v=' + Date.now(), { cache: 'no-store' }).then(r => r.text()); const live = (t.match(/jlr-shell-v\d+/) || [])[0];
