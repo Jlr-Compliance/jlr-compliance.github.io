@@ -69,6 +69,38 @@ const isPartner = () => !!me && ['admin', 'partner'].includes(me.role);         
 const isManager = () => !!me && ['admin', 'partner', 'manager'].includes(me.role);    // + all work, clients, billing
 const ROLE_LABEL = { admin: 'Admin', partner: 'Partner', manager: 'Manager', staff: 'Team member' };
 
+/* ---------- v117: access control — Admin picks what each role can see (Settings → Access control) ----------
+   item: [key, label, lowest role that sees it by default, opt]
+   opt 'fixed' = cannot be changed · 'grant' = can also be given to lower roles · none = can only be taken away (its data needs that role) */
+const ROLE_LV = { staff: 0, manager: 1, partner: 2, admin: 3 };
+const ACC_ROLES = ['partner', 'manager', 'staff'];
+const ACC_GROUPS = [
+  ['Overview', [['dashboard', 'Dashboard', 'staff', 'fixed'], ['calendar', 'Due-date calendar', 'staff'], ['work', 'All work / My work', 'staff']]],
+  ['GST', [['work-gst', 'GST work', 'staff'], ['gst', 'GST review', 'staff'], ['filing', 'GST features', 'staff'],
+    ['filing.overview', 'Overview', 'staff', 'fixed', 'filing'], ['filing.returns', 'GSTR-1 & 3B', 'staff', '', 'filing'], ['filing.reg', 'Registration', 'admin', 'grant', 'filing'],
+    ['filing.annual', 'GSTR-9 & 9C', 'staff', '', 'filing'], ['filing.lut', 'LUT', 'staff', '', 'filing'], ['filing.downloads', 'Filed downloads', 'staff', '', 'filing'],
+    ['filing.portal', 'Ledgers & portal', 'staff', '', 'filing'], ['filing.other', 'Other forms', 'admin', 'grant', 'filing'], ['gstin', 'GSTIN check', 'staff']]],
+  ['TDS', [['work-tds', 'TDS / TCS work', 'staff'], ['tds', 'TDS working', 'staff']]],
+  ['MCA', [['work-mca', 'MCA / ROC work', 'staff'], ['mca', 'Companies & LLPs', 'staff']]],
+  ['Notices', [['notices', 'All notices', 'staff'], ['notices-gst', 'GST notices', 'staff'], ['notices-tds', 'TDS notices', 'staff'], ['notices-mca', 'MCA notices', 'staff']]],
+  ['Tools', [['bank', 'Bank statements', 'staff'], ['acks', 'Filing acknowledgements', 'staff'], ['calc', 'Late fee calculator', 'staff'], ['checklists', 'Checklists', 'staff'], ['updates', 'Law updates', 'staff']]],
+  ['Clients', [['clients', 'Clients list', 'manager', 'grant'], ['clients.edit', 'Add / edit / import clients', 'manager', 'grant', 'clients'], ['docs', 'Documents for the month', 'staff'],
+    ['onboarding', 'Onboarding', 'staff'], ['renewals', 'Renewals (DSC, LUT…)', 'staff'], ['inbox', 'Client mail', 'staff'], ['clientreport', 'Monthly client reports', 'staff']]],
+  ['Payments & billing', [['taxpay', 'Tax payment intimation', 'staff'], ['billing', 'Billing & fees', 'manager']]],
+  ['Office', [['health', 'Client health', 'manager'], ['workload', 'Team workload', 'manager'], ['profit', 'Fees & profitability', 'partner'], ['reports', 'Reports', 'partner'], ['activity', 'Activity log', 'partner']]],
+  ['Admin', [['team', 'Team & logins', 'admin', 'fixed'], ['settings', 'Settings', 'admin', 'fixed']]]
+];
+const ACC_MAP = Object.fromEntries(ACC_GROUPS.flatMap(g => g[1]).map(([k, l, def, opt, parent]) => [k, { k, l, def, opt: opt || '', parent }]));
+const accBase = (role, a) => (ROLE_LV[role] ?? 0) >= ROLE_LV[a.def];
+function canRole(role, k, R) {
+  const a = ACC_MAP[k]; if (!a || role === 'admin') return true;
+  const base = accBase(role, a); if (a.opt === 'fixed') return base;
+  const r = (((R || settings.access_rules || {})[role]) || {})[k];
+  if (r === undefined || r === null) return base;
+  return !!r && (base || a.opt === 'grant');
+}
+const can = k => !!me && canRole(me.role, k);
+
 /* ---------- small helpers ---------- */
 const esc = s => (s ?? '').toString().replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const pad = n => String(n).padStart(2, '0');
@@ -685,7 +717,9 @@ async function loadRefs() {
     sb.from('linked_rules').select('*').order('id'),
     sb.from('client_groups').select('*').order('name')          // v43: empty if update-client-groups.sql has not been run yet
   ]);
+  const accOld = JSON.stringify(settings.access_rules || {});
   profiles = p.data || []; clients = c.data || []; settings = s.data || {};
+  if (me && accOld !== JSON.stringify(settings.access_rules || {}) && $('#nav')) $('#nav').innerHTML = navGroups();   // v117: Admin changed access
   templates = t.error ? [] : t.data || []; rules = r.error ? [] : r.data || [];
   groupsOn = !gr.error; groups = gr.error ? [] : gr.data || [];
 }
@@ -740,11 +774,11 @@ function navGroups() {
     ['MCA', [['work-mca', isManager() ? 'MCA / ROC work' : 'My MCA work', 'mca'], ['mca', 'Companies & LLPs', 'companies']]],
     !settings.notices_off && ['Notices', [['notices', 'All notices', 'notices'], ['notices-gst', 'GST notices', 'notices'], ['notices-tds', 'TDS notices', 'notices'], ['notices-mca', 'MCA notices', 'notices']]],
     ['Tools', [['bank', 'Bank statements', 'bank'], ['acks', 'Filing acknowledgements'], ['calc', 'Late fee calculator'], ['checklists', 'Checklists'], ['updates', 'Law updates']]],
-    ['Clients', [isManager() && ['clients', 'Clients'], ['docs', 'Documents for the month'], ['onboarding', 'Onboarding'], ['renewals', 'Renewals (DSC, LUT…)'], ['inbox', 'Client mail'], ['clientreport', 'Monthly client reports']]],
-    ['Payments & billing', [['taxpay', 'Tax payment intimation'], isManager() && ['billing', 'Billing & fees']]],
-    (isManager() || isPartner()) && ['Office', [['health', 'Client health'], isManager() && ['workload', 'Team workload'], isPartner() && ['profit', 'Fees & profitability'], isPartner() && ['reports', 'Reports'], isPartner() && ['activity', 'Activity log']]],
-    isAdmin() && ['Admin', [['team', 'Team & logins'], ['settings', 'Settings']]]
-  ].filter(Boolean);
+    ['Clients', [['clients', 'Clients'], ['docs', 'Documents for the month'], ['onboarding', 'Onboarding'], ['renewals', 'Renewals (DSC, LUT…)'], ['inbox', 'Client mail'], ['clientreport', 'Monthly client reports']]],
+    ['Payments & billing', [['taxpay', 'Tax payment intimation'], ['billing', 'Billing & fees']]],
+    ['Office', [['health', 'Client health'], ['workload', 'Team workload'], P4() && ['profit', 'Fees & profitability'], ['reports', 'Reports'], ['activity', 'Activity log']]],
+    ['Admin', [['team', 'Team & logins'], ['settings', 'Settings']]]
+  ].filter(Boolean).map(([g, items]) => [g, items.map(x => x && can(x[0]) ? x : false)]).filter(([, items]) => items.some(Boolean));   // v117: access control
   if (settings.notices_off) G.forEach(g => { g[1] = g[1].map(x => x && /^notices/.test(x[0]) ? false : x); });
   return G.map(([g, items]) => `<div class="side-g"><span class="side-gl">${esc(g)}</span>${items.filter(Boolean).map(([k, l, ic]) => {
     const href = k.startsWith('work-') ? '#/work' : k.startsWith('notices-') ? '#/notices' : '#/' + k;
@@ -764,7 +798,7 @@ function renderShell() {
         <button class="icon-btn side-tog" id="sideTog" aria-label="Open menu" aria-controls="side" aria-expanded="false"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M3 6h18M3 12h18M3 18h18"></path></svg></button>
         <div class="srch" role="search"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"></circle><path d="M21 21l-4.3-4.3"></path></svg>
           <input id="gSearch" type="search" placeholder="Search client, GSTIN, PAN or return…" aria-label="Search client, GSTIN, PAN or return" autocomplete="off"><div class="srch-res" id="gRes" hidden></div></div>
-        ${isManager() ? '<button class="btn primary top-new" id="topNew">+ New work</button><button class="btn top-cl" id="topClient">+ Client</button>' : ''}
+        ${isManager() ? '<button class="btn primary top-new" id="topNew">+ New work</button>' : ''}${can('clients.edit') ? '<button class="btn top-cl" id="topClient">+ Client</button>' : ''}
         <div id="gameBar" class="game-bar" hidden></div>
         <a href="#/inbox" id="mailBadge" class="mail-badge" hidden title="New mail from clients">📥 <b>0</b></a>
         <div class="user"><button class="btn ghost sm user-btn" id="userBtn"><span class="u-av" aria-hidden="true">${esc(((me.full_name || me.email || '?').trim()[0] || '?').toUpperCase())}</span><span class="u-nm">${esc(me.full_name || me.email)}<small>${esc(ROLE_LABEL[me.role] || me.role)}</small></span> ▾</button>
@@ -1038,9 +1072,9 @@ async function gfReturns(v, ym) {
    Later stages are listed so the office can see what is coming.
    ===================================================================== */
 const GF_TABS = [['overview', 'Overview'], ['returns', 'GSTR-1 & 3B'], ['reg', 'Registration'], ['annual', 'GSTR-9 & 9C'], ['lut', 'LUT'], ['downloads', 'Filed downloads'], ['portal', 'Ledgers & portal'], ['other', 'Other forms']];
-// v116: Registration and Other forms are Admin only for now (GST features on hold) — other logins see the rest
-const GF_ADMIN_TABS = ['reg', 'other'];
-const gfTabs = () => GF_TABS.filter(t => isAdmin() || !GF_ADMIN_TABS.includes(t[0]));
+// v116/v117: which GST features tabs this login sees — Settings → Access control (Registration and Other forms: Admin only by default)
+const gfTabs = () => GF_TABS.filter(t => t[0] === 'overview' || can('filing.' + t[0]));
+const gfTabOk = k => gfTabs().some(t => t[0] === k);
 // [name, form, what it is, how (api = GST API + add-on, addon = add-on only, tracker), stage]
 const GF_FORMS = {
   reg: [['Registration', [
@@ -1099,7 +1133,6 @@ VIEWS.filing = async v => {
   if (gfTab === 'downloads') return gfDownloads(body, ym);
   if (gfTab === 'portal') return gfPortal(body);
   if (gfTab === 'lut') return gfLut(body);
-  if (!isAdmin() && GF_ADMIN_TABS.includes(gfTab)) gfTab = 'overview';
   if (gfTab === 'reg') return gfApps(body);
   if (gfTab === 'annual') return gfAnnual(body);
   if (gfTab === 'other') return gfOther(body);
@@ -1120,7 +1153,7 @@ async function gfOverview(body, ym) {
   const L = await fdLoad(ym), label = monthLabel(ym);
   const rows = L.rows || [], N = s => rows.filter(x => x.stage === s).length;
   const tile = (k, l) => `<button class="fd-tile ${k}" data-go="returns" data-fdt="${k}"><b>${N(k)}</b><span>${l}</span></button>`;
-  const card = (t, f, d, st, go) => `<button class="gf-card gf-click" ${go ? `data-go="${go}"` : 'disabled'}><div class="gf-ch"><b>${esc(t)}</b>${st ? `<span class="pill">${esc(st)}</span>` : ''}</div><span class="muted small">${esc(f)}</span><p class="small">${esc(d)}</p></button>`;
+  const card = (t, f, d, st, go) => go && go !== 'gst' && !gfTabOk(go) ? '' : `<button class="gf-card gf-click" ${go ? `data-go="${go}"` : 'disabled'}><div class="gf-ch"><b>${esc(t)}</b>${st ? `<span class="pill">${esc(st)}</span>` : ''}</div><span class="muted small">${esc(f)}</span><p class="small">${esc(d)}</p></button>`;
   const fy = +ym.slice(5) >= 4 ? +ym.slice(0, 4) : +ym.slice(0, 4) - 1;
   body.innerHTML = `${L.error ? `<p class="note warn">${esc(friendly(L.error))}</p>` : `<div class="fd-tiles">${tile('ready', 'Ready to file')}${tile('pay', 'Waiting for payment')}${tile('approval', 'Waiting for approval')}${tile('filed', 'Filed')}</div>
       <p class="muted small" style="margin:-4px 0 12px">GSTR-1 and GSTR-3B · ${esc(label)}</p>`}
@@ -1131,16 +1164,16 @@ async function gfOverview(body, ym) {
     <section class="gf-sec"><h3>Annual returns <span class="muted small">FY ${fy - 1}-${String(fy).slice(2)}</span></h3><div class="gf-grid">
       ${card('GSTR-9', 'Annual return', `Due 31 Dec ${fy}`, '', 'annual')}${card('GSTR-9C', 'Reconciliation statement', `Due 31 Dec ${fy}`, '', 'annual')}</div></section>
     <section class="gf-sec"><h3>Registration</h3><div class="gf-grid">
-      ${isAdmin() ? card('Registration applications', 'REG-01 / 14 / 16 / 21, CMP-02 / 04', 'New, amendment, composition, cancellation — with ARN tracking', 'Stage 3', 'reg') : ''}
+      ${can('filing.reg') ? card('Registration applications', 'REG-01 / 14 / 16 / 21, CMP-02 / 04', 'New, amendment, composition, cancellation — with ARN tracking', 'Stage 3', 'reg') : ''}
       ${card('LUT', 'RFD-11', `FY ${fy + 1}-${String(fy + 2).slice(2)} — file before 1 Apr ${fy + 1}`, 'Stage 3', 'lut')}</div></section>
     <section class="gf-sec"><h3>Downloads</h3><div class="gf-grid">
       ${card('Filed GSTR-1 & 3B', 'PDF + ARN', 'All clients for the month — one at a time or a zip', '', 'downloads')}${card('GSTR-2B / 2A', 'JSON / Excel', 'Fetched in GST review', '', 'gst')}</div></section>
-    ${isAdmin() ? `<section class="gf-sec"><h3>Other forms</h3><div class="gf-grid">${card('Other returns and forms', 'GSTR-1A, IFF, CMP-08, GSTR-4 / 7 / 8 / 10, refunds, ITC-01–04, DRC-03 …', 'Status from the portal, register with ARN, opened on the portal with your notes', '', 'other')}</div></section>` : ''}`;
+    ${can('filing.other') ? `<section class="gf-sec"><h3>Other forms</h3><div class="gf-grid">${card('Other returns and forms', 'GSTR-1A, IFF, CMP-08, GSTR-4 / 7 / 8 / 10, refunds, ITC-01–04, DRC-03 …', 'Status from the portal, register with ARN, opened on the portal with your notes', '', 'other')}</div></section>` : ''}`;
   body.onclick = e => {
     const b = e.target.closest('[data-go]'); if (!b) return;
     if (b.dataset.go === 'gst') { location.hash = '#/gst'; return; }
     if (b.dataset.fdt) fdTab = b.dataset.fdt;
-    if (!isAdmin() && GF_ADMIN_TABS.includes(b.dataset.go)) return;
+    if (!gfTabOk(b.dataset.go)) return;
     gfTab = b.dataset.go; try { localStorage.setItem('jlr.gfTab', gfTab); } catch { /* ignore */ } route();
   };
 }
@@ -1735,7 +1768,8 @@ async function route() {
   GAME.bar();
   const key = location.hash.replace(/^#\/?/, '').split('?')[0] || 'dashboard';
   const adminOnly = ['clients', 'team', 'settings', 'billing', 'reports'];
-  const need = { team: isAdmin, settings: isAdmin, reports: isPartner, clients: isManager, billing: isManager, workload: isManager, health: () => isManager() || isPartner(), activity: isPartner, profit: () => isPartner() && P4() }[key];
+  const need = { team: isAdmin, settings: isAdmin, profit: () => can('profit') && P4(),       // v117: access control
+    work: () => ['work', 'work-gst', 'work-tds', 'work-mca'].some(can), notices: () => ['notices', 'notices-gst', 'notices-tds', 'notices-mca'].some(can) }[key] || (() => can(key));
   if (!VIEWS[key] || (need && !need()) || (key === 'notices' && settings.notices_off)) { location.hash = '#/dashboard'; return; }
   const navKey = key === 'work' ? ({ GST: 'work-gst', TDS: 'work-tds', 'ROC/MCA': 'work-mca' }[wf.type] || 'work') : key === 'notices' ? ({ GST: 'notices-gst', TDS: 'notices-tds', 'ROC/MCA': 'notices-mca' }[nf.dept] || 'notices') : key;
   $$('#nav a').forEach(a => { const on = a.dataset.k === navKey; a.classList.toggle('active', on); if (on) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current'); });
@@ -2650,8 +2684,8 @@ VIEWS.clients = async v => {
   const gcR = await safe(sb.from('gstin_checks').select('gstin,status,legal_name,checked_at').limit(5000));
   const gcMap = Object.fromEntries((gcR.error ? [] : gcR.data || []).map(x => [x.gstin, x]));
   v.innerHTML = `<div class="page-head"><h2>Clients</h2><span class="muted">${clients.filter(c => c.active).length} active</span><span class="spacer"></span>
-      ${isAdmin() ? '<button class="btn ghost" id="lgLog">Login access log</button>' : ''}<button class="btn" id="tplBtn">CSV template</button><button class="btn" id="impBtn">Import CSV</button>
-      ${groupsOn && isManager() ? '<button class="btn" id="grpBtn">Groups</button>' : ''}<a class="btn" href="#/gstin?from=clients" title="Check all client GSTINs — GST API or GST portal">Check GSTINs</a><button class="btn primary" id="addC">+ Add client</button><input type="file" id="impFile" accept=".csv,text/csv" hidden></div>
+      ${isAdmin() ? '<button class="btn ghost" id="lgLog">Login access log</button>' : ''}${can('clients.edit') ? '<button class="btn" id="tplBtn">CSV template</button><button class="btn" id="impBtn">Import CSV</button>' : ''}
+      ${groupsOn && isManager() ? '<button class="btn" id="grpBtn">Groups</button>' : ''}<a class="btn" href="#/gstin?from=clients" title="Check all client GSTINs — GST API or GST portal">Check GSTINs</a>${can('clients.edit') ? '<button class="btn primary" id="addC">+ Add client</button>' : ''}<input type="file" id="impFile" accept=".csv,text/csv" hidden></div>
     <div id="cMiss"></div>
     <div class="toolbar"><input type="search" id="cq" placeholder="Search code / name / GSTIN / PAN" value="${esc(clientQ)}">
       ${groupsOn && groups.length ? `<select id="cGrp"><option value="">All groups</option>${groups.map(g => `<option value="${g.id}" ${clientGrp === g.id ? 'selected' : ''}>${esc(g.name)}</option>`).join('')}<option value="none" ${clientGrp === 'none' ? 'selected' : ''}>Not in a group</option></select>` : ''}
@@ -2681,7 +2715,7 @@ VIEWS.clients = async v => {
   $('#inact').onchange = e => { showInactive = e.target.checked; render(); };
   if ($('#cGrp')) $('#cGrp').onchange = e => { clientGrp = e.target.value; render(); };
   if ($('#grpBtn')) $('#grpBtn').onclick = () => manageGroups();
-  $('#addC').onclick = () => editClient(null);
+  if ($('#addC')) $('#addC').onclick = () => editClient(null);
   $('#cList').onclick = e => {
     const t = e.target.closest('[data-copy],[data-ed],[data-lgc],[data-obc]'); if (!t) return; const d = t.dataset;
     if (d.copy) copy(statusUrl(clientById(d.copy).status_token));
@@ -2690,10 +2724,10 @@ VIEWS.clients = async v => {
     if (d.obc) openOnboarding(clientById(d.obc));
   };
   if ($('#lgLog')) $('#lgLog').onclick = () => loginLog(null);
-  $('#tplBtn').onclick = () => download('clients-template.csv', toCSV([
+  if ($('#tplBtn')) $('#tplBtn').onclick = () => download('clients-template.csv', toCSV([
     ['client_code', 'name', 'gstin', 'pan', 'tan', 'cin', 'contact_person', 'phone', 'email', 'gst_scheme', 'services', 'default_staff_email', ...(groupsOn ? ['group'] : [])],
     ['JLR001', 'ABC Traders', '33AAAAA0000A1Z5', 'AAAAA0000A', 'CHEA00000A', '', 'Mr. Kumar', '9876543210', 'abc@example.com', 'Monthly', 'GST;TDS;Income Tax', me.email, ...(groupsOn ? ['Vijay Group'] : [])]]));
-  $('#impBtn').onclick = () => $('#impFile').click();
+  if ($('#impBtn')) $('#impBtn').onclick = () => $('#impFile').click();
   $('#impFile').onchange = async e => {
     const file = e.target.files[0]; e.target.value = '';
     if (!file) return;
@@ -2810,6 +2844,7 @@ function editGroup(g, done) {
 }
 
 function editClient(c) {
+  if (!can('clients.edit')) return toast('You can see clients but not add or change them — ask the Admin (Settings → Access control)', true);
   const isNew = !c;
   c = c || { gst_scheme: 'Monthly', services: ['GST'], active: true };
   const body = `<div class="form-grid">
@@ -2953,6 +2988,7 @@ const SET_SECTIONS = [
   { id: 'clients', label: 'Clients & reminders', words: 'status board link notices module data chasing data request reminder' },
   { id: 'ai', label: 'AI help', words: 'ai claude key bills assistant' },
   { id: 'backup', label: 'Backup', words: 'backup onedrive microsoft download excel restore copy' },
+  { id: 'access', label: 'Access control', words: 'access control permission role partner manager team member staff see hide menu page tab show' },
   { id: 'advanced', label: 'Advanced', words: 'sample demo data advanced' }
 ];
 const setLink = id => '#/settings?s=' + id;
@@ -3017,8 +3053,41 @@ VIEWS.settings = async v => {
 
   const main = $('#setMain');
   main.innerHTML = `<div class="set-title"><h2>${esc(sec.label)}</h2></div>`;
-  await ({ office: setOffice, team: setTeam, mailbox: setMailbox, telegram: setTelegram, gst: setGstSec, clients: setClients, ai: b => renderAiSettings(setBox(b)), backup: setBackup, advanced: b => renderDemoSettings(setBox(b)) }[cur])(main);
+  await ({ office: setOffice, team: setTeam, mailbox: setMailbox, telegram: setTelegram, gst: setGstSec, clients: setClients, ai: b => renderAiSettings(setBox(b)), backup: setBackup, access: setAccess, advanced: b => renderDemoSettings(setBox(b)) }[cur])(main);
 };
+
+/* v117: Access control — what each role can see */
+async function setAccess(main) {
+  if (!('access_rules' in settings)) { setBox(main, '<div class="card"><p class="note warn">Run <b>update-access-control.sql</b> in Supabase first, then reload this page.</p></div>'); return; }
+  let R = JSON.parse(JSON.stringify(settings.access_rules || {}));
+  const cnt = r => profiles.filter(p => p.active !== false && p.role === r).length;
+  const box = setBox(main);
+  const cell = (role, a) => {
+    const on = canRole(role, a.k, R), base = accBase(role, a), locked = a.opt === 'fixed' || (!base && a.opt !== 'grant');
+    const parentOff = a.parent && !canRole(role, a.parent, R), changed = on !== base;
+    return `<td class="acc-c${changed ? ' acc-ch' : ''}"><input type="checkbox" data-r="${role}" data-k="${a.k}" ${on ? 'checked' : ''} ${locked || parentOff ? 'disabled' : ''}
+      aria-label="${esc(ROLE_LABEL[role])} can see ${esc(a.l)}" title="${locked ? (a.opt === 'fixed' ? 'Cannot be changed' : `Needs ${ROLE_LABEL[a.def]} level data — cannot be given to ${ROLE_LABEL[role]}`) : parentOff ? 'Switch on the page above first' : changed ? 'Changed from the default' : 'Default'}"></td>`;
+  };
+  const draw = () => {
+    box.innerHTML = `<div class="card"><h3>Who can see what</h3>
+      <p class="muted small">Tick what each role sees in the menu. A tick under a page (indented) is an option inside that page. <b>Admin</b> always sees everything. Grey boxes cannot be changed: their data is limited to a higher role in the database.
+        Highlighted boxes are changed from the default. Staff see the change when they next open a page.</p>
+      <div class="table-wrap"><table class="acc-t"><thead><tr><th>Page / option</th><th class="acc-c">Admin</th>${ACC_ROLES.map(r => `<th class="acc-c">${esc(ROLE_LABEL[r])}<div class="muted small">${cnt(r)} login${cnt(r) === 1 ? '' : 's'}</div></th>`).join('')}</tr></thead>
+      <tbody>${ACC_GROUPS.map(([g, L]) => `<tr class="acc-g"><th colspan="${ACC_ROLES.length + 2}">${esc(g)}</th></tr>${L.map(([k]) => { const a = ACC_MAP[k];
+        return `<tr><td class="${a.parent ? 'acc-sub' : ''}">${a.parent ? '↳ ' : ''}${esc(a.l)}${a.opt === 'grant' && a.def !== 'staff' ? ` <span class="muted small">(default: ${a.def === 'admin' ? 'Admin only' : esc(ROLE_LABEL[a.def]) + ' and above'})</span>` : ''}</td>
+          <td class="acc-c"><input type="checkbox" checked disabled aria-label="Admin sees ${esc(a.l)}"></td>${ACC_ROLES.map(r => cell(r, a)).join('')}</tr>`; }).join('')}`).join('')}</tbody></table></div>
+      <div class="toolbar" style="margin-top:12px"><button class="btn primary" id="accSave">Save</button><button class="btn ghost" id="accReset">Back to default</button><span class="spacer"></span><span class="muted small" id="accMsg"></span></div>
+      <p class="muted small">Note: taking a page away hides it from the menu and blocks the link. Giving <b>Add / edit / import clients</b> to a lower role also lets the database accept their client changes.</p></div>`;
+  };
+  draw();
+  box.onchange = e => { const x = e.target.closest('[data-k]'); if (!x) return; const a = ACC_MAP[x.dataset.k], r = x.dataset.r;
+    R[r] = R[r] || {}; if (x.checked === accBase(r, a)) delete R[r][a.k]; else R[r][a.k] = x.checked;
+    if (!Object.keys(R[r]).length) delete R[r]; draw(); $('#accMsg', box).textContent = 'Not saved yet'; };
+  box.onclick = async e => {
+    if (e.target.id === 'accReset') { if (!confirm('Put every role back to the default access?')) return; R = {}; draw(); $('#accMsg', box).textContent = 'Not saved yet'; }
+    if (e.target.id === 'accSave') { try { await setSave({ access_rules: R }); $('#nav').innerHTML = navGroups(); $('#accMsg', box).textContent = 'Saved'; } catch (err) { toast(friendly(err), true); } }
+  };
+}
 
 /* Office & billing */
 async function setOffice(main) {
@@ -8943,7 +9012,7 @@ const REV = (() => {
 })();
 
 // v78: this tab's code version — when a newer app is uploaded, offer Reload and block mails from old code
-const APP_VER = 'jlr-shell-v116';
+const APP_VER = 'jlr-shell-v117';
 let appStale = false;
 async function checkAppVer() {
   try { const t = await fetch('sw.js?v=' + Date.now(), { cache: 'no-store' }).then(r => r.text()); const live = (t.match(/jlr-shell-v\d+/) || [])[0];
