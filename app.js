@@ -1101,39 +1101,16 @@ VIEWS.filing = async v => {
   if (gfTab === 'other') return gfOther(body);
   return gfFormList(body, gfTab);
 };
-// v115: a form card opens the matching record dialog (or the tab that shows it)
-function gfCardForm(n, form) {
-  const t = `${n} ${form}`;
-  if (/^(View my submitted LUTs|ITC-02 pending for action|Locate GSTP|DRC-03 register)$/.test(n)) return '';
-  if (/multi-state/i.test(n)) return 'REG-01'; if (/^DRC-03 \/ DRC-03A$/.test(n)) return 'DRC-03';
-  if (/non-core/i.test(n)) return 'REG-14 non-core'; if (/core fields/i.test(n)) return 'REG-14 core'; if (/geocod/i.test(n)) return 'Geocoding';
-  if (/14B/.test(t)) return 'Rule 14B'; if (/specified premises/i.test(n)) return 'Specified premises'; if (/REG-04/.test(form)) return 'REG-04';
-  if (/^REG-01$/.test(form)) return 'REG-01'; if (/^LUT\b|RFD-11/.test(t)) return 'RFD-11'; if (/^GSTR-4 \/ CMP-08$/.test(n)) return 'CMP-08';
-  const codes = GF_APPFORMS.map(f => f[0]).filter(c => c !== 'Other').sort((a, b) => b.length - a.length);
-  return codes.find(c => new RegExp(`(^|[^\\w-])${c.replace(/[-/]/g, m => '\\' + m)}([^\\w]|$)`).test(t)) || '';
-}
-const GF_GO = { 'View my submitted LUTs': 'lut', 'ITC-02 pending for action': 'portal', 'DRC-03 register': 'other', 'PMT-06': 'returns', 'RCM ITC statement': 'portal', 'ITC reclaim statement': 'portal',
-  'Negative liability statement': 'portal', 'View PMT-03A': 'portal', 'Refund status': 'portal', 'Notices and orders': 'portal', 'My saved applications': 'portal', 'Notices / intimations issued': 'portal',
-  'View additional notices / orders': 'portal', 'View / download certificates': 'portal', 'Track application status': 'reg', 'Ledgers': 'portal', 'Filed returns': 'downloads', 'View my submissions': 'portal', 'My applications': 'reg', 'GSTR-9': 'annual', 'GSTR-9C': 'annual' };
 function gfFormCard(f) {
-  const [n, form, d, how, st] = f, H = GF_HOW[how] || GF_HOW.addon, code = gfCardForm(n, form), go = !code && GF_GO[n];
-  const attr = code ? `data-gfform="${esc(code)}" title="Record ${esc(code)} for a client"` : go ? `data-go="${go}" title="Open"` : '';
-  return `<${attr ? 'button type="button"' : 'div'} class="gf-card ${attr ? 'gf-click' : ''}" ${attr}><div class="gf-ch"><b>${esc(n)}</b><span class="pill ${H[1]}">${H[0]}</span></div><span class="muted small">${esc(form)}</span>
-    <p class="small">${esc(d)}</p><span class="small ${st === 1 ? 'ok-t' : 'muted'}">${esc(GF_STAGE[st] || '')}</span>${code ? `<span class="small gf-act">${gfFillable(code) ? 'Record and fill on portal →' : 'Record →'}</span>` : ''}</${attr ? 'button' : 'div'}>`;
-}
-function gfCardClick(body) {
-  body.addEventListener('click', e => {
-    const c = e.target.closest('[data-gfform]'); if (c && body.contains(c)) { e.stopPropagation(); const f = c.dataset.gfform, again = () => route();
-      return f === 'RFD-11' ? gfLutDialog(null, again) : gfAppDialog(null, again, GF_RETFORMS.includes(f), f); }
-    const g = e.target.closest('.gf-card[data-go]'); if (g && body.contains(g) && !g.closest('#gfBody > .gf-grid')) { const t = $(`[data-gft="${g.dataset.go}"]`); if (t) { e.stopPropagation(); t.click(); } }
-  });
+  const [n, form, d, how, st] = f, H = GF_HOW[how] || GF_HOW.addon;
+  return `<div class="gf-card"><div class="gf-ch"><b>${esc(n)}</b><span class="pill ${H[1]}">${H[0]}</span></div><span class="muted small">${esc(form)}</span>
+    <p class="small">${esc(d)}</p><span class="small ${st === 1 ? 'ok-t' : 'muted'}">${esc(GF_STAGE[st] || '')}</span></div>`;
 }
 function gfFormList(body, tab) {
   const G = GF_FORMS[tab] || [];
   body.innerHTML = `<p class="muted small" style="margin-top:0"><span class="pill b">API + add-on</span> works through the GST API (client OTP) or the JLR add-on on the logged-in portal. <span class="pill g">Add-on</span> the GST API does not offer it — it works through the add-on.
       Nothing is submitted, paid or filed by itself: the add-on fills and stops before Submit / EVC.</p>
     ${G.map(([t, L]) => `<section class="gf-sec"><h3>${esc(t)}</h3><div class="gf-grid">${L.map(gfFormCard).join('')}</div></section>`).join('')}`;
-  gfCardClick(body);
 }
 async function gfOverview(body, ym) {
   const L = await fdLoad(ym), label = monthLabel(ym);
@@ -1436,14 +1413,14 @@ function gfLutDialog(x, done) {
       [1, 2].forEach(n => { const w = last[`w${n}`] || {}; set(`w${n}name`, w.name); set(`w${n}occ`, w.occupation); set(`w${n}bno`, w.buildno); set(`w${n}floor`, w.floorno); set(`w${n}bname`, w.buildname); set(`w${n}street`, w.street); set(`w${n}city`, w.city); set(`w${n}state`, w.state); set(`w${n}dist`, w.dist); set(`w${n}pin`, w.pincode); }); };
     sel.onchange = fill; fill(); }
 }
-function gfAppDialog(x, done, ret, preset) {
+function gfAppDialog(x, done, ret) {
   const m = modal(x ? `${ret ? 'Return / form' : 'Application'} — ${x.form}` : ret ? 'Record a return / form' : 'Record an application', `<div class="form-grid">
       <label>Client<select name="client" ${x ? 'disabled' : ''}>${clients.filter(c => c.active !== false && c.gstin).sort((a, b) => a.name.localeCompare(b.name)).map(c => `<option value="${c.id}" ${x && x.client_id === c.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></label>
-      <label class="full">Form<select name="form">${GF_APPFORMS.filter(f => f[0] !== 'RFD-11' && (ret ? f[3] === 'ret' || f[0] === 'Other' : f[3] !== 'ret')).map(f => `<option value="${esc(f[0])}" ${(x ? x.form : preset) === f[0] ? 'selected' : ''}>${esc(f[0])} — ${esc(f[1])}</option>`).join('')}</select></label>
+      <label class="full">Form<select name="form">${GF_APPFORMS.filter(f => f[0] !== 'RFD-11' && (ret ? f[3] === 'ret' || f[0] === 'Other' : f[3] !== 'ret')).map(f => `<option value="${esc(f[0])}" ${x && x.form === f[0] ? 'selected' : ''}>${esc(f[0])} — ${esc(f[1])}</option>`).join('')}</select></label>
       <label>Status<select name="status">${Object.entries(GF_APPST).map(([k, [l]]) => `<option value="${k}" ${(x ? x.status : 'prepared') === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
       ${ret ? `<label>Period / year<input name="fy" value="${esc((x && x.fy) || '')}" placeholder="Oct 2026 · Q3 2026-27"></label>` : ''}<label>ARN<input name="arn" value="${esc((x && x.arn) || '')}"></label><label>Submitted on<input type="date" name="sub" value="${esc((x && x.submitted_on) || '')}"></label>
       <label>Decided on<input type="date" name="dec" value="${esc((x && x.decided_on) || '')}"></label></div>
-    <div data-gfxwrap>${gfFillHtml(x ? x.form : preset || (GF_APPFORMS.find(f => f[0] !== 'RFD-11' && (ret ? f[3] === 'ret' || f[0] === 'Other' : f[3] !== 'ret')) || [])[0], (x && x.details) || {})}</div>
+    <div data-gfxwrap>${gfFillHtml(x ? x.form : (GF_APPFORMS.find(f => f[0] !== 'RFD-11' && (ret ? f[3] === 'ret' || f[0] === 'Other' : f[3] !== 'ret')) || [])[0], (x && x.details) || {})}</div>
     <label class="small" style="display:block;margin-top:8px">What is being changed / notes (shown beside the portal form)<textarea name="notes" rows="4">${esc((x && x.notes) || '')}</textarea></label>`, {
     saveText: 'Save', onSave: async el => {
       const f = n => ($(`[name=${n}]`, el) || {}).value || '';
@@ -8961,7 +8938,7 @@ const REV = (() => {
 })();
 
 // v78: this tab's code version — when a newer app is uploaded, offer Reload and block mails from old code
-const APP_VER = 'jlr-shell-v115';
+const APP_VER = 'jlr-shell-v114';
 let appStale = false;
 async function checkAppVer() {
   try { const t = await fetch('sw.js?v=' + Date.now(), { cache: 'no-store' }).then(r => r.text()); const live = (t.match(/jlr-shell-v\d+/) || [])[0];
