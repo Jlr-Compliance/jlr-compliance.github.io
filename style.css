@@ -1483,3 +1483,9 @@ input.otp{font-size:22px;letter-spacing:.35em;text-align:center;font-variant-num
 /* v117 access control */
 .acc-t th,.acc-t td{padding:6px 10px}.acc-t .acc-c{text-align:center;width:110px}.acc-t .acc-g th{background:var(--surface-2,#f4f6f8);text-align:left;font-size:.8rem;text-transform:uppercase;letter-spacing:.04em}
 .acc-t .acc-sub{padding-left:28px;color:var(--muted,#667085)}.acc-t td.acc-ch{background:#fffbeb}.acc-t input[type=checkbox]{width:18px;height:18px}
+/* v119 filed downloads — whole year */
+.gfy-t th,.gfy-t td{padding:6px 6px;text-align:center}.gfy-t td.wrap,.gfy-t th:nth-child(2){text-align:left;min-width:170px}
+.gfy-m{white-space:nowrap}.gfy-c{display:inline-block;min-width:22px;padding:1px 4px;margin:1px;border-radius:5px;font-size:.72rem;font-weight:600;line-height:1.5;border:1px solid transparent;text-align:center}
+.gfy-c.ok{background:#dcfce7;color:#166534;border-color:#86efac;cursor:pointer;font:inherit;font-size:.72rem;font-weight:600}.gfy-c.ok:hover{background:#bbf7d0}
+.gfy-c.nopdf{background:#fef3c7;color:#92400e;border-color:#fcd34d}.gfy-c.open{background:#e0e7ff;color:#3730a3;border-color:#c7d2fe}
+.gfy-c.none{background:transparent;color:#98a2b3;border:1px dashed #d0d5dd}.gfy-c.na{color:#c0c6d0;border:0;background:transparent}

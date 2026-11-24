@@ -681,7 +681,7 @@ const ADDON_PDF = (() => {
     if (t.error) return { key: it.key, msg: friendly(t.error) };
     const task = (t.data || []).filter(x => ACK.formMatches(label, 'GST', x.return_name) && periodToMonth(x.period) === it.month)
       .sort((a, b) => (a.status === 'Filed') - (b.status === 'Filed'))[0];
-    if (!task) return { key: it.key, final: true, msg: `${c.name} · ${label} ${mon}: no work item for this month — upload the PDF from Work` };
+    if (!task) return GFY.archive(c, it, file, label, mon);     // v119: no work item (e.g. an earlier year) → filed-returns archive
     if (task.status === 'Filed') {
       const a = await safe(sb.from('filing_acks').select('id,file_path').eq('task_id', task.id));
       if (!a.error && (a.data || []).some(x => x.file_path)) return { key: it.key, ok: true, final: true, msg: `${c.name} · ${label} ${mon}: filed PDF already in the tracker` };
@@ -1178,6 +1178,7 @@ async function gfOverview(body, ym) {
   };
 }
 async function gfDownloads(body, ym) {
+  if (gfDl.mode === 'year') return GFY.view(body);
   const label = monthLabel(ym);
   const t = await safe(sb.from('tasks').select('id,client_id,return_name,period,status,arn,filed_on').eq('period', label).limit(5000));
   if (t.error) { body.innerHTML = `<p class="note warn">${esc(friendly(t.error))}</p>`; return; }
@@ -1194,7 +1195,7 @@ async function gfDownloads(body, ym) {
     if (s === 'pdf') { const a = acks.get(x.id); return `<span class="ok-t small"><b>Filed ${x.filed_on ? fmtDate(x.filed_on) : ''}</b></span><div class="muted small">${esc(x.arn || a.arn || '')}</div><button class="link small" data-pdf="${x.id}">Download PDF</button>`; }
     if (s === 'nopdf') return `<span class="warn-t small"><b>Filed${x.filed_on ? ' ' + fmtDate(x.filed_on) : ''} — PDF not in the tracker</b></span><div><button class="link small" data-want="${x.id}">Get from portal</button></div>`;
     return `<span class="muted small">${esc(x.status || 'Not filed')}</span>`; };
-  body.innerHTML = `<div class="toolbar"><label class="small muted">Show <select id="gfdF"><option value="">All clients</option><option value="missing" ${f === 'missing' ? 'selected' : ''}>PDF missing</option><option value="both" ${f === 'both' ? 'selected' : ''}>Both saved</option></select></label>
+  body.innerHTML = `${GFY.switchHtml()}<div class="toolbar"><label class="small muted">Show <select id="gfdF"><option value="">All clients</option><option value="missing" ${f === 'missing' ? 'selected' : ''}>PDF missing</option><option value="both" ${f === 'both' ? 'selected' : ''}>Both saved</option></select></label>
       <input type="search" id="gfdQ" placeholder="Search client" value="${esc(gfDl.q)}" aria-label="Search client"><span class="spacer"></span>
       <button class="btn" id="gfdTick">Download ticked (zip)</button><button class="btn primary" id="gfdAll" ${nPdf ? '' : 'disabled'}>Download all for ${esc(label)} (zip) · ${nPdf}</button></div>
     ${list.length ? `<div class="table-wrap"><table><thead><tr><th><input type="checkbox" id="gfdAllTick" aria-label="Tick all"></th><th>Client</th><th>GSTR-1</th><th>GSTR-3B</th></tr></thead><tbody>
@@ -1211,6 +1212,7 @@ async function gfDownloads(body, ym) {
     const blob = await z.generateAsync({ type: 'blob' }), a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `GST filed returns ${label}.zip`; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 4000);
     toast(`${n} PDF${n === 1 ? '' : 's'} in the zip`);
   };
+  GFY.bindSwitch(body, () => gfDownloads(body, ym));
   $('#gfdF', body).onchange = e => { gfDl.f = e.target.value; gfDownloads(body, ym); };
   const q = $('#gfdQ', body); q.oninput = () => { clearTimeout(q._t); q._t = setTimeout(() => { gfDl.q = q.value; gfDownloads(body, ym).then(() => { const n = $('#gfdQ', body); if (n) { n.focus(); n.setSelectionRange(n.value.length, n.value.length); } }); }, 350); };
   const at = $('#gfdAllTick', body); if (at) at.onchange = () => $$('[data-tick]', body).forEach(x => { x.checked = at.checked; });
@@ -1707,7 +1709,143 @@ async function gfOther(body) {
   gfApps($('#gfOthApps', body), GF_RETFORMS);
   gfFormList($('#gfOthList', body), 'other');
 }
-const gfDl = { f: '', q: '' };
+const gfDl = { f: '', q: '', mode: 'month', fy: null, yf: '', yq: '' };
+/* ---------- v119: Filed downloads → Whole year: every client × 12 months, GSTR-1 and GSTR-3B ----------
+   PDFs come from work-item acknowledgements (filing_acks) or, for months with no work item, the archive table gst_filed_pdfs
+   (filled by the JLR add-on). "Get missing from portal" queues the missing months in the add-on; staff log in once per client. */
+const GFY = (() => {
+  const MS = ['Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec', 'Jan', 'Feb', 'Mar'];
+  const months = fs => MS.map((_, i) => { const m = (i + 3) % 12 + 1; return `${m >= 4 ? fs : fs + 1}-${pad(m)}`; });
+  const defFy = () => { const d = new Date(), y = d.getFullYear(); return (d.getMonth() + 1 >= 4 ? y : y - 1) - 1; };   // last finished year
+  const fyLabel = fs => `${fs}-${String(fs + 1).slice(2)}`;
+  const qrmp = c => /QRMP/i.test(c.gst_scheme || '');
+  const expected = (c, ym) => !qrmp(c) || ['03', '06', '09', '12'].includes(ym.slice(5));
+  const safeName = t => String(t || 'client').replace(/[\\/:*?"<>|]+/g, ' ').replace(/\s+/g, ' ').trim();
+  const monName = ym => `${MONTHS[+ym.slice(5) - 1]} ${ym.slice(0, 4)}`;
+  let cache = null;      // { fs, at, data }
+  async function all(q) {   // Supabase returns at most 1000 rows a call
+    const out = []; for (let i = 0; i < 50; i++) { const r = await q().range(i * 1000, i * 1000 + 999); if (r.error) return { error: r.error }; out.push(...(r.data || [])); if ((r.data || []).length < 1000) break; } return { data: out };
+  }
+  async function load(fs) {
+    if (cache && cache.fs === fs && Date.now() - cache.at < 60e3) return cache.data;
+    const M = months(fs), inYear = new Set(M);
+    const [t, ar] = await Promise.all([
+      all(() => sb.from('tasks').select('id,client_id,return_name,period,status,arn,filed_on').or('return_name.ilike.%GSTR-1%,return_name.ilike.%GSTR-3B%,return_name.ilike.%GSTR1%,return_name.ilike.%GSTR3B%').order('id')),
+      all(() => sb.from('gst_filed_pdfs').select('id,client_id,kind,month,arn,filed_on,file_name,file_path').in('month', M).order('id'))]);
+    if (t.error) return { error: t.error };
+    const tasks = (t.data || []).map(x => ({ ...x, kind: REV.kindOf(x.return_name), ym: periodToMonth(x.period) })).filter(x => x.kind && inYear.has(x.ym));
+    const ids = tasks.map(x => x.id), acks = new Map();
+    for (let i = 0; i < ids.length; i += 200) { const a = await safe(sb.from('filing_acks').select('id,task_id,file_path,arn,filed_on').in('task_id', ids.slice(i, i + 200))); (a.data || []).forEach(x => { if (x.file_path && !acks.has(x.task_id)) acks.set(x.task_id, x); }); }
+    const cell = new Map(), key = (cid, kind, ym) => `${cid}|${kind}|${ym}`;
+    tasks.forEach(x => { const k = key(x.client_id, x.kind, x.ym), a = acks.get(x.id), old = cell.get(k);
+      const v = a ? { st: 'pdf', path: a.file_path, arn: x.arn || a.arn, filed: x.filed_on || a.filed_on, src: 'work' } : x.status === 'Filed' ? { st: 'nopdf', arn: x.arn, filed: x.filed_on, task: x.id } : { st: 'open', status: x.status, task: x.id };
+      const rank = { pdf: 3, nopdf: 2, open: 1 }; if (!old || rank[v.st] > rank[old.st]) cell.set(k, v); });
+    const noArchive = !!ar.error;
+    (ar.data || []).forEach(x => { const k = key(x.client_id, x.kind, x.month), old = cell.get(k);
+      if (x.file_path && (!old || old.st !== 'pdf')) cell.set(k, { st: 'pdf', path: x.file_path, arn: x.arn || (old && old.arn), filed: x.filed_on || (old && old.filed), src: 'archive' });
+      else if (!old) cell.set(k, { st: 'nopdf', arn: x.arn, filed: x.filed_on }); });
+    const list = clients.filter(c => c.active !== false && c.gstin && !/composition|not registered/i.test(c.gst_scheme || '')).sort((a, b) => a.name.localeCompare(b.name));
+    const data = { M, list, get: (c, kind, ym) => expected(c, ym) ? (cell.get(key(c.id, kind, ym)) || { st: 'none' }) : { st: 'na' }, noArchive };
+    cache = { fs, at: Date.now(), data }; return data;
+  }
+  const rowCount = (d, c) => { let need = 0, have = 0; d.M.forEach(ym => ['gstr1', 'gstr3b'].forEach(k => { const v = d.get(c, k, ym); if (v.st === 'na') return; need++; if (v.st === 'pdf') have++; })); return { need, have }; };
+  const missingMonths = (d, c) => d.M.filter(ym => ['gstr1', 'gstr3b'].some(k => !['pdf', 'na'].includes(d.get(c, k, ym).st)));
+
+  function switchHtml() {
+    return `<div class="seg gfy-mode" role="tablist" aria-label="Filed downloads period" style="margin-bottom:10px"><button role="tab" data-gfym="month" class="${gfDl.mode !== 'year' ? 'on' : ''}" aria-selected="${gfDl.mode !== 'year'}">One month</button><button role="tab" data-gfym="year" class="${gfDl.mode === 'year' ? 'on' : ''}" aria-selected="${gfDl.mode === 'year'}">Whole year</button></div>`;
+  }
+  function bindSwitch(body, again) { $$('[data-gfym]', body).forEach(b => b.onclick = () => { gfDl.mode = b.dataset.gfym; again(); }); }
+
+  async function view(body) {
+    const fs = gfDl.fy || defFy(); gfDl.fy = fs;
+    body.innerHTML = `${switchHtml()}<div class="loading">Loading FY ${fyLabel(fs)}…</div>`;
+    bindSwitch(body, () => gfDownloads(body, fdMonth));
+    const d = await load(fs);
+    if (d.error) { body.innerHTML = `${switchHtml()}<p class="note warn">${esc(friendly(d.error))}</p>`; bindSwitch(body, () => gfDownloads(body, fdMonth)); return; }
+    let list = d.list;
+    if (gfDl.yq) list = list.filter(c => (c.name + ' ' + c.gstin).toLowerCase().includes(gfDl.yq.toLowerCase()));
+    if (gfDl.yf === 'missing') list = list.filter(c => { const n = rowCount(d, c); return n.have < n.need; });
+    if (gfDl.yf === 'done') list = list.filter(c => { const n = rowCount(d, c); return n.need && n.have === n.need; });
+    let tNeed = 0, tHave = 0; d.list.forEach(c => { const n = rowCount(d, c); tNeed += n.need; tHave += n.have; });
+    const nowFs = defFy() + 1, fys = []; for (let y = nowFs; y >= 2017; y--) fys.push(y);
+    const chip = (c, kind, ym) => { const v = d.get(c, kind, ym), t = kind === 'gstr1' ? '1' : '3B', nm = `${kind === 'gstr1' ? 'GSTR-1' : 'GSTR-3B'} ${monName(ym)}`;
+      if (v.st === 'na') return `<span class="gfy-c na" title="${esc(nm)}: not due (quarterly client)">·</span>`;
+      if (v.st === 'pdf') return `<button class="gfy-c ok" data-yp="${esc(v.path)}" title="${esc(nm)} — filed${v.filed ? ' ' + fmtDate(v.filed) : ''}${v.arn ? ' · ARN ' + v.arn : ''} · click to open">${t}</button>`;
+      if (v.st === 'nopdf') return `<span class="gfy-c nopdf" title="${esc(nm)} — filed${v.filed ? ' ' + fmtDate(v.filed) : ''}, PDF not in the tracker">${t}</span>`;
+      if (v.st === 'open') return `<span class="gfy-c open" title="${esc(nm)} — ${esc(v.status || 'not filed')} in the tracker">${t}</span>`;
+      return `<span class="gfy-c none" title="${esc(nm)} — nothing in the tracker yet">${t}</span>`; };
+    body.innerHTML = `${switchHtml()}
+      <div class="toolbar"><label class="small muted">Financial year <select id="gfyFy">${fys.map(y => `<option value="${y}" ${y === fs ? 'selected' : ''}>FY ${fyLabel(y)}</option>`).join('')}</select></label>
+        <label class="small muted">Show <select id="gfyF"><option value="">All clients</option><option value="missing" ${gfDl.yf === 'missing' ? 'selected' : ''}>PDFs missing</option><option value="done" ${gfDl.yf === 'done' ? 'selected' : ''}>Full year saved</option></select></label>
+        <input type="search" id="gfyQ" placeholder="Search client" value="${esc(gfDl.yq)}" aria-label="Search client"><span class="spacer"></span>
+        <span class="muted small"><b>${tHave}</b> of ${tNeed} PDFs in the tracker</span></div>
+      <div class="toolbar"><button class="btn" id="gfyWant" title="Queue the missing months in the JLR add-on">Get missing from portal</button>
+        <button class="btn" id="gfyXl">Excel list</button><button class="btn primary" id="gfyZip">Download year zip</button>
+        <span class="muted small">Buttons work on the ticked clients, or on all clients shown when none is ticked.</span></div>
+      ${d.noArchive ? '<p class="note warn small">Run <b>update-filed-archive.sql</b> in Supabase so PDFs of months with no work item (earlier years) can be kept.</p>' : ''}
+      ${list.length ? `<div class="table-wrap gfy-wrap"><table class="gfy-t"><thead><tr><th><input type="checkbox" id="gfyAll" aria-label="Tick all"></th><th>Client</th>${d.M.map(ym => `<th>${esc(MS[(+ym.slice(5) + 8) % 12])}<div class="muted small">${ym.slice(2, 4)}</div></th>`).join('')}<th>Saved</th></tr></thead><tbody>
+        ${list.map(c => { const n = rowCount(d, c); return `<tr><td><input type="checkbox" data-yt="${c.id}" aria-label="Tick ${esc(c.name)}"></td><td class="wrap"><b>${esc(c.name)}</b><div class="muted small">${esc(c.gstin)}${qrmp(c) ? ' · QRMP' : ''}</div></td>
+          ${d.M.map(ym => `<td class="gfy-m">${chip(c, 'gstr1', ym)}${chip(c, 'gstr3b', ym)}</td>`).join('')}<td class="small ${n.have === n.need ? 'ok-t' : ''}"><b>${n.have}</b>/${n.need}</td></tr>`; }).join('')}</tbody></table></div>`
+        : '<div class="empty">No clients to show.</div>'}
+      <p class="muted small"><span class="gfy-c ok">1</span> PDF in the tracker (click to open) · <span class="gfy-c nopdf">1</span> filed, PDF missing · <span class="gfy-c open">1</span> in the tracker, not filed · <span class="gfy-c none">1</span> nothing in the tracker yet · <span class="gfy-c na">·</span> not due (QRMP) — “1” = GSTR-1, “3B” = GSTR-3B.<br>
+        <b>Get missing from portal</b>: the JLR add-on (2.3.0) takes each missing month's filed PDFs with the ARN the next time staff log in to that client on the GST portal — about a minute a month. Nothing is filed or changed on the portal. Keep this tracker open in another tab so the PDFs are saved.</p>`;
+    bindSwitch(body, () => gfDownloads(body, fdMonth));
+    const again = () => view(body);
+    $('#gfyFy', body).onchange = e => { gfDl.fy = +e.target.value; again(); };
+    $('#gfyF', body).onchange = e => { gfDl.yf = e.target.value; again(); };
+    const q = $('#gfyQ', body); q.oninput = () => { clearTimeout(q._t); q._t = setTimeout(() => { gfDl.yq = q.value; again().then(() => { const n = $('#gfyQ', body); if (n) { n.focus(); n.setSelectionRange(n.value.length, n.value.length); } }); }, 350); };
+    const at = $('#gfyAll', body); if (at) at.onchange = () => $$('[data-yt]', body).forEach(x => { x.checked = at.checked; });
+    const picked = () => { const s2 = new Set($$('[data-yt]:checked', body).map(x => x.dataset.yt)); return s2.size ? list.filter(c => s2.has(c.id)) : list; };
+    body.onclick = async e => { const p = e.target.closest('[data-yp]'); if (p) ACK.open({ file_path: p.dataset.yp }); };
+    $('#gfyWant', body).onclick = () => {
+      if (!gfAddon()) return toast('The JLR add-on is not seen in this Chrome — install it from Settings → GST automation', true);
+      const L = picked(), items = []; let nc = 0;
+      L.forEach(c => { const mm = missingMonths(d, c); if (mm.length) nc++; mm.forEach(ym => items.push({ gstin: c.gstin.toUpperCase(), month: ym, filedOnly: true })); });
+      if (!items.length) return toast('Nothing missing for these clients');
+      if (!confirm(`Ask the JLR add-on for ${items.length} month${items.length === 1 ? '' : 's'} of filed PDFs for ${nc} client${nc === 1 ? '' : 's'} (FY ${fyLabel(fs)})?\n\nThen log in to each client on the GST portal in this Chrome. The add-on opens the Returns dashboard in a quiet tab and takes each month's filed GSTR-1 and GSTR-3B (about a minute a month). Nothing is filed or changed on the portal.`)) return;
+      window.postMessage({ __jlrq: 'want', items }, location.origin);
+      toast(`Queued ${items.length} months for ${nc} clients — log in to each client on the GST portal`);
+    };
+    $('#gfyXl', body).onclick = async () => { try { const X = await loadXlsx(), wb = X.utils.book_new(); X.utils.book_append_sheet(wb, X.utils.aoa_to_sheet(sheetRows(d, picked())), 'Filed returns'); X.writeFile(wb, `GST filed returns FY ${fyLabel(fs)}.xlsx`); } catch (err) { toast(friendly(err), true); } };
+    $('#gfyZip', body).onclick = async e => zipYear(d, picked(), fs, e.target);
+  }
+  function sheetRows(d, L) {
+    const R = [['Client', 'GSTIN', 'Scheme', 'Return', 'Month', 'Filed on', 'ARN', 'PDF in tracker', 'Status']];
+    L.forEach(c => d.M.forEach(ym => ['gstr1', 'gstr3b'].forEach(k => { const v = d.get(c, k, ym); if (v.st === 'na') return;
+      R.push([c.name, c.gstin, c.gst_scheme || '', k === 'gstr1' ? 'GSTR-1' : 'GSTR-3B', monName(ym), v.filed ? fmtDate(v.filed) : '', v.arn || '', v.st === 'pdf' ? 'Yes' : 'No',
+        { pdf: 'Filed', nopdf: 'Filed — PDF missing', open: v.status || 'Not filed', none: 'Not in tracker' }[v.st] || '']); })));
+    return R;
+  }
+  async function zipYear(d, L, fs, btn) {
+    const files = []; L.forEach(c => d.M.forEach(ym => ['gstr1', 'gstr3b'].forEach(k => { const v = d.get(c, k, ym); if (v.st === 'pdf') files.push({ c, ym, k, path: v.path }); })));
+    if (!files.length) return toast('No PDFs in the tracker for these clients yet — use “Get missing from portal” first', true);
+    try { await gfLoadZip(); } catch { return toast('Could not load the zip tool — check the internet connection', true); }
+    const z = new window.JSZip(), label = btn.textContent; let n = 0, done = 0; btn.disabled = true;
+    const one = async f => { const r = await sb.storage.from('filing-acks').download(f.path); done++; btn.textContent = `Preparing ${done} / ${files.length}…`;
+      if (r.error || !r.data) return; const mi = MS.indexOf(MONTHS[+f.ym.slice(5) - 1]);
+      z.file(`${safeName(f.c.name)}/${String(mi + 1).padStart(2, '0')} ${f.k === 'gstr1' ? 'GSTR-1' : 'GSTR-3B'} ${monName(f.ym)}.pdf`, r.data); n++; };
+    try {
+      for (let i = 0; i < files.length; i += 6) await Promise.all(files.slice(i, i + 6).map(one));
+      try { const X = await loadXlsx(), wb = X.utils.book_new(); X.utils.book_append_sheet(wb, X.utils.aoa_to_sheet(sheetRows(d, L)), 'Filed returns'); z.file(`Filed returns list FY ${fyLabel(fs)}.xlsx`, X.write(wb, { type: 'array', bookType: 'xlsx' })); } catch { /* list is optional */ }
+      const blob = await z.generateAsync({ type: 'blob' }), a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `GST filed returns FY ${fyLabel(fs)}${L.length === 1 ? ' - ' + safeName(L[0].name) : ''}.zip`; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+      toast(`${n} PDF${n === 1 ? '' : 's'} in the zip${n < files.length ? ` (${files.length - n} could not be read)` : ''}`);
+    } finally { btn.disabled = false; btn.textContent = label; }
+  }
+  // the add-on brought a filed PDF for a month with no work item
+  async function archive(c, it, file, label, mon) {
+    const kind = it.kind, ex = await safe(sb.from('gst_filed_pdfs').select('id,file_path').eq('client_id', c.id).eq('kind', kind).eq('month', it.month).maybeSingle());
+    if (ex.error) return { key: it.key, final: true, msg: /gst_filed_pdfs/.test(ex.error.message || '') ? `${c.name} · ${label} ${mon}: no work item — run update-filed-archive.sql to keep PDFs of earlier months` : friendly(ex.error) };
+    if (ex.data && ex.data.file_path) return { key: it.key, ok: true, final: true, msg: `${c.name} · ${label} ${mon}: filed PDF already in the tracker` };
+    const path = `${c.id}/filed-archive/${it.month}-${kind}-${Date.now()}.pdf`;
+    const up = await sb.storage.from('filing-acks').upload(path, file, { contentType: 'application/pdf', upsert: false });
+    if (up.error) return { key: it.key, msg: `${c.name} · ${label} ${mon}: ${friendly(up.error)}` };
+    const r = await safe(sb.from('gst_filed_pdfs').upsert({ client_id: c.id, kind, month: it.month, arn: it.arn || null, filed_on: ACK.date(it.arnDate || '') || null, file_name: it.name || file.name, file_path: path, created_by: me.id }, { onConflict: 'client_id,kind,month' }));
+    if (r.error) return { key: it.key, msg: friendly(r.error) };
+    cache = null;
+    return { key: it.key, ok: true, final: true, msg: `${c.name} · ${label} ${mon} filed PDF saved (filed returns archive)${it.arn ? ' · ARN ' + it.arn : ''}` };
+  }
+  return { view, switchHtml, bindSwitch, archive, months, defFy, load, sheetRows, _reset: () => { cache = null; } };
+})();
 function gfLoadZip() { return window.JSZip ? Promise.resolve() : new Promise((ok, bad) => { const s = document.createElement('script'); s.src = 'https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js'; s.onload = ok; s.onerror = bad; document.head.appendChild(s); }); }
 // "File on portal": hand the job to the JLR add-on — it opens the return on the portal, compares the figures and stops at EVC
 async function gfFileOnPortal(x, ym) {
@@ -9012,7 +9150,7 @@ const REV = (() => {
 })();
 
 // v78: this tab's code version — when a newer app is uploaded, offer Reload and block mails from old code
-const APP_VER = 'jlr-shell-v118';
+const APP_VER = 'jlr-shell-v119';
 let appStale = false;
 async function checkAppVer() {
   try { const t = await fetch('sw.js?v=' + Date.now(), { cache: 'no-store' }).then(r => r.text()); const live = (t.match(/jlr-shell-v\d+/) || [])[0];
