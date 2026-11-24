@@ -661,6 +661,7 @@ const ADDON_PDF = (() => {
       const r = await safe(sb.from('gst_applications').update({ status: it.arn ? 'submitted' : 'filled', ...(it.arn ? { arn: it.arn, submitted_on: today() } : {}), updated_by: me.id, updated_at: new Date().toISOString() }).eq('id', it.appId));
       return { key: it.key, ok: !r.error, final: true, msg: r.error ? friendly(r.error) : `${c.name} · ${it.form || 'application'} ${it.arn ? 'submitted · ARN ' + it.arn : 'filled on the portal'}` };
     }
+    if (it.type === 'year') return YR.save(c, it);   // v120: a month (or the year's ledgers) read from the portal for the year report
     if (it.type === 'info') {          // v106 stage 2: ledgers, TDS / TCS credit, applications … read from the portal
       const r = await safe(sb.from('gst_portal_info').upsert({ client_id: c.id, data: it.data || {}, fetched_at: new Date(it.at || Date.now()).toISOString(), fetched_by: me.id }, { onConflict: 'client_id' }));
       if (r.error) return { key: it.key, final: /gst_portal_info/.test(r.error.message || ''), msg: /gst_portal_info/.test(r.error.message || '') ? 'Run update-portal-info.sql in Supabase' : friendly(r.error) };
@@ -1781,11 +1782,11 @@ const GFY = (() => {
         <span class="muted small"><b>${tHave}</b> of ${tNeed} PDFs in the tracker</span></div>
       <div class="toolbar"><button class="btn" id="gfyWant" title="Queue the missing months in the JLR add-on">Get missing from portal</button>
         <button class="btn" id="gfyXl">Excel list</button><button class="btn primary" id="gfyZip">Download year zip</button>
-        <span class="muted small">Buttons work on the ticked clients, or on all clients shown when none is ticked.</span></div>
+        <span class="muted small">Buttons work on the ticked clients, or on all clients shown when none is ticked. <b>Year report</b> (each row): GSTR-1, 3B, 2B, 2A, books, ITC decisions and ledgers in one Excel.</span></div>
       ${d.noArchive ? '<p class="note warn small">Run <b>update-filed-archive.sql</b> in Supabase so PDFs of months with no work item (earlier years) can be kept.</p>' : ''}
-      ${list.length ? `<div class="table-wrap gfy-wrap"><table class="gfy-t"><thead><tr><th><input type="checkbox" id="gfyAll" aria-label="Tick all"></th><th>Client</th>${d.M.map(ym => `<th>${esc(MS[(+ym.slice(5) + 8) % 12])}<div class="muted small">${ym.slice(2, 4)}</div></th>`).join('')}<th>Saved</th></tr></thead><tbody>
+      ${list.length ? `<div class="table-wrap gfy-wrap"><table class="gfy-t"><thead><tr><th><input type="checkbox" id="gfyAll" aria-label="Tick all"></th><th>Client</th>${d.M.map(ym => `<th>${esc(MS[(+ym.slice(5) + 8) % 12])}<div class="muted small">${ym.slice(2, 4)}</div></th>`).join('')}<th>Saved</th><th></th></tr></thead><tbody>
         ${list.map(c => { const n = rowCount(d, c); return `<tr><td><input type="checkbox" data-yt="${c.id}" aria-label="Tick ${esc(c.name)}"></td><td class="wrap"><b>${esc(c.name)}</b><div class="muted small">${esc(c.gstin)}${qrmp(c) ? ' · QRMP' : ''}</div></td>
-          ${d.M.map(ym => `<td class="gfy-m">${chip(c, 'gstr1', ym)}${chip(c, 'gstr3b', ym)}</td>`).join('')}<td class="small ${n.have === n.need ? 'ok-t' : ''}"><b>${n.have}</b>/${n.need}</td></tr>`; }).join('')}</tbody></table></div>`
+          ${d.M.map(ym => `<td class="gfy-m">${chip(c, 'gstr1', ym)}${chip(c, 'gstr3b', ym)}</td>`).join('')}<td class="small ${n.have === n.need ? 'ok-t' : ''}"><b>${n.have}</b>/${n.need}</td><td><button class="btn sm" data-yr="${c.id}" title="GSTR-1, 3B, 2B, 2A, books, ITC decisions and ledgers for the year in one Excel">Year report</button></td></tr>`; }).join('')}</tbody></table></div>`
         : '<div class="empty">No clients to show.</div>'}
       <p class="muted small"><span class="gfy-c ok">1</span> PDF in the tracker (click to open) · <span class="gfy-c nopdf">1</span> filed, PDF missing · <span class="gfy-c open">1</span> in the tracker, not filed · <span class="gfy-c none">1</span> nothing in the tracker yet · <span class="gfy-c na">·</span> not due (QRMP) — “1” = GSTR-1, “3B” = GSTR-3B.<br>
         <b>Get missing from portal</b>: the JLR add-on (2.3.0) takes each missing month's filed PDFs with the ARN the next time staff log in to that client on the GST portal — about a minute a month. Nothing is filed or changed on the portal. Keep this tracker open in another tab so the PDFs are saved.</p>`;
@@ -1796,7 +1797,8 @@ const GFY = (() => {
     const q = $('#gfyQ', body); q.oninput = () => { clearTimeout(q._t); q._t = setTimeout(() => { gfDl.yq = q.value; again().then(() => { const n = $('#gfyQ', body); if (n) { n.focus(); n.setSelectionRange(n.value.length, n.value.length); } }); }, 350); };
     const at = $('#gfyAll', body); if (at) at.onchange = () => $$('[data-yt]', body).forEach(x => { x.checked = at.checked; });
     const picked = () => { const s2 = new Set($$('[data-yt]:checked', body).map(x => x.dataset.yt)); return s2.size ? list.filter(c => s2.has(c.id)) : list; };
-    body.onclick = async e => { const p = e.target.closest('[data-yp]'); if (p) ACK.open({ file_path: p.dataset.yp }); };
+    body.onclick = async e => { const p = e.target.closest('[data-yp]'); if (p) ACK.open({ file_path: p.dataset.yp });
+      const y = e.target.closest('[data-yr]'); if (y) YR.open(clientById(y.dataset.yr), fs); };
     $('#gfyWant', body).onclick = () => {
       if (!gfAddon()) return toast('The JLR add-on is not seen in this Chrome — install it from Settings → GST automation', true);
       const L = picked(), items = []; let nc = 0;
@@ -1846,6 +1848,372 @@ const GFY = (() => {
   }
   return { view, switchHtml, bindSwitch, archive, months, defFy, load, sheetRows, _reset: () => { cache = null; } };
 })();
+/* ---------- v120: GST Year report — one Excel per client per financial year ----------
+   Sources (best first): what the JLR add-on read from the portal for the year (gst_year_data), the add-on's monthly copies
+   (gst_portal_pulls), and GST review (gst_months: sales / purchase registers, 2B, decisions, draft and filed 3B).
+   The workbook layout lives in gst-year-report.xlsx (styles and every month-wise formula); this fills the rows. */
+const YR = (() => {
+  const MS = ['Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec', 'Jan', 'Feb', 'Mar'];
+  const n = v => GR.amt(v), r2 = v => GR.r2(v);             // GR is defined further down app.js — look it up when used
+  const lab = ym => `${MONTHS[+ym.slice(5) - 1]}-${ym.slice(0, 4)}`;
+  const fyL = fs => `${fs}-${String(fs + 1).slice(2)}`;
+  const key = (g, i) => `${String(g || '').toUpperCase()}|${GR.normInv(i)}`;
+  const tx = o => r2((+o.ig || 0) + (+o.cg || 0) + (+o.sg || 0) + (+o.cs || 0));
+  const prd2ym = p => /^\d{6}$/.test(p || '') ? `${p.slice(2)}-${p.slice(0, 2)}` : '';
+  function day(s) {                                     // dd-mm-yyyy · dd/mm/yyyy · yyyy-mm-dd → Date
+    if (!s) return null; if (s instanceof Date) return s;
+    let m = String(s).match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})/); if (m) return new Date(+m[3], +m[2] - 1, +m[1]);
+    m = String(s).match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? new Date(+m[1], +m[2] - 1, +m[3]) : null;
+  }
+  const unwrap = (j, test) => { let d = j; for (let k = 0; k < 4 && d && !test(d) && d.data; k++) d = d.data; return d; };
+  function taxes(o) {
+    let t = 0, ig = 0, cg = 0, sg = 0, cs = 0, rt = null; const items = o.itms || o.items;
+    if (Array.isArray(items) && items.length) items.forEach(it => { const x = it.itm_det || it; t += n(x.txval); ig += n(x.iamt); cg += n(x.camt); sg += n(x.samt); cs += n(x.csamt); if (rt == null && x.rt != null) rt = +x.rt; });
+    else { t = n(o.txval); ig = n(o.iamt); cg = n(o.camt); sg = n(o.samt); cs = n(o.csamt); rt = o.rt != null ? +o.rt : null; }
+    return { t: r2(t), ig: r2(ig), cg: r2(cg), sg: r2(sg), cs: r2(cs), rt };
+  }
+  // any GSTR-1 / GSTR-2A section (portal view call or official JSON) → flat rows
+  function rows(sec, j) {
+    const out = [];
+    const walk = (node, ctx) => {
+      if (Array.isArray(node)) { node.forEach(x => walk(x, ctx)); return; }
+      if (!node || typeof node !== 'object') return;
+      const c = { ...ctx };
+      if (node.ctin) { c.g = String(node.ctin).toUpperCase(); c.n = node.trdnm || node.cname || node.lgl_nm || ''; }
+      if (node.fldtr1 || node.cfs) { c.fd = node.fldtr1 || c.fd; c.fp = node.flprdr1 || c.fp; }
+      if (node.exp_typ) c.exp = node.exp_typ;
+      const ntNo = node.nt_num || node.ntnum, no = ntNo || node.inum;           // a note also carries the original invoice no (inum)
+      if (node.pos && !no && !node.sply_ty && !node.txval) c.pos = node.pos;
+      if (no) {
+        const t = taxes(node), note = !!ntNo, cr = note && !/^d/i.test(node.ntty || node.typ_nt || 'C'), s = cr ? -1 : 1;
+        out.push({ sec, g: c.g || '', n: c.n || '', no: String(no), d: day(node.idt || node.nt_dt || node.ntdt), ty: note ? (cr ? 'C' : 'D') : (node.inv_typ || c.exp || ''),
+          rc: node.rchrg || node.rev || '', pos: node.pos || c.pos || '', t: s * t.t, ig: s * t.ig, cg: s * t.cg, sg: s * t.sg, cs: s * t.cs, rt: t.rt,
+          sb: node.sbnum || '', sbd: day(node.sbdt), port: node.sbpcode || '', against: note ? (node.inum || '') : '', fd: day(c.fd), fp: c.fp || '' });
+        return;
+      }
+      if (node.hsn_sc) { out.push({ sec: 'HSN', tab: c.tab || '', hsn: String(node.hsn_sc), desc: node.desc || node.user_desc || '', uqc: node.uqc || '', qty: n(node.qty), rt: node.rt != null ? +node.rt : null, t: n(node.txval), ig: n(node.iamt), cg: n(node.camt), sg: n(node.samt), cs: n(node.csamt) }); return; }
+      if (node.sply_ty && (node.nil_amt != null || node.expt_amt != null || node.ngsup_amt != null)) { out.push({ sec: 'NIL', ty: node.sply_ty, v: n(node.nil_amt) + n(node.expt_amt) + n(node.ngsup_amt) }); return; }
+      if (node.txval != null && node.rt != null && (node.sply_ty || node.typ || node.pos)) { out.push({ sec: 'B2CS', pos: node.pos || '', rt: +node.rt, t: n(node.txval), ig: n(node.iamt), cg: n(node.camt), sg: n(node.samt), cs: n(node.csamt) }); return; }
+      for (const [k, v] of Object.entries(node)) if (v && typeof v === 'object') walk(v, /hsn_?b2b/i.test(k) ? { ...c, tab: 'B2B' } : /hsn_?b2c/i.test(k) ? { ...c, tab: 'B2C' } : c);
+    };
+    walk(j, {}); return out;
+  }
+  function sum1(j) {                                    // GSTR-1 summary (sec_sum) → [{nm, t, ig, cg, sg, cs, n}]
+    const d = unwrap(j, x => Array.isArray(x.sec_sum)); if (!d || !Array.isArray(d.sec_sum)) return null;
+    return d.sec_sum.map(s => ({ nm: String(s.sec_nm || '').toUpperCase(), t: n(s.ttl_tax ?? s.ttl_txval), ig: n(s.ttl_igst), cg: n(s.ttl_cgst), sg: n(s.ttl_sgst), cs: n(s.ttl_cess), n: +(s.ttl_rec || s.ttl_doc || 0) }));
+  }
+  function g3(j) {                                      // portal GSTR-3B JSON → table figures (all heads)
+    const d = unwrap(j, x => x.sup_details); if (!d || !d.sup_details) return null;
+    const S = d.sup_details, h = o => ({ t: n(o && o.txval), ig: n(o && o.iamt), cg: n(o && o.camt), sg: n(o && o.samt), cs: n(o && o.csamt) });
+    const E = d.itc_elg || {}, by = (L, ty) => h((L || []).find(x => x.ty === ty)), I = d.intr_ltfee || {};
+    let cash = null; const pc = d.tx_pmt && d.tx_pmt.pdcash;
+    if (Array.isArray(pc) && pc.length) { cash = 0; pc.forEach(p => { cash += n(p.ipd ?? p.igst_paid_cash) + n(p.cpd ?? p.cgst_paid_cash) + n(p.spd ?? p.sgst_paid_cash) + n(p.cspd ?? p.cess_paid_cash); }); }
+    const a1 = by(E.itc_avl, 'IMPG'), a1s = by(E.itc_avl, 'IMPS');
+    return { a: h(S.osup_det), b: h(S.osup_zero), c: h(S.osup_nil_exmp), d: h(S.isup_rev), e: h(S.osup_nongst),
+      a1: { ig: a1.ig + a1s.ig, cg: a1.cg + a1s.cg, sg: a1.sg + a1s.sg, cs: a1.cs + a1s.cs }, a3: by(E.itc_avl, 'ISRC'), a4: by(E.itc_avl, 'ISD'), a5: by(E.itc_avl, 'OTH'),
+      b1: by(E.itc_rev, 'RUL'), b2: by(E.itc_rev, 'OTH'), d1: by(E.itc_inelg, 'RUL'), intr: tx(h(I.intr_details)), fee: tx(h(I.ltfee_details)), cash, full: true };
+  }
+  function g3track(x) {                                 // GST review's filed 3B (t31a, itc_net, cash) — table 4 not split
+    if (!x || !x.t31a) return null; const Z = { t: 0, ig: 0, cg: 0, sg: 0, cs: 0 };
+    return { a: x.t31a, b: Z, c: Z, d: Z, e: Z, a1: Z, a3: Z, a4: Z, a5: x.itc_net || Z, b1: Z, b2: Z, d1: Z, intr: 0, fee: 0, cash: x.cash ? tx(x.cash) : null, full: false };
+  }
+
+  // ---------- load everything for one client and year ----------
+  async function load(c, fs) {
+    const M = GFY.months(fs), p1 = `${M[0]}-01`, p12 = `${M[11]}-01`;
+    const [gm, yd, pl, tk, ar, pi] = await Promise.all([
+      safe(sb.from('gst_months').select('period,sales,purchases,gstr2b,gstr1,gstr3b,summary,reco').eq('client_id', c.id).gte('period', p1).lte('period', p12)),
+      safe(sb.from('gst_year_data').select('period,data,fetched_at').eq('client_id', c.id).in('period', [...M, `FY${fyL(fs)}`])),
+      safe(sb.from('gst_portal_pulls').select('period,kind,data,pulled_at').eq('client_id', c.id).gte('period', p1).lte('period', p12)),
+      safe(sb.from('tasks').select('return_name,period,status,arn,filed_on').eq('client_id', c.id).limit(2000)),
+      safe(sb.from('gst_filed_pdfs').select('kind,month,arn,filed_on').eq('client_id', c.id).in('month', M)),
+      safe(sb.from('gst_portal_info').select('data,fetched_at').eq('client_id', c.id).maybeSingle())]);
+    const gmB = Object.fromEntries((gm.data || []).map(r => [r.period.slice(0, 7), r]));
+    const ydB = Object.fromEntries((yd.data || []).map(r => [r.period, r]));
+    const plB = {}; (pl.data || []).forEach(r => { (plB[r.period.slice(0, 7)] = plB[r.period.slice(0, 7)] || {})[r.kind] = r.data; });
+    const filed = {};
+    (tk.data || []).forEach(t => { const k = REV.kindOf(t.return_name), ym = periodToMonth(t.period); if (!k || !M.includes(ym) || t.status !== 'Filed') return; filed[`${k}|${ym}`] = { on: t.filed_on, arn: t.arn }; });
+    (ar.data || []).forEach(a => { const k = `${a.kind}|${a.month}`; if (!filed[k]) filed[k] = { on: a.filed_on, arn: a.arn }; });
+    const out = { c, fs, M, months: {}, ledgers: null, src: [], notReadYet: !!yd.error && /gst_year_data/.test(yd.error.message || '') };
+    for (const ym of M) {
+      const g = gmB[ym] || {}, y = (ydB[ym] || {}).data || {}, p = plB[ym] || {}, x = { ym, have: {} };
+      // GSTR-1
+      const secs = y.g1 && y.g1.secs || {}; x.g1 = []; Object.entries(secs).forEach(([s, j]) => { x.g1.push(...rows(s, j)); });
+      if (!x.g1.length && p.gstr1_b2b) x.g1 = rows('B2B', p.gstr1_b2b);
+      x.g1sum = (y.g1 && sum1(y.g1.summary)) || (p.gstr1 && sum1(p.gstr1)) || (g.gstr1 && g.gstr1.secs && g.gstr1.secs.map(s => ({ nm: s.nm, t: s.t * (s.sign || 1), ig: s.ig * (s.sign || 1), cg: s.cg * (s.sign || 1), sg: s.sg * (s.sign || 1), cs: s.cs * (s.sign || 1), n: +s.n || 0, signed: true }))) || null;
+      x.have.g1 = x.g1.some(r => r.sec !== 'HSN') ? 'detail' : x.g1sum ? 'summary' : '';
+      // GSTR-3B
+      x.g3 = (y.g3 && g3(y.g3)) || (p.gstr3b && g3(p.gstr3b)) || g3track(g.gstr3b);
+      x.have.g3 = x.g3 ? (x.g3.full ? 'portal' : 'tracker') : '';
+      // GSTR-2B
+      const p2 = y.g2b ? GR.parse2BJson(y.g2b) : p.gstr2b ? GR.parse2BJson(p.gstr2b) : null;
+      x.b2 = p2 && !p2.error && p2.rows.length ? p2.rows : ((g.gstr2b || {}).rows || []);
+      x.have.g2b = x.b2.length ? (p2 && p2.rows && p2.rows.length ? 'portal' : 'tracker') : '';
+      // GSTR-2A
+      const a2 = y.g2a || p.gstr2a; x.a2 = a2 ? [...rows('B2B', a2.b2b || []), ...rows('CDNR', a2.cdn || [])] : [];
+      x.have.g2a = a2 ? 'portal' : '';
+      // books, decisions, draft 3B
+      x.sales = ((g.sales || {}).rows || []); x.purch = ((g.purchases || {}).rows || []); x.reco = g.reco || {}; x.t3b = (g.summary || {}).t3b || null;
+      x.have.sales = x.sales.length ? 'yes' : ''; x.have.purch = x.purch.length ? 'yes' : ''; x.have.dec = x.t3b ? 'yes' : '';
+      x.status = y.status || null;
+      x.f1 = filed[`gstr1|${ym}`] || null; x.f3 = filed[`gstr3b|${ym}`] || null;
+      out.months[ym] = x;
+    }
+    const L = (ydB[`FY${fyL(fs)}`] || {}).data;
+    const curFs = (() => { const d = new Date(); return d.getMonth() >= 3 ? d.getFullYear() : d.getFullYear() - 1; })();
+    if (L && (L.creditTx || L.cashTx)) out.ledgers = { ...L, from: 'year' };
+    else if (pi.data && pi.data.data && fs === curFs && (pi.data.data.creditTx || pi.data.data.cashTx)) out.ledgers = { creditTx: pi.data.data.creditTx, cashTx: pi.data.data.cashTx, from: 'daily' };
+    return out;
+  }
+  // what is missing for "Get from portal"
+  const missing = D => D.M.filter(ym => { const h = D.months[ym].have; return h.g1 !== 'detail' || h.g3 !== 'portal' || !h.g2b || !h.g2a; });
+
+  // ---------- build the workbook ----------
+  async function build(D) {
+    const { c, fs, M } = D, XP = await loadXlsxPopulate();
+    const res = await fetch('gst-year-report.xlsx', { cache: 'no-store' });
+    if (!res.ok) throw new Error('The year report template (gst-year-report.xlsx) is not on the site yet');
+    const wb = await XP.fromDataAsync(await res.arrayBuffer()), S = nm => wb.sheet(nm);
+    const head = `${c.name}  ·  GSTIN ${c.gstin}  ·  FY ${fyL(fs)}`;
+    wb.sheets().forEach(ws => ws.cell('A2').value(head));
+    S('Year Summary').cell('A1').value(`Year summary — FY ${fyL(fs)}`);
+    const LBL = M.map(lab);
+    ['Year Summary', 'GSTR-1 Summary', 'Sales vs GSTR-1', 'GSTR-3B Summary', 'GSTR-2B Summary', 'GSTR-2A Summary', '2A vs 2B', 'ITC Decisions', 'GSTR-1 vs 3B', '2B vs 3B ITC',
+      'Books vs Returns', 'Reclaim Ledger', 'Due dates & Late fee'].forEach(nm => LBL.forEach((t, i) => S(nm).cell(6 + i, 1).value(t)));
+    LBL.forEach((t, i) => { S('Credit Ledger').cell(6 + i, 13).value(t); S('Cash Ledger').cell(6 + i, 15).value(t); });
+    M.forEach((ym, i) => S('Due dates & Late fee').cell(6 + i, 2).value(new Date(+ym.slice(0, 4), +ym.slice(5) - 1, 1)));
+    // one row of values / formulas ({r} = row number)
+    const put = (ws, r, vals) => vals.forEach((v, j) => { if (v === undefined) return; const cell = ws.cell(r, j + 1);
+      if (v && typeof v === 'object' && v.f) cell.formula(v.f.replace(/^=/, '').replace(/\{r\}/g, r)); else cell.value(v === '' ? undefined : v); });
+    const F = f => ({ f }), last = (r0, L) => r0 + Math.max(L.length, 1) - 1;
+    const filter = (ws, cols, r0, L) => { if (L.length) ws.range(`A${r0 - 1}:${cols}${r0 + L.length - 1}`).autoFilter(); };
+    const notes = [];
+
+    // GSTR-1 detail
+    const all1 = M.flatMap(ym => D.months[ym].g1.map(r => ({ ...r, m: lab(ym) })));
+    const B2B = all1.filter(r => r.sec === 'B2B' || r.sec === 'B2BA'), B2CL = all1.filter(r => r.sec === 'B2CL'), B2CS = all1.filter(r => r.sec === 'B2CS'),
+      CDN = all1.filter(r => /^CDN/.test(r.sec)), EXP = all1.filter(r => r.sec === 'EXP'), HSN = all1.filter(r => r.sec === 'HSN'), NIL = all1.filter(r => r.sec === 'NIL');
+    const ty1 = t => ({ SEWP: 'SEZWP', SEWOP: 'SEZWOP', R: 'R', DE: 'DE', CBW: 'R' })[String(t || 'R').toUpperCase()] || 'R';
+    let ws = S('GSTR-1 B2B');
+    B2B.forEach((x, i) => put(ws, 6 + i, [x.m, x.g, x.n, x.no, x.d, ty1(x.ty), /^y/i.test(x.rc) ? 'Y' : 'N', x.pos, '', x.rt, x.t, x.ig, x.cg, x.sg, x.cs, F('=SUM(K{r}:O{r})'), '',
+      key(x.g, x.no), F(`=IF(COUNTIF('Sales Register (Books)'!$O:$O,R{r})>0,"Yes","Not in books")`)]));
+    filter(ws, 'S', 6, B2B);
+    ws = S('GSTR-1 B2C');
+    [...B2CL.map(x => ({ ...x, typ: 'B2CL' })), ...B2CS.map(x => ({ ...x, typ: 'B2CS' }))].sort((a, b) => LBL.indexOf(a.m) - LBL.indexOf(b.m)).forEach((x, i, A) => {
+      put(ws, 6 + i, [x.m, x.typ, x.no || '', x.d || '', x.pos, x.rt, '', x.t, x.ig, x.cg, x.sg, x.cs, x.typ === 'B2CL' ? key('', x.no) : '']); if (i === A.length - 1) filter(ws, 'M', 6, A); });
+    ws = S('GSTR-1 CDN');
+    CDN.forEach((x, i) => put(ws, 6 + i, [x.m, x.sec, x.g, x.n, x.no, x.d, x.ty, x.against, x.pos, x.rt, x.t, x.ig, x.cg, x.sg, x.cs, key(x.g, x.no)])); filter(ws, 'P', 6, CDN);
+    ws = S('GSTR-1 EXP');
+    EXP.forEach((x, i) => put(ws, 6 + i, [x.m, /WOPAY/i.test(x.ty) ? 'WOPAY' : 'WPAY', x.no, x.d, x.port, x.sb, x.sbd, '', x.rt, x.t, x.ig, x.cs, key('', x.no)])); filter(ws, 'M', 6, EXP);
+    // HSN month-wise + year block
+    ws = S('GSTR-1 HSN');
+    HSN.forEach((x, i) => put(ws, 6 + i, [x.m, x.tab || '', x.hsn, x.desc, x.uqc, x.qty, x.rt, x.t, x.ig, x.cg, x.sg, x.cs]));
+    const hl = last(6, HSN); filter(ws, 'L', 6, HSN);
+    const uq = [...new Map(HSN.map(x => [x.hsn + '|' + x.rt, x])).values()].sort((a, b) => a.hsn.localeCompare(b.hsn) || a.rt - b.rt);
+    uq.forEach((x, i) => { const r = 6 + i, crit = `$C$6:$C$${hl},"${x.hsn}",$G$6:$G$${hl},P${r}`;
+      [[14, x.hsn], [15, x.desc], [16, x.rt]].forEach(([col, v]) => ws.cell(r, col).value(v));
+      ws.cell(r, 17).formula(`SUMIFS($F$6:$F$${hl},${crit})`); ['H', 'I', 'J', 'K'].forEach((col, k) => ws.cell(r, 18 + k).formula(`SUMIFS($${col}$6:$${col}$${hl},${crit})`));
+      ws.cell(r, 22).formula(`SUM(S${r}:U${r})`); });
+    if (uq.length) { const tr = 6 + uq.length; ws.cell(tr, 14).value('Total'); for (let col = 17; col <= 22; col++) ws.cell(tr, col).formula(`SUM(${String.fromCharCode(64 + col)}6:${String.fromCharCode(64 + col)}${tr - 1})`); }
+
+    // GSTR-1 Summary: months with only the summary (no invoice detail) get values; nil from NIL section or summary; filed date / ARN
+    ws = S('GSTR-1 Summary');
+    M.forEach((ym, i) => { const x = D.months[ym], r = 6 + i;
+      const nil = NIL.filter(z => z.m === lab(ym)).reduce((a, z) => a + z.v, 0) || ((x.g1sum || []).find(s => s.nm === 'NIL') || {}).t || 0;
+      ws.cell(r, 11).value(r2(nil) || undefined);
+      if (x.f1) { if (x.f1.on) ws.cell(r, 19).value(day(x.f1.on)); if (x.f1.arn) ws.cell(r, 20).value(x.f1.arn); }
+      if (x.have.g1 === 'summary') {
+        const S1 = nm => (x.g1sum || []).filter(s => s.nm === nm), sm = (L, f) => r2(L.reduce((a, s) => a + (+s[f] || 0), 0));
+        const sg = (nm, L) => { const neg = /^CDN|TXPD/.test(nm) && !L.some(s => s.signed); return neg ? -1 : 1; };
+        const exp = S1('EXP'), expW = exp.filter(s => s.ig > 0), expO = exp.filter(s => !(s.ig > 0));
+        const cols = { 2: S1('B2B'), 6: S1('B2CL'), 7: S1('B2CS'), 8: expW, 9: expO };
+        [3, 4, 5].forEach(col => ws.cell(r, col).value(0));
+        Object.entries(cols).forEach(([col, L]) => ws.cell(r, +col).value(sm(L, 't')));
+        const cd = [...S1('CDNR'), ...S1('CDNUR')]; ws.cell(r, 10).value(r2(cd.reduce((a, s) => a + sg(s.nm, [s]) * s.t, 0)));
+        const used = ['B2B', 'B2CL', 'B2CS', 'EXP', 'CDNR', 'CDNUR'];
+        ['ig', 'cg', 'sg', 'cs'].forEach((f, k) => ws.cell(r, 13 + k).value(r2((x.g1sum || []).filter(s => used.includes(s.nm)).reduce((a, s) => a + sg(s.nm, [s]) * (+s[f] || 0), 0))));
+        ws.cell(r, 18).value([...S1('B2B'), ...S1('B2CL'), ...S1('EXP')].reduce((a, s) => a + (s.n || 0), 0));
+        notes.push(`GSTR-1 ${lab(ym)}: totals only (invoice list not read)`);
+      }
+    });
+
+    // Sales register (books)
+    const SR = M.flatMap(ym => GR.mergeDocs(D.months[ym].sales.filter(r => r.t || tx(r))).map(r => ({ ...r, m: lab(ym) })));
+    ws = S('Sales Register (Books)');
+    const srTy = r => r.nil ? 'NIL' : r.cn || (r.t || 0) < 0 ? 'CN' : r.exp ? 'EXP' : GR.gstinOk(r.g) ? 'B2B' : 'B2C';
+    const G1K = ["'GSTR-1 B2B'!$R:$R", "'GSTR-1 EXP'!$M:$M", "'GSTR-1 CDN'!$P:$P", "'GSTR-1 B2C'!$M:$M"], G1T = ["'GSTR-1 B2B'!$K:$K", "'GSTR-1 EXP'!$J:$J", "'GSTR-1 CDN'!$K:$K", "'GSTR-1 B2C'!$H:$H"];
+    SR.forEach((x, i) => { const ty = srTy(x), rt = x.t ? Math.round(Math.abs(tx(x) / x.t) * 1000) / 10 : '';
+      put(ws, 6 + i, [x.m, ty, GR.gstinOk(x.g) ? x.g : '', x.n || '', x.i, day(x.d), '', rt, x.t, x.ig, x.cg, x.sg, x.cs, F('=SUM(J{r}:M{r})'), key(GR.gstinOk(x.g) ? x.g : '', x.i),
+        F('=' + G1K.map(k => `COUNTIF(${k},O{r})`).join('+')), F('=IF(P{r}=0,"",' + G1T.map((t, k) => `SUMIFS(${t},${G1K[k]},O{r})`).join('+') + ')'), F('=IF(P{r}=0,"",I{r}-Q{r})'),
+        F('=IF(P{r}=0,IF(OR(B{r}="B2C",B{r}="NIL"),"B2C — month total checked","Not in GSTR-1"),IF(ABS(R{r})>1,"Amount differs","Matched"))')]); });
+    filter(ws, 'S', 6, SR);
+
+    // GSTR-3B Summary
+    ws = S('GSTR-3B Summary');
+    M.forEach((ym, i) => { const x = D.months[ym], g = x.g3, r = 6 + i; if (!g) return;
+      const v = [g.a.t, g.a.ig, g.a.cg, g.a.sg, g.a.cs, g.b.t, g.b.ig, g.c.t, g.d.t, tx(g.d), g.e.t, tx(g.a1), tx(g.a3), tx(g.a4), tx(g.a5), tx(g.b1), tx(g.b2)];
+      v.forEach((val, k) => ws.cell(r, 2 + k).value(r2(val)));
+      ws.cell(r, 20).value(tx(g.d1)); ws.cell(r, 24).value(g.intr || 0); ws.cell(r, 25).value(g.fee || 0);
+      if (g.cash != null) { const pay = tx(g.a) + g.b.ig + g.b.cs + tx(g.d); ws.cell(r, 22).value(r2(Math.max(0, pay - g.cash))); }
+      else { ws.cell(r, 22).value(undefined); ws.cell(r, 23).value(undefined); notes.push(`GSTR-3B ${lab(ym)}: payment (cash / ITC) not read`); }
+      if (!g.full) notes.push(`GSTR-3B ${lab(ym)}: from GST review — table 4 shown as net ITC in 4A(5)`);
+      if (x.f3) { if (x.f3.on) ws.cell(r, 27).value(day(x.f3.on)); if (x.f3.arn) ws.cell(r, 28).value(x.f3.arn); }
+    });
+
+    // GSTR-2B invoices + supplier-wise
+    const B2 = M.flatMap(ym => D.months[ym].b2.map(x => ({ ...x, m: lab(ym) })));
+    ws = S('GSTR-2B Invoices');
+    const dec2 = {};       // decision for 2B bills not in books (from GST review)
+    M.forEach(ym => { const x = D.months[ym]; x.b2.forEach(b => { const a = GR.effA(x.reco, GR.docKey(b)); if (a) dec2[key(b.g, b.i)] = a; }); });
+    const decName = a => ({ addbooks: 'Claim (missed in books)', take: 'Claim (client confirmed)', hold: 'Temporary reversal', skip: 'Temporary reversal', notours: 'Not our purchase', notmine: 'Not our purchase', block: 'Blocked 17(5)', reject: 'Temporary reversal', acc2b: 'Claim as per 2B', ignore: 'Claim as per 2B', link: 'Claim', fixbooks: 'Claim' })[a] || '';
+    B2.forEach((x, i) => { const k = key(x.g, x.i), sec = String(x.src || 'B2B').replace(/A$/, '').replace('IMPGSEZ', 'IMPG');
+      put(ws, 6 + i, [x.m, sec, x.g === 'IMPORT' ? '' : x.g, x.n, day(x.fd), x.fp || '', x.i, day(x.d), x.rc ? 'Y' : 'N', x.na ? 'N' : 'Y', x.rs || '', x.t, x.ig, x.cg, x.sg, x.cs, F('=SUM(M{r}:P{r})'), k,
+        F(`=IF(OR(B{r}="IMPG",B{r}="ISD"),"—",IF(COUNTIF('Purchase Register (Books)'!$O:$O,R{r})>0,"Yes","Not in books — ask client"))`),
+        dec2[k] ? decName(dec2[k]) : F(`=IFERROR(INDEX('Purchase Register (Books)'!$L:$L,MATCH(R{r},'Purchase Register (Books)'!$O:$O,0)),"")`)]); });
+    filter(ws, 'T', 6, B2);
+    ws = S('GSTR-2B Supplier-wise');
+    const sup = [...new Map(B2.filter(x => x.g && x.g !== 'IMPORT').map(x => [x.g, x.n])).entries()]
+      .map(([g, nm]) => ({ g, nm, t: B2.filter(x => x.g === g).reduce((a, x) => a + tx(x), 0) })).sort((a, b) => b.t - a.t);
+    const sl = 5 + sup.length;
+    sup.forEach((s, i) => put(ws, 6 + i, [s.g, s.nm, F(`=COUNTIFS('GSTR-2B Invoices'!$C:$C,$A{r})`), ...'LMNO'.split('').map(col => F(`=SUMIFS('GSTR-2B Invoices'!$${col}:$${col},'GSTR-2B Invoices'!$C:$C,$A{r})`)),
+      F('=SUM(E{r}:G{r})'), F(`=SUMIFS('GSTR-2B Invoices'!$Q:$Q,'GSTR-2B Invoices'!$C:$C,$A{r},'GSTR-2B Invoices'!$J:$J,"N")`), F(`=IF(SUM($H$6:$H$${sl})=0,0,H{r}/SUM($H$6:$H$${sl}))`)]));
+    if (sup.length) { const tr = sl + 1; ws.cell(tr, 1).value('Total');
+      for (let col = 3; col <= 10; col++) ws.cell(tr, col).formula(`SUM(${String.fromCharCode(64 + col)}6:${String.fromCharCode(64 + col)}${sl})`); }
+
+    // GSTR-2A
+    const A2 = M.flatMap(ym => D.months[ym].a2.map(x => ({ ...x, m: lab(ym) })));
+    ws = S('GSTR-2A Invoices');
+    A2.forEach((x, i) => put(ws, 6 + i, [x.m, x.sec, x.g, x.n, x.fd, x.no, x.d, x.t, x.ig, x.cg, x.sg, x.cs, F('=SUM(I{r}:L{r})'), key(x.g, x.no)])); filter(ws, 'N', 6, A2);
+    // 2A vs 2B document match
+    ws = S('2A vs 2B');
+    const docs = new Map(); A2.forEach(x => { const k = key(x.g, x.no); if (!docs.has(k)) docs.set(k, [x.g, x.n, x.no]); });
+    B2.filter(x => /^(B2B|CDNR)/.test(x.src || 'B2B')).forEach(x => { const k = key(x.g, x.i); if (!docs.has(k)) docs.set(k, [x.g, x.n, x.i]); });
+    const DL = [...docs.entries()], dlast = 21 + DL.length;
+    DL.forEach(([k, [g, nm, no]], i) => put(ws, 22 + i, [k, g, nm, no, F(`=IFERROR(INDEX('GSTR-2A Invoices'!$A:$A,MATCH($A{r},'GSTR-2A Invoices'!$N:$N,0)),"—")`),
+      F(`=IFERROR(INDEX('GSTR-2B Invoices'!$A:$A,MATCH($A{r},'GSTR-2B Invoices'!$R:$R,0)),"—")`), F(`=SUMIFS('GSTR-2A Invoices'!$M:$M,'GSTR-2A Invoices'!$N:$N,$A{r})`),
+      F(`=SUMIFS('GSTR-2B Invoices'!$Q:$Q,'GSTR-2B Invoices'!$R:$R,$A{r})`), F('=G{r}-H{r}'),
+      F('=IF(E{r}="—","Only in 2B",IF(F{r}="—","Only in 2A — not in any 2B yet (ITC at risk)",IF(ABS(I{r})>1,"Amount differs — supplier amended",IF(E{r}=F{r},"Matched","Matched — in a later 2B (supplier filed late)"))))')]));
+    for (let i = 0; i < 5; i++) ws.cell(6 + i, 8).formula(`COUNTIF($J$22:$J$${Math.max(22, dlast)},G${6 + i})`);
+    if (DL.length) ws.range(`A21:J${dlast}`).autoFilter();
+
+    // Purchase register (books) with the decision of every bill
+    ws = S('Purchase Register (Books)');
+    const PR = [], held = [], booked = new Set();
+    M.forEach(ym => { const x = D.months[ym]; if (!x.purch.length) return;
+      const P = GR.mergeDocs(x.purch.filter(b => tx(b) !== 0 || b.t)), its = x.b2.length ? GR.reconcile(P, x.b2, 10, { match: c.reco_match }).items : [];
+      const byB = new Map(its.filter(it => it.b).map(it => [it.b, it]));
+      P.forEach(b => { const it = byB.get(b) || {}, xx = it.x, a = GR.effA(x.reco, GR.docKey(b)) || (xx ? GR.effA(x.reco, GR.docKey(xx)) : '');
+        let dec = 'Claim', rev = '', why = '';
+        if (b.rc || (xx && xx.rc)) dec = 'RCM';
+        else if (a === 'block') { dec = 'Blocked 17(5)'; why = 'Blocked credit u/s 17(5) — reversed in 4(B)(1)'; }
+        else if (a === 'noclaim') { dec = 'Do not claim'; why = 'Marked “do not claim” in GST review'; }
+        else if (it.st === 'not_avail' || (xx && xx.na)) { dec = 'Ineligible — not available in 2B'; why = xx && xx.rs ? xx.rs : ''; }
+        else if (it.st === 'books_only' || !x.b2.length) { dec = x.b2.length ? 'Wait — not in 2B' : 'Claim'; }
+        else if (a === 'reject' || ((it.st === 'gstin_diff' || it.st === 'suggest') && !['link', 'fixbooks'].includes(a))) { dec = 'Temporary reversal'; rev = lab(ym); why = 'Held in GST review — not taken this month'; }
+        const kk = xx ? key(xx.g, xx.i) : key(b.g, b.i);
+        PR.push([lab(ym), b.g, b.n, b.i, day(b.d), b.t, b.ig, b.cg, b.sg, b.cs, F('=SUM(G{r}:J{r})'), dec, rev, '', kk,
+          F(`=IFERROR(INDEX('GSTR-2B Invoices'!$A:$A,MATCH(O{r},'GSTR-2B Invoices'!$R:$R,0)),"—")`), F(`=SUMIFS('GSTR-2B Invoices'!$Q:$Q,'GSTR-2B Invoices'!$R:$R,O{r})`),
+          F('=IF(P{r}="—","",K{r}-Q{r})'), F('=IF(P{r}="—","Not in 2B — ask supplier",IF(ABS(R{r})>1,"Amount differs",IF(P{r}=A{r},"Matched","Matched — in a later 2B")))'), why]);
+        booked.add(key(b.g, b.i));
+        if (dec === 'Temporary reversal') held.push({ n: b.n, g: b.g, no: b.i, d: day(b.d), why, m: lab(ym), ig: b.ig, cg: b.cg, sg: b.sg, t: tx(b) });
+      });
+      // 2B bills not in books that were held (not taken this month)
+      its.filter(it => it.st === '2b_only' && it.x && !it.x.rc && !it.x.na && !booked.has(key(it.x.g, it.x.i))).forEach(it => { const a = GR.effA(x.reco, GR.docKey(it.x));
+        if (['hold', 'skip', 'reject', ''].includes(a) && tx(it.x) > 0) held.push({ n: it.x.n, g: it.x.g, no: it.x.i, d: day(it.x.d), why: a ? 'Kept pending in GST review (2B, not in books)' : 'In 2B, not in books — not decided', m: lab(ym), ig: it.x.ig, cg: it.x.cg, sg: it.x.sg, t: tx(it.x) }); });
+    });
+    PR.forEach((v, i) => put(ws, 6 + i, v)); filter(ws, 'T', 6, PR);
+    // temporary reversal register (values; the tracker does not tie a later reclaim to one bill)
+    ws = S('Temp Reversal Register');
+    held.forEach((h, i) => put(ws, 6 + i, [h.n, h.g, h.no, h.d, h.why, h.m, h.ig, h.cg, h.sg, h.t, '', F('=IF(K{r}="","Still reversed","Reclaimed")'), F('=IF(K{r}="",J{r},0)')]));
+    const trr = 6 + held.length; ws.cell(trr, 1).value('Total');
+    ['G', 'H', 'I', 'J', 'M'].forEach(col => ws.cell(`${col}${trr}`).formula(held.length ? `SUM(${col}6:${col}${trr - 1})` : '0'));
+    S('Reclaim Ledger').cell('L7').formula(`'Temp Reversal Register'!M${trr}`);
+    // decisions per month from GST review (draft 3B): blocked 4B(1), temporary 4B(2), reclaimed 4D(1)
+    M.forEach((ym, i) => { const t = D.months[ym].t3b, r = 6 + i; if (!t) return;
+      ws = S('ITC Decisions'); ws.cell(r, 3).value(tx(t.B1 || {})); ws.cell(r, 4).value(tx(t.B2 || {})); ws.cell(r, 5).value(tx(t.D1 || {}));
+      ws = S('Reclaim Ledger'); ws.cell(r, 3).value(tx(t.B2 || {})); ws.cell(r, 4).value(tx(t.D1 || {})); });
+    S('Reclaim Ledger').cell('B6').value(0);
+
+    // ledgers
+    const L = D.ledgers;
+    if (L) {
+      const cr = ((L.creditTx || {}).tr || []), ca = ((L.cashTx || {}).tr || []), inFy = d => d && d >= new Date(fs, 3, 1) && d < new Date(fs + 1, 3, 1);
+      const hd = x => ({ ig: n(x.igstTaxAmt), cg: n(x.cgstTaxAmt), sg: n(x.sgstTaxAmt), cs: n(x.cessTaxAmt) });
+      const CR = cr.map(x => ({ ...x, D: day(x.dt) })).filter(x => inFy(x.D)), isDr = x => /^d/i.test(String(x.tr_typ || '')) || /debit|utili[sz]/i.test(x.desc || '');
+      ws = S('Credit Ledger');
+      if (CR.length) {
+        const f = CR[0], h = hd(f), s = isDr(f) ? 1 : -1, bal = k => n(f[`${k}TaxBal`]), hasBal = ['igst', 'cgst', 'sgst'].some(k => f[`${k}TaxBal`] != null);
+        const open = hasBal ? { ig: r2(bal('igst') + s * h.ig), cg: r2(bal('cgst') + s * h.cg), sg: r2(bal('sgst') + s * h.sg), cs: r2(bal('cess') + s * h.cs) } : { ig: 0, cg: 0, sg: 0, cs: 0 };
+        if (!hasBal) notes.push('Credit ledger: opening balance not given by the portal — shown as 0');
+        const R = [[new Date(fs, 3, 1), '—', '', 'Opening balance', 'Opening', open.ig, open.cg, open.sg, open.cs]];
+        CR.forEach(x => { const a = hd(x), ym = prd2ym(x.ret_period) || ''; R.push([x.D, x.ref_no || '', ym ? lab(ym) : '', x.desc || '', isDr(x) ? 'Debit' : 'Credit', a.ig, a.cg, a.sg, a.cs]); });
+        R.forEach((v, i) => put(ws, 6 + i, [...v, F('=SUM(F{r}:I{r})'), i === 0 ? F('=J{r}') : F(`=K${5 + i}+IF(E{r}="Debit",-J{r},J{r})`)]));
+        ws.range(`A5:K${5 + R.length}`).autoFilter();
+      } else notes.push('Credit ledger: no entries read for this year');
+      const CA = ca.map(x => ({ ...x, D: day(x.dt) })).filter(x => inFy(x.D));
+      ws = S('Cash Ledger');
+      if (CA.length) {
+        const hv = (x, h, k) => n((x[h] || {})[k]), dep = x => /^c/i.test(String(x.tr_typ || '')) || /deposit|challan|cin/i.test(x.desc || '') && !/debit/i.test(x.desc || '');
+        CA.forEach((x, i) => { const d0 = new Date(x.D); d0.setDate(1); d0.setMonth(d0.getMonth() - 1);
+          const ym = prd2ym(x.ret_period || x.rtn_prd) || iso(d0).slice(0, 7), ty = dep(x) ? 'Deposit' : /drc/i.test(x.desc || '') ? 'Debit DRC-03' : 'Debit 3B';
+          const H = ['igst', 'cgst', 'sgst', 'cess'], tax0 = H.map(h => hv(x, h, 'tx')), intr = H.reduce((a, h) => a + hv(x, h, 'intr'), 0), fee = H.reduce((a, h) => a + hv(x, h, 'fee'), 0), tot = n(x.tot_tr_amt ?? x.tot_amt);
+          const split = tax0.some(Boolean) || intr || fee;
+          put(ws, 6 + i, [x.D, x.ref_no || '', lab(ym), x.desc || '', ty, ...(split ? [...tax0, intr, fee, F('=SUM(F{r}:K{r})')] : [0, 0, 0, 0, 0, 0, tot]),
+            i === 0 ? F('=IF(E{r}="Deposit",L{r},-L{r})') : F(`=M${5 + i}+IF(E{r}="Deposit",L{r},-L{r})`)]); });
+        ws.range(`A5:M${5 + CA.length}`).autoFilter();
+      } else notes.push('Cash ledger: no entries read for this year');
+    } else notes.push('Ledgers: not read from the portal for this year');
+
+    // contents: when and from what
+    const src = M.map(ym => { const h = D.months[ym].have; return `${lab(ym)}: GSTR-1 ${h.g1 || '—'}, 3B ${h.g3 || '—'}, 2B ${h.g2b || '—'}, 2A ${h.g2a || '—'}, books ${h.sales ? 'sales' : ''}${h.sales && h.purch ? '+' : ''}${h.purch ? 'purchases' : ''}${!h.sales && !h.purch ? '—' : ''}`; });
+    S('Contents').cell('A3').value(`Made by the JLR tracker on ${new Date().toLocaleDateString('en-IN')} by ${me.full_name || me.email}. ${notes.length ? 'Gaps: ' + [...new Set(notes)].slice(0, 12).join(' · ') + (notes.length > 12 ? ' …' : '') : 'All months read.'}`);
+    const cs = S('Contents'); let r = cs.usedRange().endCell().rowNumber() + 2;
+    cs.cell(r, 1).value('What was available'); src.forEach((t, i) => cs.cell(r + 1 + i, 2).value(t));
+    wb.activeSheet('Contents');
+    const blob = await wb.outputAsync(), a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = `GST Year Report ${(c.client_code || c.name).replace(/[\\/:*?"<>|]+/g, ' ')} FY ${fyL(fs)}.xlsx`; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    return { notes, rows: { sales: SR.length, purchases: PR.length, b2b: B2B.length, g2b: B2.length, g2a: A2.length } };
+  }
+
+  // ---------- the window ----------
+  async function open(c, fs0) {
+    if (!c || !c.gstin) return toast('This client has no GSTIN', true);
+    let fs = fs0 || GFY.defFy();
+    const m = modal(`GST Year report — ${c.name}`, '<div class="loading">Checking what is in the tracker…</div>', { wide: true, saveText: 'Download Year report', onSave: async () => {
+      try { toast('Making the year report…'); const D = await load(c, fs), r = await build(D);
+        toast(`Year report downloaded${r.notes.length ? ' — see Contents for months not complete' : ''}`); } catch (e) { toast(friendly(e), true); }
+      return false; } });
+    const body = $('.modal-body', m.el);
+    const draw = async () => {
+      body.innerHTML = '<div class="loading">Checking what is in the tracker…</div>';
+      const D = await load(c, fs), miss = missing(D), fys = []; for (let y = GFY.defFy() + 1; y >= 2017; y--) fys.push(y);
+      const mark = v => v === 'detail' || v === 'portal' || v === 'yes' ? '<span class="ok-t">✓</span>' : v === 'summary' ? '<span class="warn-t" title="Totals only">totals</span>' : v === 'tracker' ? '<span class="warn-t" title="From GST review">GST review</span>' : '<span class="muted">—</span>';
+      body.innerHTML = `${D.notReadYet ? '<p class="note warn small">Run <b>update-year-report.sql</b> in Supabase so the add-on can keep a whole year from the portal.</p>' : ''}
+        <div class="toolbar"><label class="small muted">Financial year <select id="yrFy">${fys.map(y => `<option value="${y}" ${y === fs ? 'selected' : ''}>FY ${fyL(y)}</option>`).join('')}</select></label><span class="spacer"></span>
+          <button class="btn" id="yrGet" ${miss.length ? '' : 'disabled'}>Get ${miss.length ? miss.length + ' month' + (miss.length === 1 ? '' : 's') : 'nothing'} from the portal</button></div>
+        <div class="table-wrap"><table class="yr-av"><thead><tr><th>Month</th><th>GSTR-1</th><th>GSTR-3B</th><th>GSTR-2B</th><th>GSTR-2A</th><th>Sales register</th><th>Purchase register</th><th>ITC decisions</th></tr></thead><tbody>
+          ${D.M.map(ym => { const h = D.months[ym].have; return `<tr><td><b>${lab(ym)}</b></td><td>${mark(h.g1)}</td><td>${mark(h.g3)}</td><td>${mark(h.g2b)}</td><td>${mark(h.g2a)}</td><td>${mark(h.sales)}</td><td>${mark(h.purch)}</td><td>${mark(h.dec)}</td></tr>`; }).join('')}
+          <tr><td><b>Ledgers</b></td><td colspan="7">${D.ledgers ? `<span class="ok-t">✓</span> credit and cash ledger entries ${D.ledgers.from === 'daily' ? '(daily read, this year)' : ''}` : '<span class="muted">— not read for this year</span>'}</td></tr></tbody></table></div>
+        <p class="muted small"><b>Get from the portal</b>: the JLR add-on (2.4.0) reads GSTR-1 (all tables), GSTR-3B, GSTR-2B, GSTR-2A and the ledgers for these months the next time someone logs in to ${esc(c.name)} on the GST portal in this Chrome — about a minute a month. Keep this tracker open in another tab so it is saved.
+          Sales / purchase registers and ITC decisions come from GST review. The report is made with whatever is here now; Contents lists any month that is not complete.</p>`;
+      $('#yrFy', body).onchange = e => { fs = +e.target.value; draw(); };
+      $('#yrGet', body).onclick = () => {
+        if (!gfAddon()) return toast('The JLR add-on is not seen in this Chrome — install it from Settings → GST automation', true);
+        window.postMessage({ __jlrq: 'year', items: [{ gstin: c.gstin.toUpperCase(), fy: fyL(fs), months: miss, ledgers: !D.ledgers || D.ledgers.from !== 'year' }] }, location.origin);
+        toast(`Asked the add-on for ${miss.length} month${miss.length === 1 ? '' : 's'} — log in to ${c.name} on the GST portal`);
+      };
+    };
+    await draw();
+  }
+  // the add-on brought one month (or the year's ledgers) from the portal
+  async function save(c, it) {
+    const r = await safe(sb.from('gst_year_data').upsert({ client_id: c.id, period: it.period, data: it.data || {}, fetched_at: new Date(it.at || Date.now()).toISOString(), fetched_by: me.id }, { onConflict: 'client_id,period' }));
+    if (r.error) return { key: it.key, final: /gst_year_data/.test(r.error.message || ''), msg: /gst_year_data/.test(r.error.message || '') ? 'Run update-year-report.sql in Supabase' : friendly(r.error) };
+    return { key: it.key, ok: true, final: true, quiet: true, msg: `${c.name} · ${it.period} saved for the year report` };
+  }
+  return { load, build, open, save, rows, g3, sum1, missing };
+})();
+
 function gfLoadZip() { return window.JSZip ? Promise.resolve() : new Promise((ok, bad) => { const s = document.createElement('script'); s.src = 'https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js'; s.onload = ok; s.onerror = bad; document.head.appendChild(s); }); }
 // "File on portal": hand the job to the JLR add-on — it opens the return on the portal, compares the figures and stops at EVC
 async function gfFileOnPortal(x, ym) {
@@ -5315,7 +5683,8 @@ const GR = (() => {
       return { t, ig, cg, sg, cs }; };
     const add = (sup, doc, sec, num, neg) => { const x = taxes(doc), s = neg ? -1 : 1;
       out.push({ g: String(sup.ctin || '').toUpperCase(), n: sup.trdnm || '', i: String(num ?? ''), d: toDate(doc.dt || doc.ntdt || doc.boedt), t: r2(s * x.t), ig: r2(s * x.ig), cg: r2(s * x.cg), sg: r2(s * x.sg), cs: r2(s * x.cs),
-        v: r2(s * amt(doc.val)), cn: neg || undefined, rc: /^y/i.test(doc.rev || '') || undefined, na: /^n/i.test(doc.itcavl || '') || undefined, src: sec }); };
+        v: r2(s * amt(doc.val)), cn: neg || undefined, rc: /^y/i.test(doc.rev || '') || undefined, na: /^n/i.test(doc.itcavl || '') || undefined, src: sec,
+        fd: sup.supfildt || undefined, fp: sup.supprd || undefined, rs: doc.rsn || undefined }); };
     const arr = k => Array.isArray(dd[k]) ? dd[k] : Array.isArray(dd[k.toUpperCase()]) ? dd[k.toUpperCase()] : [];
     arr('b2b').forEach(s => (s.inv || []).forEach(v => add(s, v, 'B2B', v.inum)));
     arr('b2ba').forEach(s => (s.inv || []).forEach(v => add(s, v, 'B2BA', v.inum || v.oinum)));
@@ -9150,7 +9519,7 @@ const REV = (() => {
 })();
 
 // v78: this tab's code version — when a newer app is uploaded, offer Reload and block mails from old code
-const APP_VER = 'jlr-shell-v119';
+const APP_VER = 'jlr-shell-v120';
 let appStale = false;
 async function checkAppVer() {
   try { const t = await fetch('sw.js?v=' + Date.now(), { cache: 'no-store' }).then(r => r.text()); const live = (t.match(/jlr-shell-v\d+/) || [])[0];
